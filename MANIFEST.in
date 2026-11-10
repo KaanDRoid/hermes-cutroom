@@ -1,0 +1,4 @@
+include plugin.yaml
+include __init__.py
+include LICENSE
+include README.md

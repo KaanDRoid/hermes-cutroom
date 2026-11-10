@@ -1,0 +1,12 @@
+name: cutroom
+version: 0.1.0
+description: Local, non-destructive silence editing with exact-plan review and FFmpeg rendering.
+author: Kaan
+license: MIT
+requires_hermes: ">=0.23.0"
+provides_tools:
+  - cutroom_inspect
+  - cutroom_draft
+  - cutroom_review
+  - cutroom_render
+provides_hooks: []
