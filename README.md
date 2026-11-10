@@ -1,6 +1,8 @@
 # Cutroom
 
-Local, non-destructive silence editing for Hermes Agent.
+Local-first, non-destructive video editing for Hermes Agent.
+
+**Development checkpoint, not a finished release.** Start with the [documentation index](docs/README.md), [current status](docs/status.md) and [collaboration guide](docs/collaboration.md).
 
 Turn a local recording into an inspectable edit plan, review every cut, then render exactly that plan with FFmpeg. Source media stays local and is never overwritten. This is an early working core, not a complete video editor.
 
@@ -9,7 +11,7 @@ Turn a local recording into an inspectable edit plan, review every cut, then ren
 - Hermes Agent 0.23.0 or later for native tool registration.
 - Python 3.11+.
 - `ffmpeg` and `ffprobe` in PATH, with `libx264` and AAC encoding support.
-- A local video file. No API keys, accounts or Python runtime dependencies.
+- A local video file. The core needs no API keys or Python runtime dependencies; advanced modules use the optional environments described in [development setup](docs/development.md).
 - An output filesystem with hard-link support (for example NTFS or ext4), used for atomic no-overwrite publication. FAT/exFAT outputs are not currently supported.
 
 Verified on native Windows with FFmpeg 9.0.2 and Python 3.14. Other platforms are not yet exercised.
@@ -78,7 +80,7 @@ The plugin reads the video path explicitly supplied, launches local FFmpeg/ffpro
 
 ## Current boundaries
 
-Not implemented: Whisper transcription, filler-word detection, word-aligned cuts, gaze detection, background segmentation, captions, brand templates, motion graphics, 4K export presets, native Desktop editing pane, cloud upload or publishing. Do not imply these exist in a demo.
+Advanced speech, vision, rendering and optional-integration modules now exist, with their own tests. They are **not yet a completed end-to-end Studio**: advanced job routing, native playback/action/approval controls, fresh-install acceptance and live external-service acceptance remain open. Hooks and captions are extractive drafts, gaze is a heuristic, and background removal uses MediaPipe rather than SAM. See [current status](docs/status.md) and [remaining work](docs/roadmap.md) for the exact boundary.
 
 ## Tests
 
