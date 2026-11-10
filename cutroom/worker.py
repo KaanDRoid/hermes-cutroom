@@ -10,6 +10,15 @@ def execute(operation, arguments):
         from .media import probe
 
         return probe(**arguments)
+    if operation == "silence":
+        from .media import detect_silences, probe
+        from .plan import build_plan
+
+        options = dict(arguments)
+        source = options.pop("source")
+        padding = options.pop("padding", 0.12)
+        silences = detect_silences(source, **options)
+        return build_plan(source, probe(source), silences, padding=padding)
     raise ValueError("Unsupported engine operation: " + operation)
 
 
