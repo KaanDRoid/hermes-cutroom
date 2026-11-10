@@ -1,4 +1,6 @@
-# Cutroom: next product slice
+# Cutroom roadmap
+
+The accepted target is the full creator workflow. The current work breakdown is maintained in [docs/roadmap.md](docs/roadmap.md), and the current implementation boundary is in [docs/status.md](docs/status.md). The notes below describe the original sequencing, not a reduction of the accepted scope.
 
 ## Working core
 
@@ -7,7 +9,7 @@
 - HTML plan review, exact-plan/source fingerprints and explicit local confirmation.
 - Real H.264/AAC render with no-overwrite publication.
 
-## Proposed hackathon scope — requires product confirmation
+## Original implementation sequence
 
 1. Creator talking-head recordings as the first target.
 2. Local word-timestamp transcription as an optional dependency, with an explicit model download prompt.
@@ -18,9 +20,9 @@
 
 The exact-plan receipt is a consistency guard, not user authentication. A native confirmation action should stay outside model-exposed tools.
 
-## Deferred
+## Full workflow integration
 
-Gaze-based rejection, background segmentation, motion graphics engines, cloud storage, publishing integrations and automated social engagement. Add these only after the core edit/review/export flow works on real recordings.
+Face/head-facing review, person segmentation, graphic layers, explicit-consent media import, OBS recording and optional storage/calendar adapters are included in the accepted scope. They must be integrated and verified, not merely listed as helpers. See the current work packages linked above.
 
 ## Submission gate
 

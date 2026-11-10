@@ -9,3 +9,9 @@ raw_vids/
 models/
 .cache/
 .ruff_cache/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json

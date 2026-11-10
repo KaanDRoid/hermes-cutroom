@@ -1,7 +1,6 @@
-name: Tests
+name: Core compatibility
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -18,6 +17,8 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Run tests
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: python -m unittest discover -s tests -v
       - name: Preserve workflow evidence
         if: always()

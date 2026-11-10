@@ -1,0 +1,6 @@
+{
+  "name": "cutroom",
+  "label": "Cutroom Studio",
+  "description": "Local video editing, review and render jobs.",
+  "api": "plugin_api.py"
+}

@@ -11,6 +11,12 @@ license = "MIT"
 authors = [{name = "Kaan"}]
 dependencies = []
 
+[project.optional-dependencies]
+dev = ["fastapi==0.162.2", "httpx==0.28.1", "numpy>=2,<3", "pillow>=12,<14", "ruff>=0.14"]
+speech = ["faster-whisper==1.2.1"]
+vision = ["mediapipe==1.2.2", "pillow>=12,<14"]
+integrations = ["obsws-python==1.8.1", "yt-dlp==2026.10.26"]
+
 [project.scripts]
 cutroom = "cutroom.cli:main"
 
