@@ -22,7 +22,7 @@ The four registered Hermes tools and existing CLI support metadata inspection, s
 
 ## Integration blockers
 
-- The Studio and engine dispatchers currently execute `inspect` only. Advanced module APIs are not yet a complete action pipeline.
+- The Studio and engine dispatchers execute `inspect` and `silence`. Silence applies validated cuts to a matching revision, preserves manual/word/gaze selections and revokes stale approval. Other advanced module APIs are not yet a complete action pipeline. See [Studio jobs](studio-jobs.md) for current local evidence and an existing export-duration failure.
 - Successful advanced results still need transactionally applied revision checks and artifact lineage.
 - Running cancellation, caller-exit durability and crash recovery need complete integration tests.
 - Native player/action/progress/review/approval controls need implementation and real Desktop acceptance.
@@ -33,7 +33,11 @@ The four registered Hermes tools and existing CLI support metadata inspection, s
 
 ## Verification
 
-The final local Python 3.12 run collected **110 tests: 109 passed, 1 skipped, no failures**. This run enabled the consented-media preview/cover/QA test and exercised real local speech, face and segmentation models. The skipped check requires native Windows symlink-creation privileges; its controlled alias-resolution regression passes. Logs and media evidence remain local in `artifacts/`.
+The Studio routing branch was tested locally with Python 3.11.15 and FFmpeg 7.1: **120 tests collected, 107 passed, 12 skipped, one pre-existing export/cover error**. All four Node Desktop contract tests and Ruff pass. Use `python scripts/check.py` to reproduce with generated files confined to `artifacts/`; see [Studio jobs](studio-jobs.md) for details. This is not a full-suite pass or native Desktop acceptance.
+
+### Original author checkpoint (different environment)
+
+The original local Python 3.12 run reported **110 tests: 109 passed, 1 skipped, no failures**. This run enabled the consented-media preview/cover/QA test and exercised real local speech, face and segmentation models. The skipped check requires native Windows symlink-creation privileges; its controlled alias-resolution regression passes. Logs and media evidence remain local in `artifacts/`.
 
 The earlier pre-fix run had two failures (display rotation and premature decoder-end coverage); both were reproduced and fixed. Additional regressions now cover manual-range preservation, canonical report/subtitle routes, resolved network-path rejection and metadata-only remote-upload verification. FFmpeg filter-script compatibility now selects the modern flag, with a narrowly tested legacy fallback.
 

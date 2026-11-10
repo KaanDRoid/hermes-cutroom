@@ -20,26 +20,11 @@ def main(argv=None):
                 raise InterruptedError("Job cancelled")
             with studio._lock():
                 job = studio.job(job_id)
+                studio._check_job_project(job)
                 job.update(status="running", progress=0.05, started_at=time.time())
                 studio._write_job(job)
             result = studio._perform_job(job)
-            if cancelled():
-                raise InterruptedError("Job cancelled")
-            with studio._lock():
-                current = studio.get(job["project_id"])
-                if current["revision"] != job["revision"]:
-                    raise ValueError(
-                        "Project changed while this job was running; retry on the current revision"
-                    )
-                studio._check_source(current)
-                job = studio.job(job_id)
-                job.update(
-                    status="completed",
-                    progress=1.0,
-                    result=result,
-                    completed_at=time.time(),
-                )
-                studio._write_job(job)
+            studio._complete_job(job, result)
         return 0
     except Exception as error:
         with studio._lock():
