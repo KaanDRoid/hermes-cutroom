@@ -23,7 +23,15 @@ For tests without native models, installing `.[dev]` is enough. The advanced run
 
 ## Test commands
 
-Set a valid temporary directory first. In Git Bash on Windows:
+For a repository-contained run with exact result counts and saved logs:
+
+```bash
+.venv/Scripts/python.exe scripts/check.py
+```
+
+Use `.venv/bin/python` on Linux/macOS. The runner confines temporary files to `artifacts/tmp` and writes evidence to `artifacts/checks/<run-id>/`. It runs the full Python suite, Node contract tests, Ruff and `git diff --check`; it exits nonzero if any gate fails. Native-model/media skips remain visible in `summary.json`. Keep development environments, test media, temporary files and logs inside this checkout; do not scatter generated files into sibling project directories or the system temp directory.
+
+For individual manual commands, set a valid temporary directory first. In Git Bash on Windows:
 
 ```bash
 export TMPDIR="$PWD/artifacts/tmp"
