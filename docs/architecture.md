@@ -24,7 +24,7 @@
 
 The working core uses `plan.json` and `approval.json` inside a caller-selected new project directory. The evolving Studio uses version-2 `studio.json` records under a workspace's `projects/<id>/` directory, plus `jobs/<id>/` records and snapshots.
 
-Do not confuse these formats or imply that every advanced action is already routed. At this checkpoint, the Studio supervisor and engine dispatcher execute `inspect`; the remaining action routing is still an integration task.
+Do not confuse these formats or imply that every advanced action is already routed. At this checkpoint, the Studio supervisor and engine dispatcher execute `inspect` and `silence`; other action routing remains an integration task. Silence results are applied under the state lock to matching revisions without restoring manual cuts; see [Studio background jobs](studio-jobs.md).
 
 ## Planned execution path
 
@@ -48,7 +48,7 @@ Native dependencies stay in a dedicated runtime rather than being injected into 
 
 Project and job JSON writes use temporary files and atomic replacement. Workspace locks serialize state updates. Revisions reject stale edits. Manual scene ranges remain the authoritative base; word-derived selections are intersected with that base before gaze exclusions are subtracted, so changing one exclusion field cannot silently restore manually removed footage. Windows sharing violations receive a short bounded retry; malformed content and permanent failures must not be swallowed.
 
-Queued cancellation and facade reopening are tested. Surviving caller-process exit, running-job cancellation, crash recovery and stale-result publication still need complete integration coverage.
+Queued cancellation, facade reopening and a queued silence job surviving real submitter-process exit are tested. An isolated runtime test exercises real worker/FFmpeg subtree termination without killing an unrelated process, using a controlled test launcher. Crash recovery, complete running-action cancellation and artifact-lineage publication still need integration coverage. Project and job completion are separate atomic file replacements under one lock, not a crash-atomic transaction.
 
 ## Review and artifact safety
 

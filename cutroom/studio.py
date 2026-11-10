@@ -434,6 +434,19 @@ class Studio:
             or len(json.dumps(options, allow_nan=False)) > 100000
         ):
             raise ValueError("Invalid or oversized job options")
+        if action == "silence":
+            from .plan import _number
+
+            if set(options) - {"noise_db", "min_duration", "padding"}:
+                raise ValueError("Unsupported silence options")
+            for key, value in options.items():
+                number = _number(value)
+                if (key == "min_duration" and number <= 0) or (
+                    key == "padding" and number < 0
+                ):
+                    raise ValueError(
+                        "Silence duration must be positive and padding non-negative"
+                    )
         if (
             action in {"download", "publish", "obs"}
             and options.get("confirmed") is not True
@@ -508,7 +521,76 @@ class Studio:
         self._check_source(project)
         if job["action"] == "inspect":
             return probe(project["source"])
+        if job["action"] == "silence":
+            from .runtime import invoke_worker
+
+            return invoke_worker(
+                "silence",
+                {"source": project["source"], **job["options"]},
+                self._job_path(job["id"]).parent / "engine",
+                python=project["settings"].get("runtime_python"),
+                cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
+            )
         raise ValueError("Operation is not installed: " + job["action"])
+
+    def _check_job_project(self, job):
+        """Call under the state lock, both before execution and publication."""
+        if self.job(job["id"]).get("cancel_requested"):
+            raise InterruptedError("Job cancelled")
+        current = self.get(job["project_id"])
+        if current["revision"] != job["revision"]:
+            raise ValueError(
+                "Project changed while this job was queued or running; retry on the current revision"
+            )
+        self._check_source(current)
+        if self._digest(current) != job["review_digest"]:
+            raise PermissionError("Project assets changed; review and retry")
+        return current
+
+    def _complete_job(self, job, result):
+        with self._lock():
+            current = self._check_job_project(job)
+            job = self.job(job["id"])
+            if job["action"] == "silence":
+                from .plan import validate_plan
+
+                validate_plan(result)
+                if (
+                    result["source"] != current["source"]
+                    or result["source_duration"] != current["source_info"]["duration"]
+                ):
+                    raise ValueError("Silence result does not match the project source")
+                updated = copy.deepcopy(current)
+                updated["base_segments"] = [
+                    {
+                        "start": max(base["start"], keep["start"]),
+                        "end": min(base["end"], keep["end"]),
+                    }
+                    for base in current["base_segments"]
+                    for keep in result["segments"]
+                    if max(base["start"], keep["start"]) < min(base["end"], keep["end"])
+                ]
+                self._rebuild_segments(updated)
+                validate_plan(
+                    {
+                        "version": 1,
+                        "source": updated["source"],
+                        "source_duration": updated["source_info"]["duration"],
+                        "segments": updated["segments"],
+                    }
+                )
+                updated["revision"] += 1
+                updated["status"] = "draft"
+                updated.pop("approval", None)
+                self._write(updated)
+                job["applied_revision"] = updated["revision"]
+            job.update(
+                status="completed",
+                progress=1.0,
+                result=result,
+                completed_at=time.time(),
+            )
+            self._write_job(job)
 
     def cancel(self, job_id):
         with self._lock():
