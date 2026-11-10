@@ -1,0 +1,41 @@
+# Reference media and local fixtures
+
+## Speech sample
+
+A separate 11-second speech recording is available in the official whisper.cpp repository:
+
+- Repository: https://github.com/ggml-org/whisper.cpp
+- Sample: https://github.com/ggml-org/whisper.cpp/blob/master/samples/jfk.wav
+- Download: https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav
+- Observed SHA-256: `59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e`
+- Local location: `artifacts/reference/jfk.wav` (ignored).
+
+```bash
+mkdir -p artifacts/reference
+curl -fL https://raw.githubusercontent.com/ggml-org/whisper.cpp/master/samples/jfk.wav -o artifacts/reference/jfk.wav
+```
+
+Verify the hash before using it as the reference fixture. The sample is downloaded separately, not bundled with this project. Upstream repository licensing does not automatically establish redistribution rights for every third-party media asset; review rights before shipping media in a release or demo.
+
+This sample is used to test real local transcription. It is not the audio of either supplied user video. Do not attach it to those recordings and portray the result as their original speech.
+
+## User-authorized local footage
+
+Two recordings were provided for local acceptance:
+
+| Local filename | Properties | Valid coverage |
+|---|---|---|
+| `12511-239934660.mp4` | 3840×2160, approximately 22.37 s, no audio | Metadata, generic edits, graphics, covers and export |
+| `4439224-uhd_2160_3840_25fps.mp4` | 2160×3840, 10.56 s, 264 frames, visible woman, no audio | Face/mouth metrics, person segmentation and portrait export |
+
+They belong in ignored `raw_vids/` and are not distributed through GitHub. Permission for local testing is not permission to publish footage.
+
+## Model assets
+
+Local tested assets, not bundled:
+
+- MediaPipe FaceLandmarker from the official Google model bucket. Observed SHA-256: `64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff`.
+- MediaPipe selfie segmenter from the official Google model bucket. Observed SHA-256: `191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b`.
+- `Systran/faster-whisper-tiny` local converted Whisper model.
+
+Use explicit setup and offline inference. Model and fixture acquisition are not performed during plugin registration.

@@ -26,10 +26,7 @@ media = load_media()
 class MediaTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        scratch = Path.home() / "AppData/Local/hermes/cache/scratch"
-        cls.temp = tempfile.TemporaryDirectory(
-            prefix="cutroom-test-fixture-", dir=scratch
-        )
+        cls.temp = tempfile.TemporaryDirectory(prefix="cutroom-test-fixture-")
         cls.root = Path(cls.temp.name)
         cls.source = cls.root / "synthetic-test-fixture.mkv"
         subprocess.run(

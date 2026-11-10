@@ -25,4 +25,8 @@ A capability is complete only after its input, implementation, output and observ
 
 ## Consented acceptance source
 
-`raw_vids/12511-239934660.mp4`: 3840×2160, approximately 22.37 s, no audio stream, landscape/river aerial footage. This source cannot validate speech recognition, human gaze or person segmentation. Keep raw media, model caches and generated artifacts out of version control.
+`raw_vids/12511-239934660.mp4`: 3840×2160, approximately 22.37 s, no audio stream, landscape/river aerial footage. This source cannot validate speech recognition, human gaze or person segmentation.
+
+`raw_vids/4439224-uhd_2160_3840_25fps.mp4`: 2160×3840, 10.56 s, 264 frames at 25 fps, visible woman, no audio stream. Used for face/mouth estimates and person-layer compositing, not speech recognition. A separate attributed reference speech file is described in `docs/media-sources.md`.
+
+Keep raw media, model caches and generated artifacts out of version control.
