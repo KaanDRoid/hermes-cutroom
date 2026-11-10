@@ -33,12 +33,12 @@ The four registered Hermes tools and existing CLI support metadata inspection, s
 
 ## Verification
 
-The final local Python 3.12 run collected **108 tests: 107 passed, 1 skipped, no failures**. This run enabled the consented-media preview/cover/QA test and exercised real local speech, face and segmentation models. The skipped check requires native Windows symlink-creation privileges; its controlled alias-resolution regression passes. Logs and media evidence remain local in `artifacts/`.
+The final local Python 3.12 run collected **110 tests: 109 passed, 1 skipped, no failures**. This run enabled the consented-media preview/cover/QA test and exercised real local speech, face and segmentation models. The skipped check requires native Windows symlink-creation privileges; its controlled alias-resolution regression passes. Logs and media evidence remain local in `artifacts/`.
 
 The earlier pre-fix run had two failures (display rotation and premature decoder-end coverage); both were reproduced and fixed. Additional regressions now cover manual-range preservation, canonical report/subtitle routes, resolved network-path rejection and metadata-only remote-upload verification. FFmpeg filter-script compatibility now selects the modern flag, with a narrowly tested legacy fallback.
 
 Hermes Plugin Doctor passed. Catalog validation of a clean source-only checkout passed without warnings; the working-tree scan can additionally see ignored local model binaries, which are not part of the repository. GitHub Actions platform results must be read separately and are not implied by this local run.
 
-Four Node Desktop contract tests pass. Ruff passes. These are not evidence of a complete native-user workflow.
+Four Node Desktop contract tests pass. Ruff passes. Initial Linux CI exposed Windows-specific temporary-directory and default-font assumptions; the portability corrections retain the same assertions, prefer an installed approved font only for new defaults and never silently replace an explicitly selected family. Read the latest Actions run for platform results. These checks are not evidence of a complete native-user workflow.
 
 See [remaining work](roadmap.md), [architecture](architecture.md) and [testing](testing.md) before claiming a feature is finished.

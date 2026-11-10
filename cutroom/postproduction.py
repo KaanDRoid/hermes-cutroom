@@ -23,10 +23,31 @@ def _number(value, low=None, high=None):
     return float(value)
 
 
+_FONT_PATHS = {
+    "Arial": (
+        "C:/Windows/Fonts/arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ),
+    "DejaVu Sans": ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",),
+    "Liberation Sans": (
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ),
+}
+
+
+def _font_path(family):
+    return next((Path(p) for p in _FONT_PATHS[family] if Path(p).is_file()), None)
+
+
 def default_brand():
     """Positions/margins are fractions; font sizes use a 1080-pixel short side."""
+    family = next(
+        (name for name in _FONT_PATHS if _font_path(name) is not None), "Arial"
+    )
     return dict(
-        font="Arial",
+        font=family,
         title_color="#FFFFFF",
         subtitle_color="#FFFFFF",
         graphic_color="#16324F",
@@ -316,14 +337,7 @@ def _fit_filter(info, width, height):
 
 
 def _font(directory, family):
-    paths = {
-        "Arial": ["C:/Windows/Fonts/arial.ttf"],
-        "DejaVu Sans": ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"],
-        "Liberation Sans": [
-            "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"
-        ],
-    }
-    path = next((Path(p) for p in paths[family] if Path(p).is_file()), None)
+    path = _font_path(family)
     if path is None:
         raise ValueError("Requested local font is unavailable: " + family)
     shutil.copyfile(path, directory / "font.ttf")

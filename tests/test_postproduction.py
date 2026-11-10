@@ -72,6 +72,45 @@ class LocalPathTests(unittest.TestCase):
 
 
 class BrandTests(unittest.TestCase):
+    def test_default_uses_an_available_local_font_without_rewriting_requested_family(
+        self,
+    ):
+        from unittest.mock import patch
+
+        for family, installed in (
+            ("DejaVu Sans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            (
+                "Liberation Sans",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+            ),
+            ("Arial", "/System/Library/Fonts/Supplemental/Arial.ttf"),
+        ):
+            with (
+                self.subTest(family=family),
+                patch.object(
+                    Path, "is_file", lambda path: path.as_posix() == installed
+                ),
+            ):
+                self.assertEqual(pp.default_brand()["font"], family)
+                self.assertEqual(pp.validate_brand({"font": "Arial"})["font"], "Arial")
+
+    def test_macos_arial_is_resolved_but_an_unavailable_requested_font_is_rejected(
+        self,
+    ):
+        from unittest.mock import patch
+
+        installed = "/System/Library/Fonts/Supplemental/Arial.ttf"
+        destination = Path("local-font-output")
+        with (
+            patch.object(Path, "is_file", lambda path: path.as_posix() == installed),
+            patch.object(pp.shutil, "copyfile") as copy,
+        ):
+            pp._font(destination, "Arial")
+            copy.assert_called_once_with(Path(installed), destination / "font.ttf")
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                pp._font(destination, "DejaVu Sans")
+            self.assertEqual(copy.call_count, 1)
+
     def test_validated_brand_persistence_and_correction(self):
         self.assertTrue(hasattr(pp, "default_brand"), "brand API is missing")
         brand = pp.default_brand()

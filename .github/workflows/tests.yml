@@ -15,7 +15,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-liberation
+      - name: Install development dependencies
+        run: python -m pip install -e ".[dev]"
       - name: Run tests
         env:
           TMPDIR: ${{ runner.temp }}
