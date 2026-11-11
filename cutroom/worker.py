@@ -19,6 +19,10 @@ def execute(operation, arguments):
         padding = options.pop("padding", 0.12)
         silences = detect_silences(source, **options)
         return build_plan(source, probe(source), silences, padding=padding)
+    if operation == "transcribe":
+        from .speech import transcribe
+
+        return transcribe(**arguments)
     raise ValueError("Unsupported engine operation: " + operation)
 
 
