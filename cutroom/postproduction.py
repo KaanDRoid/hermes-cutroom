@@ -417,6 +417,65 @@ def _output_path(output, suffixes):
     return path
 
 
+def _measure_loudness(source, audio_graph, directory, settings):
+    """First loudnorm pass over the exact cut audio; returns FFmpeg's measurements."""
+    script = directory / "measure.txt"
+    script.write_text(
+        ";\n".join(
+            audio_graph
+            + [
+                f"[audio]loudnorm=I={settings['loudness_lufs']}:"
+                f"TP={settings['true_peak_db']}:LRA=11:print_format=json[measured]"
+            ]
+        ),
+        encoding="utf-8",
+    )
+    completed = _render_graph(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-v",
+            "info",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            str(source),
+            "-/filter_complex",
+            "measure.txt",
+            "-map",
+            "[measured]",
+            "-f",
+            "null",
+            "-",
+        ],
+        cwd=directory,
+        timeout=settings["timeout"],
+    )
+    text = completed.stderr or ""
+    start = text.rfind("{")
+    end = text.rfind("}")
+    try:
+        data = json.loads(text[start : end + 1])
+        values = {
+            key: float(data[key])
+            for key in (
+                "input_i",
+                "input_tp",
+                "input_lra",
+                "input_thresh",
+                "target_offset",
+            )
+        }
+    except (ValueError, KeyError):
+        return None
+    # Silent or near-silent programs report -inf; linear correction is undefined.
+    if not all(math.isfinite(value) for value in values.values()):
+        return None
+    return values
+
+
 def export_video(source, segments, output, settings=None, captions=None):
     """Render ordered source intervals. Approval is the caller's responsibility.
 
@@ -430,7 +489,7 @@ def export_video(source, segments, output, settings=None, captions=None):
     if not isinstance(segments, list) or not segments:
         raise ValueError("At least one segment is required")
     previous, duration = 0, 0
-    graph, labels = [], []
+    graph, labels, audio_graph, audio_labels = [], [], [], []
     for index, item in enumerate(segments):
         if not isinstance(item, dict) or "start" not in item or "end" not in item:
             raise ValueError("Segments need start and end")
@@ -446,15 +505,22 @@ def export_video(source, segments, output, settings=None, captions=None):
         )
         labels.append(f"[v{index}]")
         if info["has_audio"]:
-            graph.append(
+            trim = (
                 f"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]"
             )
+            graph.append(trim)
             labels.append(f"[a{index}]")
+            audio_graph.append(trim)
+            audio_labels.append(f"[a{index}]")
     graph.append(
         "".join(labels)
         + f"concat=n={len(segments)}:v=1:a={int(info['has_audio'])}[joined]"
         + ("[audio]" if info["has_audio"] else "")
     )
+    if info["has_audio"]:
+        audio_graph.append(
+            "".join(audio_labels) + f"concat=n={len(segments)}:v=0:a=1[audio]"
+        )
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
     effects = []
@@ -518,11 +584,27 @@ def export_video(source, segments, output, settings=None, captions=None):
             effects.append("lower_third")
         if captions:
             filters.append(_ass(directory, captions, brand, width, height))
+        normalization_method = "no audio"
         if info["has_audio"] and settings["normalize_audio"]:
-            graph.append(
-                f"[audio]loudnorm=I={settings['loudness_lufs']}:TP={settings['true_peak_db']}:LRA=11,"
-                "aresample=48000[normalized]"
+            measured = _measure_loudness(source, audio_graph, directory, settings)
+            loudnorm = (
+                f"loudnorm=I={settings['loudness_lufs']}:"
+                f"TP={settings['true_peak_db']}:LRA=11"
             )
+            if measured:
+                loudnorm += (
+                    f":measured_I={measured['input_i']}"
+                    f":measured_TP={measured['input_tp']}"
+                    f":measured_LRA={measured['input_lra']}"
+                    f":measured_thresh={measured['input_thresh']}"
+                    f":offset={measured['target_offset']}:linear=true"
+                )
+                normalization_method = "two-pass measured loudnorm"
+            else:
+                normalization_method = "single-pass dynamic loudnorm"
+            graph.append(f"[audio]{loudnorm},aresample=48000[normalized]")
+        elif info["has_audio"]:
+            normalization_method = "disabled"
         graph.append("[joined]" + ",".join(filters) + "[video]")
         (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
         temporary = directory / ("render" + output.suffix)
@@ -596,9 +678,7 @@ def export_video(source, segments, output, settings=None, captions=None):
             "enabled": info["has_audio"] and settings["normalize_audio"],
             "target_lufs": settings["loudness_lufs"],
             "true_peak_db": settings["true_peak_db"],
-            "method": "single-pass dynamic loudnorm"
-            if info["has_audio"]
-            else "no audio",
+            "method": normalization_method,
         },
     }
 

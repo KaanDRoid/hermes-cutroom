@@ -52,7 +52,17 @@ sdk.useMutation = options => ({ isPending: false, error: null, reset() {},
   mutateAsync: async input => { const result = await options.mutationFn(input); await options.onSuccess?.(result, input); return result; } });
 function render(node, path = 'root') {
   if (node == null || typeof node !== 'object') return node;
-  if (Array.isArray(node)) return node.map((n, i) => render(n, `${path}.${i}`));
+  if (Array.isArray(node)) {
+    const keys = new Map();
+    for (const child of node) {
+      if (child == null || Array.isArray(child) || child.key == null) continue;
+      const key = String(child.key);
+      const name = typeof child.type === 'function' ? child.type.name : child.type;
+      assert.ok(!keys.has(key), `Duplicate sibling React key "${key}" at ${path}: ${keys.get(key)} and ${name}`);
+      keys.set(key, name);
+    }
+    return node.map((n, i) => render(n, `${path}.${i}`));
+  }
   if (typeof node.type === 'function') {
     const key = `${path}:${node.type.name}:${node.key ?? ''}`;
     const store = hookStores.get(key) || { slots: [], index: 0 };
@@ -87,6 +97,47 @@ async function load() {
   pluginModule = await import(`data:text/javascript;base64,${Buffer.from(replaced).toString('base64')}`);
   return pluginModule;
 }
+
+test('renderer rejects duplicate sibling React keys across component types but allows separate scopes', () => {
+  const First = () => null;
+  const Second = () => null;
+  assert.throws(() => render([runtime.jsx(First, {}, 1), runtime.jsx(Second, {}, '1')]), /Duplicate sibling React key "1".*First and Second/);
+  assert.doesNotThrow(() => render([
+    runtime.jsx('div', { children: [runtime.jsx(First, {}, 1)] }),
+    runtime.jsx('div', { children: [runtime.jsx(Second, {}, 1)] }),
+    null,
+    'Unkeyed text',
+  ]));
+});
+
+test('keeps one corrections panel and one settings panel through revisions 1, 2 and 3', async () => {
+  jobRows = [];
+  const ui = await studio(async () => selectedProject, {
+    revision: 1,
+    transcript: { words: [{ id: 'w1', text: 'Caption 1', start: 0, end: 1 }] },
+    base_segments: [{ start: 0, end: 12 }],
+    settings: { title: 'Title 1' },
+  });
+  for (const revision of [1, 2, 3]) {
+    selectedProject = {
+      ...selectedProject, revision,
+      transcript: { words: [{ id: 'w1', text: `Caption ${revision}`, start: 0, end: 1 }] },
+      base_segments: [{ start: 0, end: 13 - revision }],
+      settings: { title: `Title ${revision}` },
+    };
+    const tree = ui.draw();
+    const headings = nodes(tree).filter(n => n.type === 'h2').map(text);
+    assert.equal(headings.filter(title => title === 'Caption corrections & manual ranges').length, 1, `Corrections at revision ${revision}`);
+    assert.equal(headings.filter(title => title === 'Brand, assets & local models').length, 1, `Settings at revision ${revision}`);
+    const field = name => nodes(tree).find(n => n.type === 'Input' && n.props.name === name);
+    assert.equal(field('caption.w1').props.value, `Caption ${revision}`);
+    assert.equal(field('range.0.end').props.value, 13 - revision);
+    assert.equal(field('title').props.value, `Title ${revision}`);
+    field('caption.w1').props.onChange({ target: { value: 'Unsaved caption' } });
+    field('range.0.end').props.onChange({ target: { value: '5' } });
+    field('title').props.onChange({ target: { value: 'Unsaved title' } });
+  }
+});
 
 test('registers a native route, sidebar entry and palette command', async () => {
   const module = await load();

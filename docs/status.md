@@ -1,5 +1,16 @@
 # Implementation status
 
+## November 11 native Desktop checkpoint — final approval still open
+
+- Opened the packaged Hermes Desktop application in a separate user-data instance and exercised the `cutroom-test` backend profile. This is real Electron/React, not the SDK fake. The test profile uses a local source clone and the existing development virtual environment; this is **not a clean dependency-install acceptance**. Hermes inventories the Desktop half at app level, while project/job data remain in the test profile.
+- Exercised local import, CPU Whisper transcription (22 timed words), silence detection, manual source-range edits, timed-word exclusion and preview rendering through the actual Studio controls. The 11-second reference/test-pattern input produced an 8.8-second H.264/AAC, 1920×1080 preview. Both source and preview decoded and advanced in the native player.
+- Native **Download preview** opened the Windows save dialog. The saved file's SHA-256 matches the published preview (`0ee0bc487fa9a3708cf97421994730f2fcdbd005e62e08c826d1367d05bd4c20`). Cover and QA jobs completed through the UI. That first QA run reported **13 passes and one audio-loudness warning** (-17.4 LUFS versus a -16 LUFS target with 1 LU tolerance).
+- Root cause: single-pass dynamic `loudnorm` undershoots short, intermittent speech. Exports now run an audio-only measurement pass over the exact cut and apply linear two-pass `loudnorm`, falling back to single-pass only when FFmpeg cannot report finite measurements (for example silence). A burst-audio regression requires ±0.5 LU; the same reference cut now measures -15.5 LUFS with a -1.9 dBFS peak.
+- Real React reconciliation exposed duplicate sibling keys: corrections/settings both used the revision number; caption IDs could also collide with manual-range indices. Namespaced the keys, added rejecting behavior to the fake renderer and regression coverage. **15/15 Desktop tests pass.** In the real window, revisions 6→7→8→9 retained exactly one corrections panel, one settings panel and 22 caption inputs.
+- Re-ran the Python suite without inherited `PYTHONPATH`: **190 tests, 187 passed, 3 skipped** after the loudness fix. The preceding unsanitized run failed seven vision imports and skipped 14 tests because it loaded Pillow from the Hermes host environment; that failed run is preserved separately and is not a successful product gate.
+- **Human approval and final export remain open.** The real final button was disabled and persisted approval was absent at revision 9. A conversational confirmation was not substituted for the Desktop approval action. No automated approval receipt or final artifact was created in this acceptance project.
+- Local evidence: `artifacts/desktop-acceptance/receipt.json`, screenshots, native-saved preview and RED/GREEN/parent test logs. The fixes are local; this checkpoint does not imply a push, catalog-pin update, clean installation, external-service acceptance or a second demo recording. GitHub Actions were not used.
+
 ## November 11 integration checkpoint — supersedes the historical snapshot below
 
 - Studio now routes every editing job: inspect, transcribe, silence, vision, segment, storyboard, preview, final, cover and qa. Results are revision-bound; stale renders are unlinked and final export requires current human approval.
