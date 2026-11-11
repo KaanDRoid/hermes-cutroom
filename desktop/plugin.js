@@ -7,6 +7,8 @@ const row = { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 };
 const stack = { display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 };
 const panel = { ...stack, padding: 16, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 };
 const muted = { color: 'var(--ui-text-secondary)', fontSize: 12 };
+// The host's unchecked checkbox border can match the page background; outline it with a theme token.
+const Tick = props => jsx(Checkbox, { ...props, style: props.checked ? props.style : { borderColor: 'var(--ui-text-tertiary)', ...props.style } });
 const errorText = error => error?.message || String(error || '');
 
 function useLive(initial) {
@@ -138,7 +140,7 @@ function ProjectEditor({ ctx, scope, project, jobs }) {
         jsx('p', { children: review.notice }),
         jsx('p', { style: muted, children: `${review.project.segments?.length || 0} kept ranges · ${review.project.excluded_word_ids?.length || 0} excluded words · ${review.project.settings?.aspect || 'source'} aspect · Revision ${review.project.revision}` }),
         jsx('code', { style: { overflowWrap: 'anywhere' }, children: review.digest }),
-        jsx('label', { 'data-cutroom-confirm': true, style: row, children: [jsx(Checkbox, { 'aria-label': 'I reviewed this exact digest', checked: confirmed, onCheckedChange: checked => setConfirmed(checked === true) }), 'I reviewed source, cuts, captions, brand and assets for this exact digest.' ] }),
+        jsx('label', { 'data-cutroom-confirm': true, style: row, children: [jsx(Tick, { 'aria-label': 'I reviewed this exact digest', checked: confirmed, onCheckedChange: checked => setConfirmed(checked === true) }), 'I reviewed source, cuts, captions, brand and assets for this exact digest.' ] }),
         jsx(Button, { disabled: !confirmed || reviewOperation.isPending, onClick: () => reviewNow(true), children: 'Approve reviewed digest' }),
       ] }) : null,
       jsx('p', { role: 'status', style: muted, children: canFinal() ? 'Current digest approved. Final export is enabled.' : 'Final export requires current human approval. Any edit clears confirmation.' }),
@@ -276,7 +278,7 @@ function TranscriptEditor({ project, exclude, disabled }) {
     jsx('p', { style: muted, children: 'Uncheck a word to exclude its timed source interval. Filler candidates are suggestions, not automatic removals; listen around every cut.' }),
     jsx(Input, { name: 'word-search', 'aria-label': 'Filter transcript words', value: filter, placeholder: 'Find words…', onChange: event => { setFilter(event.target.value); setPage(0); } }),
     words.length ? jsx('div', { style: { ...row, alignItems: 'stretch' }, children: words.slice(page * 150, (page + 1) * 150).map(word => jsx('label', { style: { ...row, padding: '6px 8px', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 6, opacity: excluded.has(word.id) ? 0.6 : 1 }, children: [
-      jsx(Checkbox, { checked: !excluded.has(word.id), disabled, 'aria-label': `Include word ${word.id}`, onCheckedChange: checked => exclude([word.id], checked === true) }),
+      jsx(Tick, { checked: !excluded.has(word.id), disabled, 'aria-label': `Include word ${word.id}`, onCheckedChange: checked => exclude([word.id], checked === true) }),
       jsx('span', { children: word.text }), jsx('small', { style: muted, children: `${seconds(word.start)}–${seconds(word.end)}` }),
     ] }, word.id)) }) : jsx('p', { style: muted, children: project.transcript ? 'No matching words.' : 'No timed transcript yet. Configure a local Whisper model, then transcribe.' }),
     words.length > 150 ? jsx('div', { style: row, children: [jsx(Button, { variant: 'ghost', disabled: page === 0, onClick: () => setPage(value => value - 1), children: 'Previous words' }), jsx('span', { style: muted, children: `Page ${page + 1} of ${Math.ceil(words.length / 150)}` }), jsx(Button, { variant: 'ghost', disabled: (page + 1) * 150 >= words.length, onClick: () => setPage(value => value + 1), children: 'Next words' })] }) : null,
@@ -386,7 +388,7 @@ function SettingsForm({ project, patch, dirty, disabled }) {
       brandField('Font family (Arial / DejaVu Sans / Liberation Sans)', 'font'), brandField('Title color (hex)', 'title_color'), brandField('Subtitle color (hex)', 'subtitle_color'), brandField('Graphic color (hex)', 'graphic_color'), brandField('Title size (12–120)', 'title_size', 'number'), brandField('Subtitle size (12–120)', 'subtitle_size', 'number'), brandField('Safe margin (fraction)', 'safe_margin', 'number'), brandField('Title Y (fraction)', 'title_y', 'number'), brandField('Subtitle Y (fraction)', 'subtitle_y', 'number'), brandField('Alignment (left / center / right)', 'alignment'),
       field('Graphic raster asset path (optional, behind person)', 'graphic'), field('Background raster path or RGB hex color (optional)', 'background'), field('Whisper model path', 'whisper_model'), field('FaceLandmarker model path', 'face_model'), field('Segmentation model path', 'segmentation_model'), field('Model runtime Python path', 'runtime_python'), field('Vision frame step', 'frame_step', 'number'), field('Render maximum width', 'max_width', 'number'),
     ] }),
-    jsx('div', { style: row, children: ['captions', 'normalize_audio', 'use_segmented'].map(key => jsx('label', { style: row, children: [jsx(Checkbox, { checked: settings[key] === true, onCheckedChange: checked => change(key, checked === true) }), key === 'captions' ? 'Burn timed captions' : key === 'normalize_audio' ? 'Normalize source audio' : 'Use segmented background output'] }, key)) }),
+    jsx('div', { style: row, children: ['captions', 'normalize_audio', 'use_segmented'].map(key => jsx('label', { style: row, children: [jsx(Tick, { checked: settings[key] === true, onCheckedChange: checked => change(key, checked === true) }), key === 'captions' ? 'Burn timed captions' : key === 'normalize_audio' ? 'Normalize source audio' : 'Use segmented background output'] }, key)) }),
     jsx(Button, { disabled, onClick: save, children: 'Save settings' }), jsx(Notice, { error }),
   ] });
 }
