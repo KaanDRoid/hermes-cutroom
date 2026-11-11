@@ -40,8 +40,11 @@ function StudioScope({ ctx, profile, connection }) {
   const [source, setSource, sourceRef] = useLive('');
   const [error, setError] = useState(null);
   const projects = useQuery({ queryKey: [...scope, 'projects'], queryFn: () => ctx.rest('/projects'), refetchInterval: 5000 });
-  const jobs = useQuery({ queryKey: [...scope, 'jobs', selected], queryFn: () => ctx.rest(`/jobs?project_id=${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500 });
-  const project = useQuery({ queryKey: [...scope, 'project', selected], queryFn: () => ctx.rest(`/projects/${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500 });
+  // Keep polling while a job runs even if the window is hidden, so a finished render is not shown as queued.
+  const working = useRef(false);
+  const jobs = useQuery({ queryKey: [...scope, 'jobs', selected], queryFn: () => ctx.rest(`/jobs?project_id=${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500, refetchIntervalInBackground: working.current });
+  working.current = Array.isArray(jobs.data) && jobs.data.some(job => ['queued', 'running'].includes(job.status));
+  const project = useQuery({ queryKey: [...scope, 'project', selected], queryFn: () => ctx.rest(`/projects/${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500, refetchIntervalInBackground: working.current });
   const choose = id => { select(id); ctx.storage.set(`lastProject:${connection}:${profile}`, id); setError(null); };
   const create = useMutation({ mutationFn: path => ctx.rest('/projects', { method: 'POST', body: { source: path }, timeoutMs: 120000 }), onSuccess: result => { choose(result.id); setSource(''); client.invalidateQueries({ queryKey: scope }); } });
   const importVideo = async () => {
