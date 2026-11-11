@@ -22,7 +22,7 @@ The four registered Hermes tools and existing CLI support metadata inspection, s
 
 ## Integration blockers
 
-- The Studio and engine dispatchers execute `inspect` and `silence`. Silence applies validated cuts to a matching revision, preserves manual/word/gaze selections and revokes stale approval. Other advanced module APIs are not yet a complete action pipeline. See [Studio jobs](studio-jobs.md) for current local evidence and an existing export-duration failure.
+- The Studio and engine dispatchers execute `inspect`, `silence` and `transcribe`. Matching-revision publication preserves cuts and revokes approval; transcript replacement clears old word IDs while preserving their time-range cuts, recomputes filler suggestions and invalidates dependent artifact links. Transcription's audio-result application is contract-tested, not accepted with a real model through Studio yet. Other advanced module APIs are not a complete action pipeline. See [Studio jobs](studio-jobs.md) for current local evidence and an existing export-duration failure.
 - Successful advanced results still need transactionally applied revision checks and artifact lineage.
 - Running cancellation, caller-exit durability and crash recovery need complete integration tests.
 - Native player/action/progress/review/approval controls need implementation and real Desktop acceptance.
@@ -33,7 +33,7 @@ The four registered Hermes tools and existing CLI support metadata inspection, s
 
 ## Verification
 
-The Studio routing branch was tested locally with Python 3.11.15 and FFmpeg 7.1: **120 tests collected, 107 passed, 12 skipped, one pre-existing export/cover error**. All four Node Desktop contract tests and Ruff pass. Use `python scripts/check.py` to reproduce with generated files confined to `artifacts/`; see [Studio jobs](studio-jobs.md) for details. This is not a full-suite pass or native Desktop acceptance.
+The transcription routing branch was tested locally with Python 3.11.15 and FFmpeg 7.1: **126 tests collected, 113 passed, 12 skipped, one pre-existing export/cover error**. Its six focused checks pass, including a real detached no-audio job and contract-tested audio-result application. All four Node Desktop contract tests and Ruff pass. Use `python scripts/check.py` to reproduce with generated files confined to `artifacts/`; see [Studio jobs](studio-jobs.md) for details. This is not a full-suite pass, real-model Studio acceptance or native Desktop acceptance. Extensive transcription testing is deferred to [the acceptance checklist](testing.md#deferred-transcription-acceptance).
 
 ### Original author checkpoint (different environment)
 

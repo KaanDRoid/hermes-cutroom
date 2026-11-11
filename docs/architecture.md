@@ -24,7 +24,7 @@
 
 The working core uses `plan.json` and `approval.json` inside a caller-selected new project directory. The evolving Studio uses version-2 `studio.json` records under a workspace's `projects/<id>/` directory, plus `jobs/<id>/` records and snapshots.
 
-Do not confuse these formats or imply that every advanced action is already routed. At this checkpoint, the Studio supervisor and engine dispatcher execute `inspect` and `silence`; other action routing remains an integration task. Silence results are applied under the state lock to matching revisions without restoring manual cuts; see [Studio background jobs](studio-jobs.md).
+Do not confuse these formats or imply that every advanced action is already routed. At this checkpoint, the Studio supervisor and engine dispatcher execute `inspect`, `silence` and `transcribe`; other action routing remains an integration task. Silence/transcript results are applied under the state lock to matching revisions. Transcription also fingerprints recognized local model assets; replacing a transcript preserves existing word-derived cuts as base ranges instead of reusing old word IDs. See [Studio background jobs](studio-jobs.md) for the contract-tested boundary and deferred model acceptance.
 
 ## Planned execution path
 
