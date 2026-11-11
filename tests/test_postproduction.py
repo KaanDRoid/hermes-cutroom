@@ -670,6 +670,70 @@ class RenderTests(unittest.TestCase):
         integrated = float(re.findall(r"I:\s*([-\d.]+) LUFS", measured)[-1])
         self.assertAlmostEqual(integrated, -16, delta=1)
 
+    def test_intermittent_audio_meets_loudness_target_with_measured_pass(self):
+        # Speech-like bursts make single-pass dynamic loudnorm miss its target.
+        source = self.root / "bursts.mkv"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-n",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x96:rate=5:duration=9",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:sample_rate=48000:duration=9,volume=0.03,"
+                "volume=enable='gt(mod(t,1.5),0.6)':volume=0",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "pcm_s16le",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        result = pp.export_video(
+            source,
+            [{"start": 0, "end": 9}],
+            self.root / "bursts.mp4",
+            {"loudness_lufs": -16, "true_peak_db": -1.5},
+        )
+        self.assertEqual(
+            result["audio_normalization"]["method"], "two-pass measured loudnorm"
+        )
+        measured = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-hide_banner",
+                "-i",
+                result["output"],
+                "-vn",
+                "-af",
+                "ebur128=peak=true",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stderr
+        import re
+
+        integrated = float(re.findall(r"I:\s*([-\d.]+) LUFS", measured)[-1])
+        self.assertAlmostEqual(integrated, -16, delta=0.5)
+
     def test_source_aspect_honors_display_rotation(self):
         source = self.root / "rotated.mp4"
         subprocess.run(

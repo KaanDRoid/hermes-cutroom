@@ -146,10 +146,10 @@ function ProjectEditor({ ctx, scope, project, jobs }) {
     jsx(JobPanel, { ctx, scope, project, jobs, approved: canFinal(), canFinal }),
     jsx(MediaPanel, { ctx, project }),
     jsx(TranscriptEditor, { project, exclude, disabled: mutation.isPending }),
-    jsx(CorrectionEditor, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, project.revision),
+    jsx(CorrectionEditor, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `corrections:${project.revision}`),
     jsx(StoryEditor, { project, patch, disabled: mutation.isPending }),
     jsx(VisionReview, { project, patch, disabled: mutation.isPending }),
-    jsx(SettingsForm, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, project.revision),
+    jsx(SettingsForm, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `settings:${project.revision}`),
   ] });
 }
 
@@ -351,7 +351,7 @@ function CorrectionEditor({ project, patch, dirty, disabled }) {
   };
   return jsx(Section, { title: 'Caption corrections & manual ranges', children: [
     jsx('p', { style: muted, children: 'Text corrections preserve word IDs, timing and confidence. Manual ranges remain the base; word and vision exclusions are applied on top.' }),
-    ...words.slice(page * 100, (page + 1) * 100).map(word => jsx(Field, { label: `${seconds(word.start)}–${seconds(word.end)}`, name: `caption.${word.id}`, value: word.text, onChange: value => correct(word.id, value) }, word.id)),
+    ...words.slice(page * 100, (page + 1) * 100).map(word => jsx(Field, { label: `${seconds(word.start)}–${seconds(word.end)}`, name: `caption.${word.id}`, value: word.text, onChange: value => correct(word.id, value) }, `caption:${word.id}`)),
     words.length > 100 ? jsx('div', { style: row, children: [jsx(Button, { disabled: page === 0, onClick: () => setPage(old => old - 1), children: 'Previous captions' }), jsx(Button, { disabled: (page + 1) * 100 >= words.length, onClick: () => setPage(old => old + 1), children: 'Next captions' })] }) : null,
     jsx(Button, { disabled: disabled || !words.length, onClick: saveWords, children: 'Save caption corrections' }),
     ...ranges.map((item, index) => jsx('div', { style: row, children: [
