@@ -8,6 +8,20 @@ from .hermes_plugin import draft, inspect, render_approved
 from .project import approve_plan, write_review
 
 
+def _doctor(models_dir=None):
+    from . import setup
+
+    return setup.doctor(models_dir=models_dir)
+
+
+def _setup_models(directory, models, confirm_downloads):
+    from . import setup
+
+    return setup.setup_models(
+        directory, models=models, confirm_downloads=confirm_downloads
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="cutroom", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -30,9 +44,21 @@ def main(argv=None):
         "render", help="Render only a previously approved plan"
     )
     render.add_argument("plan_path")
+    check = commands.add_parser(
+        "doctor", help="Report local tools, runtime, packages and models"
+    )
+    check.add_argument("--models-dir", default=None)
+    models = commands.add_parser(
+        "setup-models", help="Plan or explicitly acquire pinned model files"
+    )
+    models.add_argument("directory")
+    models.add_argument("--models", default="face,person,speech")
+    models.add_argument("--confirm-downloads", action="store_true")
     args = vars(parser.parse_args(argv))
     command = args.pop("command")
     functions = {
+        "doctor": _doctor,
+        "setup-models": _setup_models,
         "inspect": inspect,
         "draft": draft,
         "review": write_review,
@@ -42,7 +68,9 @@ def main(argv=None):
     try:
         result = functions[command](**args)
         print(json.dumps(result, indent=2, allow_nan=False))
-        return 0
+        return (
+            1 if command == "setup-models" and result.get("status") == "failed" else 0
+        )
     except Exception as error:
         print(
             json.dumps({"error": str(error), "type": type(error).__name__}),

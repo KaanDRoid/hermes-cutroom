@@ -4,7 +4,7 @@ Use these as parallel work boundaries. A work package is complete only when its 
 
 ## P1 — Wire the Studio engine
 
-- Route speech, silence, vision, segmentation, storyboard, preview, final, cover and QA actions. `inspect`, `silence` and `transcribe` are wired; real-model transcription acceptance remains deferred. See [Studio jobs](studio-jobs.md) for the verified boundary and [pending transcription testing](testing.md#deferred-transcription-acceptance) for later acceptance.
+- Editing actions are now routed through Studio, including real-model transcription and vision acceptance on local reference media; see [Studio jobs](studio-jobs.md). The public-facade acceptance harness completes transcription through final, cover and QA. Native Desktop acceptance remains a separate gate.
 - Apply successful results transactionally to the matching project revision.
 - Reject changed source/assets and stale queued/running results.
 - Make running cancellation terminate only the owned worker subtree and clean partial artifacts.

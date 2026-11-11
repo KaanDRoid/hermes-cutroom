@@ -49,6 +49,52 @@ class FilterScriptCompatibilityTests(unittest.TestCase):
 
 
 class LocalPathTests(unittest.TestCase):
+    def test_constant_rate_sources_keep_every_frame_duration_in_exports(self):
+        # FFmpeg 7.1 can shorten an MP4 by its final frame unless the output
+        # timeline is constant; variable-rate sources keep their timestamps.
+        from unittest.mock import patch
+
+        streams = {
+            "cfr": {"r_frame_rate": "10/1", "avg_frame_rate": "10/1"},
+            "vfr": {"r_frame_rate": "30/1", "avg_frame_rate": "2997/100"},
+        }
+        for kind, rates in streams.items():
+            with tempfile.TemporaryDirectory() as temporary:
+                source = Path(temporary) / "in.mp4"
+                source.write_bytes(b"fixture")
+                info = dict(
+                    duration=1.0,
+                    width=64,
+                    height=64,
+                    display_aspect_ratio=1.0,
+                    has_audio=False,
+                    codec="h264",
+                    streams=[{"codec_type": "video", **rates}],
+                )
+                captured = []
+
+                def render(arguments, **_):
+                    captured.append(arguments)
+                    Path(temporary, arguments[-1]).write_bytes(b"x")
+
+                with (
+                    self.subTest(kind=kind),
+                    patch.object(pp, "_probe", return_value=info),
+                    patch.object(pp, "_render_graph", side_effect=render),
+                    patch.object(pp.os, "link"),
+                ):
+                    pp.export_video(
+                        source, [{"start": 0, "end": 0.2}], Path(temporary) / "out.mp4"
+                    )
+                arguments = captured[0]
+                if kind == "cfr":
+                    index = arguments.index("-fps_mode")
+                    self.assertEqual(
+                        arguments[index : index + 4], ["-fps_mode", "cfr", "-r", "10/1"]
+                    )
+                else:
+                    self.assertNotIn("-fps_mode", arguments)
+
     def test_resolved_network_path_is_rejected_before_target_filesystem_access(self):
         from unittest.mock import patch
 

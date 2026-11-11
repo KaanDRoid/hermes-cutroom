@@ -565,6 +565,13 @@ def export_video(source, segments, output, settings=None, captions=None):
             "-pix_fmt",
             "yuv420p",
         ]
+        video_stream = next(
+            (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+        )
+        rate = video_stream.get("r_frame_rate")
+        if rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0":
+            # Constant-rate sources: keep the final frame's duration in the container.
+            args += ["-fps_mode", "cfr", "-r", rate]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
         _render_graph(
