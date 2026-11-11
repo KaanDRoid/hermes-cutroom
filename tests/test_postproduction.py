@@ -734,6 +734,73 @@ class RenderTests(unittest.TestCase):
         integrated = float(re.findall(r"I:\s*([-\d.]+) LUFS", measured)[-1])
         self.assertAlmostEqual(integrated, -16, delta=0.5)
 
+    def test_many_unaligned_cuts_keep_duration_and_sync(self):
+        # NTSC-rate sources with many sub-frame cut points must not drift.
+        source = self.root / "ntsc.webm"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                "-n",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x96:rate=30000/1001:duration=12",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=330:sample_rate=48000:duration=12",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "8",
+                "-c:a",
+                "libopus",
+                str(source),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        frame = 1001 / 30000
+        # Cut points sit just around frame times, so each range spans an extra
+        # partial frame; per-range rounding then accumulates across 13 ranges.
+        segments = [
+            {
+                "start": round((3 + index * 27) * frame - 0.002, 6),
+                "end": round((3 + index * 27 + 17) * frame + 0.002, 6),
+            }
+            for index in range(13)
+        ]
+        expected = sum(item["end"] - item["start"] for item in segments)
+        result = pp.export_video(source, segments, self.root / "ntsc.mp4")
+        streams = json.loads(
+            subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,duration",
+                    "-of",
+                    "json",
+                    result["output"],
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            ).stdout
+        )["streams"]
+        durations = {s["codec_type"]: float(s["duration"]) for s in streams}
+        self.assertLessEqual(abs(durations["video"] - expected), frame)
+        self.assertLessEqual(abs(durations["audio"] - durations["video"]), frame)
+        self.assertLessEqual(abs(result["duration"] - expected), 0.12)
+
     def test_source_aspect_honors_display_rotation(self):
         source = self.root / "rotated.mp4"
         subprocess.run(
