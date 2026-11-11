@@ -1,10 +1,36 @@
 # Cutroom
 
-Local-first, non-destructive video editing for Hermes Agent.
+A local-first video editing studio for Hermes Agent.
 
-**Development checkpoint, not a finished release.** Start with the [documentation index](docs/README.md), [current status](docs/status.md) and [collaboration guide](docs/collaboration.md).
+Cutroom turns a local recording into a reviewable edit: word-timed transcript cuts and filler review, silence removal, face/gaze/mouth review, person segmentation for graphics behind the subject, three source-quoted hook options with a storyboard, a preview render, a human-approved final export, a cover and automated quality checks. Media and models stay on your machine, and source files are never overwritten.
 
-Turn a local recording into an inspectable edit plan, review every cut, then render exactly that plan with FFmpeg. Source media stays local and is never overwritten. This is an early working core, not a complete video editor.
+It ships three surfaces:
+
+- **Hermes Desktop Studio page** — import, edit words, captions and ranges, pick a hook, run jobs, play previews, review the exact digest and approve the final export.
+- **Agent tools** — `cutroom_project` and `cutroom_job` let Hermes create projects, edit settings and run allowlisted background jobs. There is no approval tool: only a person can approve a final export.
+- **CLI** — `cutroom doctor`, `cutroom setup-models` and the plan-file commands below.
+
+See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md) and [current status](docs/status.md) for exact contracts and limits.
+
+## Studio workflow
+
+1. `transcribe` (local faster-whisper) → review fillers and exclude words.
+2. `silence` → trims pauses while preserving manual cuts.
+3. `storyboard` → three hook options quoted from the transcript; choose one, run again for scenes.
+4. `vision` (MediaPipe face landmarks) → review-only gaze/mouth intervals. `segment` → person layer to place graphics or a background behind the subject.
+5. `preview` → a fast render with word-timed captions and SRT/VTT sidecars.
+6. Human review and approval of the exact digest in the Desktop Studio page.
+7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area).
+
+Every job is bound to the project revision and its input files. Edits revoke approval and unlink stale renders; published files carry SHA-256 lineage.
+
+## Models
+
+Nothing is downloaded automatically. `cutroom setup-models DIR` prints the pinned URLs and SHA-256 values; add `--confirm-downloads` to fetch them over HTTPS with size limits and no-overwrite installation. `cutroom doctor --models-dir DIR` checks FFmpeg, the runtime interpreter, optional packages and model hashes. Advanced modules need the optional Python dependencies described in [development setup](docs/development.md).
+
+## Plan-file core
+
+The original plan-file workflow remains available for simple silence edits.
 
 ## Requirements
 
@@ -14,7 +40,7 @@ Turn a local recording into an inspectable edit plan, review every cut, then ren
 - A local video file. The core needs no API keys or Python runtime dependencies; advanced modules use the optional environments described in [development setup](docs/development.md).
 - An output filesystem with hard-link support (for example NTFS or ext4), used for atomic no-overwrite publication. FAT/exFAT outputs are not currently supported.
 
-Verified on native Windows with FFmpeg 9.0.2 and Python 3.14. Other platforms are not yet exercised.
+Verified on native Windows with FFmpeg 9.0.2; CI runs the test suite on Windows and Ubuntu.
 
 ## Quick start
 
@@ -61,6 +87,8 @@ For local development, link this directory as `<active-HERMES_HOME>/plugins/cutr
 | `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review |
 | `cutroom_review` | Regenerate review and digest after plan edits |
 | `cutroom_render` | Render the approved plan; reject stale approval and existing output |
+| `cutroom_project` | Create, list, read, update and review Studio projects (no approval) |
+| `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs |
 
 There is deliberately **no approval tool**. Show the draft to the user and let them confirm locally. Receipts are an accidental-stale-render guard, **not** an authenticated approval mechanism: another program with filesystem access can write receipts. Do not describe them as a security sandbox.
 
@@ -80,7 +108,7 @@ The plugin reads the video path explicitly supplied, launches local FFmpeg/ffpro
 
 ## Current boundaries
 
-Advanced speech, vision, rendering and optional-integration modules now exist, with their own tests. They are **not yet a completed end-to-end Studio**: advanced job routing, native playback/action/approval controls, fresh-install acceptance and live external-service acceptance remain open. Hooks and captions are extractive drafts, gaze is a heuristic, and background removal uses MediaPipe rather than SAM. See [current status](docs/status.md) and [remaining work](docs/roadmap.md) for the exact boundary.
+Hooks, storyboards and captions are extractive drafts from your own transcript, not generated writing. Gaze is a heuristic for review, not an automatic cut. Background separation uses MediaPipe person segmentation, not SAM. Optional download, OBS, rclone and calendar adapters are consent-gated and not part of the Studio pipeline; they have not been accepted against live services. Verified primarily on Windows. See [current status](docs/status.md) and [remaining work](docs/roadmap.md).
 
 ## Tests
 
