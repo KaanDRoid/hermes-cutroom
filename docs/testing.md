@@ -30,6 +30,34 @@ node --test tests/desktop-check.mjs
 
 The full local model suite uses the dedicated Python 3.12 runtime. The core can be checked separately under the Hermes interpreter. Logs and output media stay in `artifacts/` or temporary directories, not Git.
 
+## Detached worker cleanup on Windows
+
+A terminal job record is written before the supervisor's interpreter exits. In a
+cross-process caller-exit test, the observing facade has no parent-owned `Popen`
+handle, so `Studio.job()` cannot reap that detached supervisor. Deleting the test
+workspace immediately after `completed` can therefore hit Windows `WinError 32`
+on the still-open `worker.log`.
+
+The caller-exit regression captures the supervisor PID from its actual submitting
+process and registers a bounded process-exit wait ahead of temporary-directory
+cleanup (unittest cleanups run last-in, first-out). The shared test helper uses the
+existing platform-aware liveness check; query errors and timeouts remain errors.
+It does not kill workers, ignore deletion failures, skip the test or use a fixed
+sleep as a substitute for observing exit. Production job completion semantics are
+unchanged.
+
+`test_process_helpers.py` holds a real child's log open behind a stdin barrier,
+proves a short wait times out without killing it, then releases the child and
+verifies exit before deleting the log. Other checks cover continued waiting and
+propagation of query errors. Deliberately bypassing the wait makes the real-child
+regression fail. The original caller-exit test also passed ten consecutive local
+runs after the fix.
+
+Local validation on Python 3.11.15 / FFmpeg 7.1 collected 129 tests: 116 passed,
+12 skipped and the unchanged existing export/cover error. Ruff and all four Node
+Desktop contract tests passed. These are local results, not a claim that the
+previously failed hosted `main` run has been repaired or rerun.
+
 ## Important limits
 
 - Head-facing scores are uncertain geometry proxies, not verified eye contact.

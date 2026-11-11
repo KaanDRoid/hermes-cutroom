@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from process_helpers import wait_for_process_exit
+
 from cutroom.job_worker import main as supervise
 from cutroom.runtime import invoke_worker
 from cutroom.studio import Studio
@@ -159,10 +161,10 @@ class SilenceJobsTests(unittest.TestCase):
 
     def test_queued_job_survives_real_submitter_process_exit(self):
         code = (
-            "import json,sys; from cutroom.studio import Studio; "
+            "import json,sys; from cutroom.studio import Studio,_CHILD_PROCESSES; "
             "studio=Studio(sys.argv[1]); "
             "job=studio.submit(sys.argv[2], 'silence'); "
-            "print(json.dumps(job))"
+            "print(json.dumps({'job':job,'worker_pid':_CHILD_PROCESSES[job['id']].pid}))"
         )
         with self.studio._lock("queue"):
             caller = subprocess.run(
@@ -173,7 +175,11 @@ class SilenceJobsTests(unittest.TestCase):
                 check=True,
                 timeout=15,
             )
-            job = json.loads(caller.stdout)
+            submitted = json.loads(caller.stdout)
+            job = submitted["job"]
+            # The caller owns the Popen, so this process cannot reap it via Studio.job.
+            # LIFO cleanup waits on the actual worker before deleting its workspace.
+            self.addCleanup(wait_for_process_exit, submitted["worker_pid"], 10)
             self.assertEqual(self.studio.job(job["id"])["status"], "queued")
         result = self.wait(job)
         self.assertEqual(result["status"], "completed", result)
