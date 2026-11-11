@@ -41,7 +41,7 @@ Every published file must live in its job's own `jobs/<id>/outputs/` directory. 
 
 ## End-to-end acceptance harness
 
-`scripts/acceptance.py` runs the whole chain through the public facade on the attributed reference speech placed over a synthetic test pattern: transcribe → silence → storyboard → choose hook → storyboard → vision → preview → (stand-in human approval) → final → cover → qa. It writes `summary.json` with timings, transcript, hooks, artifact names, final dimensions and QA results under `artifacts/`.
+`scripts/acceptance.py` runs reference speech over a synthetic test pattern through transcribe → silence → storyboard → choose hook → storyboard → vision → preview. It then stops with `awaiting_human_review`, workspace, project ID and digest. The harness never grants approval. After separate human approval in Desktop/REST, resume with `--workspace <workspace> --project-id <id>` to run final → cover → qa. Missing or stale approval is rejected before final submission. Historical automated-approval renders are render evidence only, not human-approval acceptance.
 
 ## Silence selection
 

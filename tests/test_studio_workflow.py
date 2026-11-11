@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +53,161 @@ def native_vision_available():
         timeout=60,
     )
     return completed.returncode == 0
+
+
+class PublicationIntegrityTests(unittest.TestCase):
+    """Offline publication guards; byte fixtures are not playable media."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.studio = Studio(Path(temporary.name) / "workspace")
+        source = Path(temporary.name) / "source.mp4"
+        source.write_bytes(b"source")
+        with patch("cutroom.studio.probe", return_value={"duration": 4.0}):
+            self.project = self.studio.create(source)
+
+    def publish(self, kind, **extra):
+        job = {"id": uuid.uuid4().hex}
+        outputs = self.studio._job_path(job["id"]).parent / "outputs"
+        outputs.mkdir(parents=True)
+        path = outputs / (kind + ".bin")
+        path.write_bytes(b"published bytes")
+        self.studio._publish(self.project, job, {kind: str(path)}, **extra)
+        self.studio._write(self.project)
+        return path
+
+    def tamper(self, path):
+        stat = path.stat()
+        data = path.read_bytes()
+        path.write_bytes(bytes([data[0] ^ 1]) + data[1:])
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(path.stat().st_size, stat.st_size)
+        self.assertEqual(path.stat().st_mtime_ns, stat.st_mtime_ns)
+
+    def test_same_size_and_mtime_tampering_is_rejected(self):
+        path = self.publish("preview")
+        self.tamper(path)
+        with self.assertRaisesRegex(PermissionError, "changed"):
+            self.studio.artifact(self.project["id"], "preview")
+
+    def queue(self, action):
+        with patch("subprocess.Popen"):
+            job = self.studio.submit(self.project["id"], action)
+        _CHILD_PROCESSES.pop(job["id"], None)
+        return job
+
+    def prepare_input(self, action):
+        self.project = self.studio.get(self.project["id"])
+        kind = "preview" if action in {"cover", "qa"} else "segmented"
+        path = self.publish(kind)
+        if kind == "segmented":
+            self.project["settings"]["use_segmented"] = True
+            self.studio._write(self.project)
+        digest = self.studio.review(self.project["id"])["digest"]
+        self.project = self.studio.approve(self.project["id"], digest)
+        return path
+
+    def test_tampered_upstreams_are_rejected_before_submission(self):
+        for action in ("cover", "qa", "preview", "final"):
+            with self.subTest(action=action):
+                path = self.prepare_input(action)
+                self.tamper(path)
+                with self.assertRaisesRegex(PermissionError, "changed"):
+                    self.queue(action)
+
+    def test_queued_jobs_reject_tampered_upstreams_before_execution(self):
+        for action in ("cover", "qa", "preview", "final"):
+            with self.subTest(action=action):
+                path = self.prepare_input(action)
+                job = self.queue(action)
+                self.tamper(path)
+                with patch("cutroom.runtime.invoke_worker") as worker:
+                    self.assertEqual(supervise([str(self.studio.root), job["id"]]), 1)
+                worker.assert_not_called()
+                self.assertIn("changed", self.studio.job(job["id"])["error"])
+
+    def test_execution_revalidates_snapshot_upstream_bytes(self):
+        for action in ("cover", "qa", "preview", "final"):
+            with self.subTest(action=action):
+                path = self.prepare_input(action)
+                job = self.queue(action)
+                self.tamper(path)
+                with patch("cutroom.runtime.invoke_worker") as worker:
+                    with self.assertRaisesRegex(PermissionError, "changed"):
+                        self.studio._perform_job(job)
+                worker.assert_not_called()
+
+    def finish(self, action):
+        job = self.queue(action)
+        kind = "quality" if action == "qa" else action
+        outputs = self.studio._job_path(job["id"]).parent / "outputs"
+        outputs.mkdir()
+        path = outputs / (kind + ".bin")
+        path.write_bytes(b"published bytes")
+        self.studio._complete_job(job, {"artifacts": {kind: str(path)}})
+        self.project = self.studio.get(self.project["id"])
+        return path
+
+    def test_derivatives_expire_when_preferred_render_switches_or_is_replaced(self):
+        for initial, replacement in (
+            ("preview", "final"),
+            ("preview", "preview"),
+            ("final", "final"),
+        ):
+            with self.subTest(initial=initial, replacement=replacement):
+                self.project["artifacts"] = {}
+                self.project["artifact_lineage"] = {}
+                self.studio._write(self.project)
+                digest = self.studio.review(self.project["id"])["digest"]
+                self.project = self.studio.approve(self.project["id"], digest)
+                original = self.finish(initial)
+                cover = self.finish("cover")
+                quality = self.finish("qa")
+                self.assertEqual(
+                    self.studio.artifact(self.project["id"], "cover"), cover
+                )
+                self.assertEqual(
+                    self.studio.artifact(self.project["id"], "quality"), quality
+                )
+                self.finish(replacement)
+                for kind in ("cover", "quality"):
+                    with self.assertRaises(FileNotFoundError):
+                        self.studio.artifact(self.project["id"], kind)
+                    self.assertNotIn(kind, self.project["artifacts"])
+                self.assertEqual(original.read_bytes(), b"published bytes")
+                self.assertTrue(cover.exists())
+                self.assertTrue(quality.exists())
+                self.assertEqual(self.project["approval"]["digest"], digest)
+
+    def test_queued_derivative_rejects_preferred_render_switch(self):
+        self.prepare_input("cover")
+        for action in ("cover", "qa"):
+            with self.subTest(action=action):
+                job = self.queue(action)
+                self.publish("final")
+                with self.assertRaisesRegex(PermissionError, "upstream|inputs"):
+                    self.studio._check_job_project(job)
+                self.project["artifacts"].pop("final")
+                self.project["artifact_lineage"].pop("final")
+                self.studio._write(self.project)
+
+    def test_derivative_requires_exact_upstream_job_path_and_hash(self):
+        self.prepare_input("cover")
+        self.finish("cover")
+        original = json.loads(json.dumps(self.project))
+        for field, value in (("job_id", uuid.uuid4().hex), ("sha256", "0" * 64)):
+            with self.subTest(field=field):
+                self.project = json.loads(json.dumps(original))
+                self.project["artifact_lineage"]["preview"][field] = value
+                self.studio._write(self.project)
+                with self.assertRaises((FileNotFoundError, PermissionError)):
+                    self.studio.artifact(self.project["id"], "cover")
+        self.project = json.loads(json.dumps(original))
+        other = self.publish("preview")
+        self.assertNotEqual(str(other), original["artifacts"]["preview"])
+        with self.assertRaises(FileNotFoundError):
+            self.studio.artifact(self.project["id"], "cover")
 
 
 class WorkflowJobsTests(unittest.TestCase):

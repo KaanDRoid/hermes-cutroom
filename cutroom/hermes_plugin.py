@@ -116,3 +116,14 @@ def register(ctx):
             handler=_handler(function, properties),
             description=description,
         )
+    from .studio_tools import HANDLERS
+    from .studio_tools import definitions as studio_definitions
+
+    for schema in studio_definitions():
+        ctx.register_tool(
+            name=schema["name"],
+            toolset="cutroom",
+            schema=schema,
+            handler=HANDLERS[schema["name"]],
+            description=schema["description"],
+        )

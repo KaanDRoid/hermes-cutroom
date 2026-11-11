@@ -140,6 +140,24 @@ class DashboardTests(unittest.TestCase):
                 path = directory / filename
                 path.write_bytes(data)
                 project["artifacts"][kind] = str(path)
+            # Derivative reports must identify the exact current render; a bare
+            # legacy QA file is intentionally not eligible for serving anymore.
+            final = directory / "final.mp4"
+            final.write_bytes(b"unit render fixture")
+            project["artifacts"]["final"] = str(final)
+            quality = Path(project["artifacts"]["quality"])
+            from cutroom.studio import file_digest
+
+            project["artifact_lineage"] = {
+                "quality": {
+                    "job_id": "dashboard-fixture",
+                    "digest": studio._digest(project),
+                    "sha256": file_digest(quality),
+                    "size": quality.stat().st_size,
+                    "mtime_ns": quality.stat().st_mtime_ns,
+                    "upstream": studio._render_identity(project, "final"),
+                }
+            }
             studio._write(project)
             self.client.app.dependency_overrides[self.api.get_studio] = lambda: studio
             aliases = {

@@ -1,6 +1,18 @@
 # Implementation status
 
-Snapshot: November 10, 2026. This is a development checkpoint, not a complete release.
+## November 11 integration checkpoint — supersedes the historical snapshot below
+
+- Studio now routes every editing job: inspect, transcribe, silence, vision, segment, storyboard, preview, final, cover and qa. Results are revision-bound; stale renders are unlinked and final export requires current human approval.
+- Six agent tools are implemented, including `cutroom_project` and `cutroom_job`; no agent approval action is exposed.
+- `cutroom doctor` and consent-gated `cutroom setup-models` are implemented. Six local model-file hashes match their pins.
+- The public-facade harness produced a 2160×3840 reference final, cover and 14 passing QA checks, but it granted its own approval. This is **automated render evidence only, not human-approval acceptance**. Independent review rejected this harness behavior; its correction must stop at preview/review and resume only after separate human approval.
+- Real portrait face analysis covered 264 frames; segmentation/compositing completed. Desktop SDK contract tests: 13 passed. Ruff checks pass.
+- Integrated Python suite after review fixes: **189 tests, 186 passed, 3 skipped**, no failures (84.302 seconds). Independent re-review **passed**: automatic harness approval removed, publication hashes verified, downstream artifacts validated and derivatives bound to exact upstream identity. An earlier integrated run failed two dashboard alias fixture assertions; its stale QA fixture was updated to supply a valid render identity without weakening production validation. Native Desktop-window acceptance, fresh installation and external-service acceptance remain open. No live profile installation, repository visibility change or submission is authorized by this checkpoint.
+- The older FFmpeg 7.1 duration/cover defect has a CFR-specific correction with a CFR/VFR regression; direct retest on 7.1 remains open (local FFmpeg is 9).
+
+## Historical snapshot
+
+Snapshot: November 10, 2026. The boundaries and counts below describe the earlier checkpoint, not the current integration.
 
 ## Working public core
 

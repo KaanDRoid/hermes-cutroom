@@ -1,6 +1,6 @@
 name: cutroom
 version: 0.1.0
-description: Local, non-destructive silence editing with exact-plan review and FFmpeg rendering.
+description: Local video editing with reviewable timelines, background jobs and native studio controls.
 author: Kaan
 license: MIT
 requires_hermes: ">=0.23.0"
@@ -9,4 +9,6 @@ provides_tools:
   - cutroom_draft
   - cutroom_review
   - cutroom_render
+  - cutroom_project
+  - cutroom_job
 provides_hooks: []

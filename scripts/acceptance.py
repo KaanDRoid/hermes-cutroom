@@ -6,9 +6,9 @@ speech recording. By default it uses the attributed whisper.cpp JFK sample at
 artifacts/reference/jfk.wav, placed over a synthetic test pattern so that the
 result is clearly not anyone's own recording.
 
-Every step goes through the public Studio facade and its detached jobs. The
-approval step is performed here only because this harness stands in for the
-human reviewer; agent tools never expose approval.
+Every step goes through the public Studio facade and its detached jobs. This
+harness stops at preview for separate human review in Desktop or the local
+REST API. It never grants approval.
 """
 
 import argparse
@@ -36,21 +36,7 @@ def wait(studio, job, timeout):
         time.sleep(0.25)
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument(
-        "--audio", default=ROOT / "artifacts/reference/jfk.wav", type=Path
-    )
-    parser.add_argument("--models", default=ROOT / "models", type=Path)
-    parser.add_argument("--output", default=None, type=Path)
-    parser.add_argument("--aspect", default="portrait")
-    parser.add_argument("--language", default="en")
-    args = parser.parse_args(argv)
-
-    output = args.output or ROOT / "artifacts" / (
-        "acceptance-" + time.strftime("%Y%m%d-%H%M%S")
-    )
-    output.mkdir(parents=True, exist_ok=False)
+def prepare(args, output):
     source = output / "reference-over-test-pattern.mp4"
     import wave
 
@@ -101,6 +87,45 @@ def main(argv=None):
         },
         project["revision"],
     )
+    return studio, project
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--audio", default=ROOT / "artifacts/reference/jfk.wav", type=Path
+    )
+    parser.add_argument("--models", default=ROOT / "models", type=Path)
+    parser.add_argument("--output", default=None, type=Path)
+    parser.add_argument("--aspect", default="portrait")
+    parser.add_argument("--language", default="en")
+    parser.add_argument("--workspace", type=Path, help="Existing workspace to resume")
+    parser.add_argument(
+        "--project-id", help="Existing project to resume without editing"
+    )
+    args = parser.parse_args(argv)
+    if (args.workspace is None) != (args.project_id is None):
+        parser.error("--workspace and --project-id must be supplied together")
+    output = args.output or ROOT / "artifacts" / (
+        "acceptance-" + time.strftime("%Y%m%d-%H%M%S")
+    )
+    output.mkdir(parents=True, exist_ok=False)
+    if args.workspace:
+        studio = Studio(args.workspace)
+        review = studio.review(args.project_id)
+        project = review["project"]
+        approval = project.get("approval") or {}
+        if (
+            approval.get("digest") != review["digest"]
+            or approval.get("revision") != project["revision"]
+        ):
+            raise PermissionError(
+                "Current human approval is absent or stale. Review and approve "
+                "this exact digest in Cutroom Studio Desktop or the local REST "
+                "human review surface before resuming."
+            )
+    else:
+        studio, project = prepare(args, output)
     log = []
 
     def run(action, options=None, timeout=1800):
@@ -119,30 +144,47 @@ def main(argv=None):
             raise RuntimeError(f"{action} failed: {job['error']}")
         return job
 
-    run("transcribe", {"language": args.language})
-    project = studio.get(project["id"])
-    words = project["transcript"]["words"]
-    fillers = project["transcript"]["fillers"]
-    run("silence", {"min_duration": 0.4})
-    run("storyboard")
-    project = studio.get(project["id"])
-    project = studio.update(project["id"], {"selected_hook": 0}, project["revision"])
-    run("storyboard")
-    run("vision", {"frame_step": 5})
-    run("preview")
-    project = studio.get(project["id"])
-    # Stand-in for the human reviewer in Cutroom Studio.
-    review = studio.review(project["id"])
-    studio.approve(project["id"], review["digest"])
+    if not args.workspace:
+        run("transcribe", {"language": args.language})
+        run("silence", {"min_duration": 0.4})
+        run("storyboard")
+        project = studio.get(project["id"])
+        project = studio.update(
+            project["id"], {"selected_hook": 0}, project["revision"]
+        )
+        run("storyboard")
+        run("vision", {"frame_step": 5})
+        run("preview")
+        review = studio.review(project["id"])
+        summary = {
+            "status": "awaiting_human_review",
+            "workspace": str(studio.root),
+            "project_id": project["id"],
+            "digest": review["digest"],
+            "instructions": (
+                "Review the preview, source, cuts, text, brand and assets in Cutroom "
+                "Studio Desktop or the local REST human review surface, then approve "
+                "this exact digest there. This harness never grants approval. "
+                "Resume with --workspace and --project-id from this summary."
+            ),
+            "steps": log,
+        }
+        (output / "summary.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+        print(json.dumps(summary, indent=2))
+        return 0
+
     run("final", timeout=3600)
     run("cover", {"time": 1.0})
     qa = run("qa")
     project = studio.get(project["id"])
     summary = {
-        "source": str(source),
-        "transcript_words": len(words),
+        "project_id": project["id"],
+        "source": project["source"],
+        "transcript_words": len(project["transcript"]["words"]),
         "transcript_text": project["transcript"]["text"],
-        "filler_candidates": len(fillers),
+        "filler_candidates": len(project["transcript"]["fillers"]),
         "segments": project["segments"],
         "hooks": [hook["text"] for hook in project["story"]["hooks"]],
         "artifacts": {

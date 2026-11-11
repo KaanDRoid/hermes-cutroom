@@ -339,10 +339,17 @@ class Studio:
     def _artifact_current(self, project, kind):
         lineage = project.get("artifact_lineage", {}).get(kind)
         if lineage is None:
-            return True  # Unmanaged legacy entry; still confined by artifact().
+            return kind not in {"cover", "quality"}  # Legacy derivatives lack identity.
         if kind == "segmented":
             return lineage.get("inputs") == self._segment_inputs(project)
-        return lineage.get("digest") == self._digest(project)
+        if lineage.get("digest") != self._digest(project):
+            return False
+        if kind in {"cover", "quality"}:
+            upstream = self._current_render(project)
+            return bool(upstream) and lineage.get("upstream") == self._render_identity(
+                project, upstream
+            )
+        return True
 
     def _prune_artifacts(self, project):
         """Drop links whose inputs no longer match; files are never deleted."""
@@ -372,9 +379,20 @@ class Studio:
             return "Build the storyboard for the selected hook and current cut before final export"
         return None
 
+    def _render_identity(self, project, kind):
+        path = self._validate_publication(project, kind)
+        lineage = project.get("artifact_lineage", {}).get(kind, {})
+        return {
+            "kind": kind,
+            "job_id": lineage.get("job_id"),
+            "path": str(path),
+            "sha256": file_digest(path),
+        }
+
     def _current_render(self, project):
         for kind in ("final", "preview"):
             if kind in project["artifacts"] and self._artifact_current(project, kind):
+                self._validate_publication(project, kind)
                 return kind
         return None
 
@@ -605,6 +623,7 @@ class Studio:
             }
             if upstream:
                 job["upstream"] = upstream
+                job["upstream_identity"] = self._render_identity(project, upstream)
             directory = self._job_path(job["id"]).parent
             directory.mkdir(parents=True, exist_ok=False)
             (directory / "snapshot.json").write_text(
@@ -687,7 +706,9 @@ class Studio:
             key = "face_model" if action == "vision" else "segmentation_model"
             paths.append(project["settings"].get(key))
         if upstream:
-            paths.append(project["artifacts"][upstream])
+            paths.append(self._validate_publication(project, upstream))
+        if action in {"preview", "final"} and project["settings"].get("use_segmented"):
+            paths.append(self._validate_publication(project, "segmented"))
         return {
             str(_local_path(path)): file_digest(_local_path(path))
             for path in paths
@@ -754,6 +775,7 @@ class Studio:
         )
         self._check_source(project)
         action = job["action"]
+        self._job_inputs(project, action, job.get("upstream"))
         if action == "inspect":
             return probe(project["source"])
         directory = self._job_path(job["id"]).parent
@@ -924,6 +946,12 @@ class Studio:
         self._check_source(current)
         if self._digest(current) != job["review_digest"]:
             raise PermissionError("Project assets changed; review and retry")
+        if job.get("upstream"):
+            upstream = self._current_render(current)
+            if upstream != job["upstream"] or self._render_identity(
+                current, upstream
+            ) != job.get("upstream_identity"):
+                raise PermissionError("Job upstream changed; submit a new job")
         expected = job.get("input_digests") or {}
         if self._job_inputs(current, job["action"], job.get("upstream")) != expected:
             if job["action"] == "transcribe":
@@ -1000,8 +1028,13 @@ class Studio:
                 job["applied_revision"] = updated["revision"]
             elif action in {"preview", "final", "cover", "qa"}:
                 updated = copy.deepcopy(current)
-                extra = {"from": job["upstream"]} if job.get("upstream") else {}
+                extra = (
+                    {"from": job["upstream"], "upstream": job["upstream_identity"]}
+                    if job.get("upstream")
+                    else {}
+                )
                 self._publish(updated, job, result["artifacts"], **extra)
+                self._prune_artifacts(updated)
                 self._write(updated)
             if action in {"silence", "transcribe"}:
                 from .plan import validate_plan
@@ -1088,15 +1121,20 @@ class Studio:
             raise FileNotFoundError("Artifact is not available")
         if not self._artifact_current(project, kind):
             raise FileNotFoundError("Artifact is stale for the current revision")
+        return self._validate_publication(project, kind)
+
+    def _validate_publication(self, project, kind):
+        """Validate stored publication bytes, not a newly adopted input hash."""
         path = _local_path(project["artifacts"][kind])
         if not path.is_relative_to(self.root):
             raise PermissionError("Artifact must remain inside this workspace")
         lineage = project.get("artifact_lineage", {}).get(kind)
         if lineage:
             stat = path.stat()
-            if (stat.st_size, stat.st_mtime_ns) != (
+            if (stat.st_size, stat.st_mtime_ns, file_digest(path)) != (
                 lineage["size"],
                 lineage["mtime_ns"],
+                lineage["sha256"],
             ):
                 raise PermissionError("Artifact changed after publication")
         return path
