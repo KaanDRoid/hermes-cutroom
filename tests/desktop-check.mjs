@@ -254,6 +254,22 @@ test('draws a visible outline on every unchecked checkbox, including the approva
   }
 });
 
+test('keeps polling job and project state in the background only while work is active', async () => {
+  jobRows = [{ id: 'j1', action: 'final', status: 'running', revision: 7, progress: 0.4 }];
+  const ui = await studio(async () => selectedProject);
+  ui.draw(); // the job list loads
+  queries.length = 0;
+  ui.draw();
+  const active = queries.filter(q => q.queryKey.includes('jobs') || q.queryKey.includes('project'));
+  assert.ok(active.length >= 2);
+  for (const q of active) assert.equal(q.refetchIntervalInBackground, true);
+  jobRows = [{ id: 'j1', action: 'final', status: 'completed', revision: 7, progress: 1 }];
+  ui.draw();
+  queries.length = 0;
+  ui.draw();
+  for (const q of queries.filter(q => q.queryKey.includes('jobs') || q.queryKey.includes('project'))) assert.notEqual(q.refetchIntervalInBackground, true);
+});
+
 test('requires exact human confirmation, rereads review and blocks stale approval callbacks', async () => {
   jobRows = [];
   const digest = 'a'.repeat(64);
