@@ -240,6 +240,20 @@ test('submits allowlisted jobs, exposes failures, retries and cancels running wo
   assert.equal(button(ui.draw(), 'Run publish'), undefined);
 });
 
+test('draws a visible outline on every unchecked checkbox, including the approval box', async () => {
+  jobRows = [];
+  const ui = await studio(async path => path.endsWith('/review')
+    ? { digest: 'c'.repeat(64), project: selectedProject, notice: 'Review every cut' }
+    : selectedProject);
+  await button(ui.draw(), 'Review current revision').props.onClick();
+  const boxes = nodes(ui.draw()).filter(n => n.type === 'Checkbox');
+  assert.ok(boxes.some(n => n.props['aria-label'] === 'I reviewed this exact digest'));
+  for (const box of boxes) {
+    if (box.props.checked) continue;
+    assert.match(String(box.props.style?.borderColor || ''), /^var\(--ui-/, `${box.props['aria-label'] || 'checkbox'} needs a themed visible border`);
+  }
+});
+
 test('requires exact human confirmation, rereads review and blocks stale approval callbacks', async () => {
   jobRows = [];
   const digest = 'a'.repeat(64);
