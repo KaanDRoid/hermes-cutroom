@@ -363,6 +363,33 @@ def write_subtitles(cues, path, format="srt", brand=None):
     return dict(path=str(path), format=format, cue_count=len(cues))
 
 
+def local_model_files(model_path):
+    """Validate the local model and enumerate inference assets for job fingerprints."""
+    if not isinstance(model_path, (str, Path)) or not str(model_path):
+        raise ValueError("Configure an existing local Whisper model directory")
+    model_path = _local_path(model_path, must_exist=False)
+    if not model_path.is_dir():
+        raise FileNotFoundError("Model must be an existing local directory")
+    files = []
+    required = ("config.json", "model.bin", "tokenizer.json")
+    optional = ("vocabulary.txt", "vocabulary.json", "preprocessor_config.json")
+    for filename in (*required, *optional):
+        requested = model_path / filename
+        if (
+            filename in optional
+            and not requested.exists()
+            and not requested.is_symlink()
+        ):
+            continue
+        asset = _local_path(requested)
+        if asset.parent != model_path or asset.stat().st_size == 0:
+            raise ValueError(
+                "Model assets must be non-empty local files within the model directory"
+            )
+        files.append(asset)
+    return files
+
+
 def transcribe(source, model_path, language=None):
     """Transcribe local audio or video; silent media never loads a model."""
     source = _local_path(source)
@@ -386,15 +413,7 @@ def transcribe(source, model_path, language=None):
         return dict(
             language=None, words=[], text="", engine="faster-whisper", status="no_audio"
         )
-    model_path = _local_path(model_path, must_exist=False)
-    if not model_path.is_dir():
-        raise FileNotFoundError("Model must be an existing local directory")
-    for filename in ("config.json", "model.bin", "tokenizer.json"):
-        asset = _local_path(model_path / filename)
-        if asset.parent != model_path or asset.stat().st_size == 0:
-            raise ValueError(
-                "Model assets must be non-empty local files within the model directory"
-            )
+    model_path = local_model_files(model_path)[0].parent
     if language is not None and (not isinstance(language, str) or not language.strip()):
         raise ValueError("Language must be a language code or null")
     try:

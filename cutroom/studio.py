@@ -268,12 +268,7 @@ class Studio:
                         raise ValueError(key + " must be a positive integer")
                 updated["settings"] = merged
             if "transcript" in changes:
-                from .speech import validate_transcript
-
-                validate_transcript(
-                    changes["transcript"], project["source_info"]["duration"]
-                )
-                updated["transcript"] = changes["transcript"]
+                self._set_transcript(updated, changes["transcript"])
             for key in ("excluded_word_ids", "gaze_exclusions"):
                 if key in changes:
                     if not isinstance(changes[key], list) or len(changes[key]) > 100000:
@@ -316,7 +311,40 @@ class Studio:
             self._write(updated)
             return updated
 
-    def _rebuild_segments(self, project):
+    def _set_transcript(self, project, transcript):
+        """Keep old word cuts as source ranges; never reuse another transcript's IDs."""
+        from .speech import filler_suggestions, validate_transcript
+
+        validate_transcript(transcript, project["source_info"]["duration"])
+        cleared_ids = list(project["excluded_word_ids"])
+        if cleared_ids:
+            project["base_segments"] = self._word_selected_segments(project)
+        project["excluded_word_ids"] = []
+        project["transcript"] = copy.deepcopy(transcript)
+        project["transcript"]["fillers"] = filler_suggestions(
+            transcript["words"], transcript["language"] or ""
+        )
+        project["story"] = None
+        project.pop("selected_hook", None)
+        for kind in (
+            "preview",
+            "final",
+            "cover",
+            "captions_srt",
+            "captions_vtt",
+            "captions_ass",
+            "quality",
+            "storyboard",
+            "caption",
+            "package",
+        ):
+            project["artifacts"].pop(kind, None)
+        return {
+            "preserved_word_cuts": bool(cleared_ids),
+            "cleared_word_ids": cleared_ids,
+        }
+
+    def _word_selected_segments(self, project):
         segments = project["base_segments"]
         transcript = project.get("transcript")
         if transcript and transcript.get("words") and project["excluded_word_ids"]:
@@ -336,6 +364,10 @@ class Studio:
                 for word in word_ranges
                 if max(base["start"], word["start"]) < min(base["end"], word["end"])
             ]
+        return segments
+
+    def _rebuild_segments(self, project):
+        segments = self._word_selected_segments(project)
         for interval in project["gaze_exclusions"]:
             from .plan import _number
 
@@ -447,6 +479,17 @@ class Studio:
                     raise ValueError(
                         "Silence duration must be positive and padding non-negative"
                     )
+        if action == "transcribe":
+            if set(options) - {"language"}:
+                raise ValueError("Unsupported transcription options")
+            language = options.get("language")
+            if language is not None and (
+                not isinstance(language, str)
+                or not re.fullmatch(r"[a-z]{2,3}", language)
+            ):
+                raise ValueError(
+                    "Language must be a lowercase two/three-letter code or null"
+                )
         if (
             action in {"download", "publish", "obs"}
             and options.get("confirmed") is not True
@@ -455,6 +498,9 @@ class Studio:
         with self._lock():
             project = self.get(project_id)
             self._check_source(project)
+            input_digests = (
+                self._transcription_assets(project) if action == "transcribe" else None
+            )
             if action == "final" and project.get("approval", {}).get(
                 "digest"
             ) != self._digest(project):
@@ -475,6 +521,8 @@ class Studio:
                 "options": options,
                 "review_digest": self._digest(project),
             }
+            if action == "transcribe":
+                job["input_digests"] = input_digests
             directory = self._job_path(job["id"]).parent
             directory.mkdir(parents=True, exist_ok=False)
             (directory / "snapshot.json").write_text(
@@ -521,17 +569,30 @@ class Studio:
         self._check_source(project)
         if job["action"] == "inspect":
             return probe(project["source"])
-        if job["action"] == "silence":
+        if job["action"] in {"silence", "transcribe"}:
             from .runtime import invoke_worker
 
+            arguments = {"source": project["source"], **job["options"]}
+            if job["action"] == "transcribe":
+                arguments["model_path"] = project["settings"].get("whisper_model")
             return invoke_worker(
-                "silence",
-                {"source": project["source"], **job["options"]},
+                job["action"],
+                arguments,
                 self._job_path(job["id"]).parent / "engine",
                 python=project["settings"].get("runtime_python"),
                 cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
             )
         raise ValueError("Operation is not installed: " + job["action"])
+
+    def _transcription_assets(self, project):
+        if not project["source_info"]["has_audio"]:
+            return {}
+        from .speech import local_model_files
+
+        return {
+            str(asset): file_digest(asset)
+            for asset in local_model_files(project["settings"].get("whisper_model"))
+        }
 
     def _check_job_project(self, job):
         """Call under the state lock, both before execution and publication."""
@@ -545,31 +606,50 @@ class Studio:
         self._check_source(current)
         if self._digest(current) != job["review_digest"]:
             raise PermissionError("Project assets changed; review and retry")
+        if job["action"] == "transcribe" and (
+            self._transcription_assets(current) != job.get("input_digests")
+        ):
+            raise PermissionError(
+                "Transcription model changed; retry with the current model"
+            )
         return current
 
     def _complete_job(self, job, result):
         with self._lock():
             current = self._check_job_project(job)
             job = self.job(job["id"])
-            if job["action"] == "silence":
+            if job["action"] in {"silence", "transcribe"}:
                 from .plan import validate_plan
 
-                validate_plan(result)
-                if (
-                    result["source"] != current["source"]
-                    or result["source_duration"] != current["source_info"]["duration"]
-                ):
-                    raise ValueError("Silence result does not match the project source")
                 updated = copy.deepcopy(current)
-                updated["base_segments"] = [
-                    {
-                        "start": max(base["start"], keep["start"]),
-                        "end": min(base["end"], keep["end"]),
-                    }
-                    for base in current["base_segments"]
-                    for keep in result["segments"]
-                    if max(base["start"], keep["start"]) < min(base["end"], keep["end"])
-                ]
+                if job["action"] == "silence":
+                    validate_plan(result)
+                    if (
+                        result["source"] != current["source"]
+                        or result["source_duration"]
+                        != current["source_info"]["duration"]
+                    ):
+                        raise ValueError(
+                            "Silence result does not match the project source"
+                        )
+                    updated["base_segments"] = [
+                        {
+                            "start": max(base["start"], keep["start"]),
+                            "end": min(base["end"], keep["end"]),
+                        }
+                        for base in current["base_segments"]
+                        for keep in result["segments"]
+                        if max(base["start"], keep["start"])
+                        < min(base["end"], keep["end"])
+                    ]
+                else:
+                    job["transcript_update"] = self._set_transcript(updated, result)
+                    if (updated["transcript"]["status"] == "no_audio") != (
+                        not current["source_info"]["has_audio"]
+                    ):
+                        raise ValueError(
+                            "Transcript audio status does not match the source"
+                        )
                 self._rebuild_segments(updated)
                 validate_plan(
                     {
