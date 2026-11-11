@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -476,6 +477,40 @@ def _measure_loudness(source, audio_graph, directory, settings):
     return values
 
 
+def _frame_aligned(ranges, rate, source_duration, start_time=None):
+    """Snap kept ranges to whole source frames without cumulative drift.
+
+    Each trimmed range otherwise rounds to whole frames independently and the
+    concat filter pads audio to match, so many cuts lengthen the program. Frame
+    counts follow the rounded running total, keeping the output within half a
+    frame of the requested duration. Boundaries sit halfway between frame
+    timestamps so small container jitter cannot change which frames are kept.
+    Ranges shorter than one frame at their position are dropped.
+    """
+    numerator, _, denominator = rate.partition("/")
+    fps = Fraction(int(numerator), int(denominator or 1))
+    try:
+        origin = Fraction(str(float(start_time or 0)))
+    except ValueError:
+        origin = Fraction(0)
+    last_frame = int((Fraction(str(source_duration)) - origin) * fps)
+    aligned, exact, emitted = [], Fraction(0), 0
+    for start, end in ranges:
+        exact += Fraction(str(end)) - Fraction(str(start))
+        first = max(0, round((Fraction(str(start)) - origin) * fps))
+        count = round(exact * fps) - emitted
+        stop = min(first + count, last_frame)
+        if stop - first < 1:
+            continue
+        emitted += stop - first
+
+        def edge(frame):
+            return max(0.0, float(origin + (frame - Fraction(1, 2)) / fps))
+
+        aligned.append((round(edge(first), 6), round(edge(stop), 6)))
+    return aligned
+
+
 def export_video(source, segments, output, settings=None, captions=None):
     """Render ordered source intervals. Approval is the caller's responsibility.
 
@@ -490,7 +525,8 @@ def export_video(source, segments, output, settings=None, captions=None):
         raise ValueError("At least one segment is required")
     previous, duration = 0, 0
     graph, labels, audio_graph, audio_labels = [], [], [], []
-    for index, item in enumerate(segments):
+    ranges = []
+    for item in segments:
         if not isinstance(item, dict) or "start" not in item or "end" not in item:
             raise ValueError("Segments need start and end")
         start, end = (
@@ -500,6 +536,23 @@ def export_video(source, segments, output, settings=None, captions=None):
         if start < previous or end <= start:
             raise ValueError("Segments must be ordered, non-overlapping intervals")
         previous, duration = end, duration + end - start
+        ranges.append((start, end))
+    video_stream = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    rate = video_stream.get("r_frame_rate")
+    constant_rate = bool(
+        rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0"
+    )
+    if constant_rate:
+        ranges = _frame_aligned(
+            ranges, rate, info["duration"], video_stream.get("start_time")
+        )
+        if not ranges:
+            raise ValueError("Segments are shorter than one video frame")
+    # Loudness processing can extend the tail; never let audio outlast the cut.
+    program = sum(end - start for start, end in ranges)
+    for index, (start, end) in enumerate(ranges):
         graph.append(
             f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
         )
@@ -514,12 +567,12 @@ def export_video(source, segments, output, settings=None, captions=None):
             audio_labels.append(f"[a{index}]")
     graph.append(
         "".join(labels)
-        + f"concat=n={len(segments)}:v=1:a={int(info['has_audio'])}[joined]"
+        + f"concat=n={len(ranges)}:v=1:a={int(info['has_audio'])}[joined]"
         + ("[audio]" if info["has_audio"] else "")
     )
     if info["has_audio"]:
         audio_graph.append(
-            "".join(audio_labels) + f"concat=n={len(segments)}:v=0:a=1[audio]"
+            "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
         )
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
@@ -602,7 +655,10 @@ def export_video(source, segments, output, settings=None, captions=None):
                 normalization_method = "two-pass measured loudnorm"
             else:
                 normalization_method = "single-pass dynamic loudnorm"
-            graph.append(f"[audio]{loudnorm},aresample=48000[normalized]")
+            graph.append(
+                f"[audio]{loudnorm},aresample=48000,"
+                f"atrim=duration={program:.6f}[normalized]"
+            )
         elif info["has_audio"]:
             normalization_method = "disabled"
         graph.append("[joined]" + ",".join(filters) + "[video]")
