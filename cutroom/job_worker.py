@@ -1,5 +1,6 @@
 """Detached, durable per-workspace job supervisor."""
 
+import shutil
 import sys
 import time
 
@@ -27,6 +28,12 @@ def main(argv=None):
             studio._complete_job(job, result)
         return 0
     except Exception as error:
+        outputs = studio._job_path(job_id).parent / "outputs"
+        if outputs.is_symlink():
+            outputs.unlink()
+        elif outputs.is_dir():
+            # Unpublished outputs of a failed, stale or cancelled job are never eligible.
+            shutil.rmtree(outputs)
         with studio._lock():
             job = studio.job(job_id)
             job.update(

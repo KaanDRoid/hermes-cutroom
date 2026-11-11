@@ -241,9 +241,87 @@ class DashboardTests(unittest.TestCase):
                 "nosniff",
             )
 
+    def test_artifact_info_returns_only_a_facade_resolved_persisted_file(self):
+        self.studio.create("input.mp4")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "captions.srt"
+            path.write_bytes(b"1\n00:00:00,000 --> 00:00:01,000\nUnit fixture\n")
+            self.studio.projects["p1"]["artifacts"]["captions_srt"] = str(path)
+            response = self.client.get("/projects/p1/artifact-info/captions_srt")
+            self.assertEqual(response.status_code, 200, response.text)
+            metadata = response.json()
+            self.assertEqual(metadata["path"], str(path))
+            self.assertEqual(metadata["name"], "captions.srt")
+            self.assertEqual(metadata["mime"], "text/plain")
+            self.assertEqual(metadata["size"], path.stat().st_size)
+            self.assertIsInstance(metadata["version"], str)
+            self.assertEqual(
+                self.client.get("/projects/p1/artifact-info/secret").status_code, 422
+            )
+            self.assertEqual(
+                self.client.get("/projects/p1/artifact-info/final").status_code, 404
+            )
+
+    def test_caption_and_report_download_chunks_use_the_same_versioned_file_boundary(
+        self,
+    ):
+        import base64
+
+        self.studio.create("input.mp4")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for kind, filename, mime, payload in (
+                ("captions_srt", "captions.srt", "text/plain", b"Unit caption\n"),
+                ("captions_vtt", "captions.vtt", "text/vtt", b"WEBVTT\n"),
+                ("quality", "quality.json", "application/json", b'{"fixture":true}'),
+            ):
+                with self.subTest(kind=kind):
+                    path = root / filename
+                    path.write_bytes(payload)
+                    self.studio.projects["p1"]["artifacts"][kind] = str(path)
+                    endpoint = f"/projects/p1/artifact-data/{kind}"
+                    response = self.client.get(endpoint + "?length=4")
+                    self.assertEqual(response.status_code, 200, response.text)
+                    chunk = response.json()
+                    self.assertEqual(base64.b64decode(chunk["data"]), payload[:4])
+                    self.assertEqual(chunk["filename"], filename)
+                    self.assertEqual(chunk["mime"], mime)
+                    self.assertEqual(chunk["total"], len(payload))
+                    next_chunk = self.client.get(
+                        endpoint,
+                        params={
+                            "offset": 4,
+                            "version": chunk["version"],
+                        },
+                    )
+                    self.assertEqual(next_chunk.status_code, 200, next_chunk.text)
+                    self.assertEqual(
+                        base64.b64decode(next_chunk.json()["data"]), payload[4:]
+                    )
+                    self.assertEqual(
+                        self.client.get(endpoint + "?length=1048577").status_code, 422
+                    )
+                    self.assertEqual(
+                        self.client.get(endpoint + "?version=stale").status_code, 409
+                    )
+                    self.assertEqual(
+                        self.client.get(endpoint + "?offset=1000").status_code, 416
+                    )
+                    self.assertEqual(
+                        self.client.get(f"/projects/p1/media/{kind}").status_code, 422
+                    )
+            self.assertEqual(
+                self.client.get("/projects/p1/artifact-data/secret").status_code, 422
+            )
+            self.assertEqual(
+                self.client.get("/projects/p1/artifact-data/final").status_code, 404
+            )
+
     def test_jobs_delegate_to_submit_with_cancel_and_explicit_remote_consent(self):
         self.studio.create("input.mp4")
         for action in (
+            "inspect",
+            "silence",
             "transcribe",
             "vision",
             "segment",

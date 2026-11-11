@@ -194,8 +194,13 @@ def probe(source: str | Path) -> dict:
     )
     data = json.loads(result.stdout)
     video = next(
-        stream for stream in data["streams"] if stream["codec_type"] == "video"
+        (stream for stream in data["streams"] if stream["codec_type"] == "video"),
+        None,
     )
+    if video is None:
+        raise ValueError(
+            "A video stream is required; audio-only files are not supported"
+        )
     duration = _number(float(data["format"]["duration"]))
     if duration <= 0:
         raise ValueError("Media duration must be positive")

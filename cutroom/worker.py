@@ -23,6 +23,26 @@ def execute(operation, arguments):
         from .speech import transcribe
 
         return transcribe(**arguments)
+    if operation == "vision":
+        from .vision import analyze_faces
+
+        return analyze_faces(**arguments)
+    if operation == "segment":
+        from .vision import segment_person
+
+        return segment_person(**arguments)
+    if operation in {"preview", "final"}:
+        from .postproduction import export_video
+
+        return export_video(**arguments)
+    if operation == "cover":
+        from .postproduction import make_cover
+
+        return make_cover(**arguments)
+    if operation == "qa":
+        from .postproduction import quality_report
+
+        return quality_report(**arguments)
     raise ValueError("Unsupported engine operation: " + operation)
 
 
