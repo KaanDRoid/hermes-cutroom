@@ -62,6 +62,28 @@ class MediaTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
+    def test_audio_only_input_is_a_clear_validation_error(self):
+        audio = self.root / "audio-only-fixture.wav"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-n",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=0.5",
+                str(audio),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        with self.assertRaisesRegex(ValueError, "video stream"):
+            media.probe(audio)
+
     def test_detect_real_tone_silence_tone(self):
         self.assertTrue(
             hasattr(media, "detect_silences"), "silence detection is missing"

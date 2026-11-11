@@ -147,7 +147,7 @@ class Studio:
         payload = {
             key: value
             for key, value in project.items()
-            if key not in {"artifacts", "approval", "status"}
+            if key not in {"artifacts", "artifact_lineage", "approval", "status"}
         }
         assets = {}
         settings = project["settings"]
@@ -256,6 +256,9 @@ class Studio:
                     raise ValueError("Title must be under 500 characters")
                 if not isinstance(merged.get("brand", {}), dict):
                     raise ValueError("Brand must be an object")
+                from .postproduction import validate_brand
+
+                validate_brand(merged.get("brand", {}))
                 for key in ("captions", "normalize_audio", "use_segmented"):
                     if key in merged and not isinstance(merged[key], bool):
                         raise ValueError(key + " must be boolean")
@@ -308,8 +311,72 @@ class Studio:
             updated["revision"] += 1
             updated["status"] = "draft"
             updated.pop("approval", None)
+            self._prune_artifacts(updated)
             self._write(updated)
             return updated
+
+    def _segment_inputs(self, project):
+        """Fingerprint of everything a person-layer render depends on."""
+        settings = project["settings"]
+        files = {}
+        for key in ("segmentation_model", "background", "graphic"):
+            value = settings.get(key)
+            if isinstance(value, str) and value and not value.startswith("#"):
+                path = _local_path(value, must_exist=False)
+                files[key] = file_digest(path) if path.is_file() else None
+        payload = {
+            "source": project["source_sha256"],
+            "settings": {
+                key: settings.get(key)
+                for key in ("segmentation_model", "background", "graphic", "max_width")
+            },
+            "files": files,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, allow_nan=False).encode()
+        ).hexdigest()
+
+    def _artifact_current(self, project, kind):
+        lineage = project.get("artifact_lineage", {}).get(kind)
+        if lineage is None:
+            return True  # Unmanaged legacy entry; still confined by artifact().
+        if kind == "segmented":
+            return lineage.get("inputs") == self._segment_inputs(project)
+        return lineage.get("digest") == self._digest(project)
+
+    def _prune_artifacts(self, project):
+        """Drop links whose inputs no longer match; files are never deleted."""
+        lineage = project.setdefault("artifact_lineage", {})
+        # Segmented first: render digests can depend on the segmented asset.
+        for kind in sorted(project["artifacts"], key=lambda name: name != "segmented"):
+            if not self._artifact_current(project, kind):
+                project["artifacts"].pop(kind, None)
+                lineage.pop(kind, None)
+        for kind in list(lineage):
+            if kind not in project["artifacts"]:
+                lineage.pop(kind)
+
+    def _story_ready(self, project):
+        story = project.get("story")
+        if not story:
+            return None
+        if project.get("selected_hook") is None:
+            return "Choose one of the three hooks before final export"
+        if (
+            story.get("selected_hook") != project.get("selected_hook")
+            or not story.get("storyboard")
+            or story.get("segments") != project["segments"]
+            or story.get("brief") != project["brief"]
+            or story.get("voice") != project["voice"]
+        ):
+            return "Build the storyboard for the selected hook and current cut before final export"
+        return None
+
+    def _current_render(self, project):
+        for kind in ("final", "preview"):
+            if kind in project["artifacts"] and self._artifact_current(project, kind):
+                return kind
+        return None
 
     def _set_transcript(self, project, transcript):
         """Keep old word cuts as source ranges; never reuse another transcript's IDs."""
@@ -490,6 +557,21 @@ class Studio:
                 raise ValueError(
                     "Language must be a lowercase two/three-letter code or null"
                 )
+        if action in {"segment", "storyboard", "preview", "final", "qa"} and options:
+            raise ValueError("This action takes no options; use project settings")
+        if action == "vision":
+            if set(options) - {"frame_step"}:
+                raise ValueError("Unsupported vision options")
+            step = options.get("frame_step", 1)
+            if isinstance(step, bool) or not isinstance(step, int) or step < 1:
+                raise ValueError("frame_step must be a positive integer")
+        if action == "cover":
+            from .plan import _number
+
+            if set(options) - {"time"}:
+                raise ValueError("Unsupported cover options")
+            if "time" in options and _number(options["time"]) < 0:
+                raise ValueError("Cover time must be non-negative")
         if (
             action in {"download", "publish", "obs"}
             and options.get("confirmed") is not True
@@ -498,9 +580,8 @@ class Studio:
         with self._lock():
             project = self.get(project_id)
             self._check_source(project)
-            input_digests = (
-                self._transcription_assets(project) if action == "transcribe" else None
-            )
+            upstream = self._preflight(project, action)
+            input_digests = self._job_inputs(project, action, upstream)
             if action == "final" and project.get("approval", {}).get(
                 "digest"
             ) != self._digest(project):
@@ -520,9 +601,10 @@ class Studio:
                 "created_at": time.time(),
                 "options": options,
                 "review_digest": self._digest(project),
+                "input_digests": input_digests,
             }
-            if action == "transcribe":
-                job["input_digests"] = input_digests
+            if upstream:
+                job["upstream"] = upstream
             directory = self._job_path(job["id"]).parent
             directory.mkdir(parents=True, exist_ok=False)
             (directory / "snapshot.json").write_text(
@@ -560,6 +642,110 @@ class Studio:
                 self._write_job(job)
         return self.job(job["id"])
 
+    def _preflight(self, project, action):
+        """Reject actions whose prerequisites are missing before a job exists."""
+        settings = project["settings"]
+        if action == "storyboard":
+            transcript = project.get("transcript") or {}
+            if not transcript.get("words"):
+                raise ValueError(
+                    "Storyboard needs a timed transcript with words; transcribe first"
+                )
+        if action in {"vision", "segment"}:
+            key = "face_model" if action == "vision" else "segmentation_model"
+            model = settings.get(key)
+            if not model or not _local_path(model, must_exist=False).is_file():
+                raise ValueError(
+                    f"Set settings.{key} to an existing local model file; "
+                    "run `cutroom setup-models` to acquire it. Nothing is downloaded automatically"
+                )
+        if action in {"preview", "final"} and settings.get("use_segmented"):
+            if not (
+                "segmented" in project["artifacts"]
+                and self._artifact_current(project, "segmented")
+            ):
+                raise ValueError(
+                    "Run segment for the current settings before rendering the person layer"
+                )
+        if action == "final":
+            problem = self._story_ready(project)
+            if problem:
+                raise PermissionError(problem)
+        if action in {"cover", "qa"}:
+            upstream = self._current_render(project)
+            if upstream is None:
+                raise ValueError("Render a current preview or final first")
+            return upstream
+        return None
+
+    def _job_inputs(self, project, action, upstream=None):
+        """Digests of files a job reads beyond the source and reviewed assets."""
+        if action == "transcribe":
+            return self._transcription_assets(project)
+        paths = []
+        if action in {"vision", "segment"}:
+            key = "face_model" if action == "vision" else "segmentation_model"
+            paths.append(project["settings"].get(key))
+        if upstream:
+            paths.append(project["artifacts"][upstream])
+        return {
+            str(_local_path(path)): file_digest(_local_path(path))
+            for path in paths
+            if path
+        }
+
+    def _cues(self, project):
+        """Output-time caption cues for kept, non-excluded words."""
+        from .speech import caption_cues, remap_words
+
+        transcript = project.get("transcript") or {}
+        excluded = set(project["excluded_word_ids"])
+        words = [w for w in transcript.get("words") or [] if w["id"] not in excluded]
+        if not words:
+            return []
+        total = sum(s["end"] - s["start"] for s in project["segments"])
+        cues, previous = [], 0.0
+        for cue in caption_cues(remap_words(words, project["segments"])):
+            start, end = max(cue["start"], previous), min(cue["end"], total)
+            if end - start >= 0.05 and cue["text"].strip():
+                cues.append({"start": start, "end": end, "text": cue["text"]})
+                previous = end
+        return cues
+
+    def _render_settings(self, project, preset):
+        settings = project["settings"]
+        brand = {
+            key: value
+            for key, value in settings.get("brand", {}).items()
+            if key not in {"aspect", "preset"}
+        }
+        title = settings.get("title") or ""
+        story = project.get("story") or {}
+        if not title and story.get("opening_hook"):
+            title = story["opening_hook"]["text"]
+        if title and "\n" not in title:
+            import textwrap
+
+            aspect = settings.get("aspect", "source")
+            if aspect == "source":
+                info = project["source_info"]
+                aspect = "portrait" if info["height"] > info["width"] else "landscape"
+            width = {"portrait": 24, "square": 28}.get(aspect, 36)
+            lines = textwrap.wrap(title, width) or [title]
+            if len(lines) > 3:
+                lines = lines[:3]
+                lines[-1] = lines[-1][: width - 1].rstrip() + "…"
+            title = "\n".join(lines)
+        result = {
+            "preset": preset,
+            "aspect": settings.get("aspect", "source"),
+            "brand": brand,
+            "title": title,
+            "normalize_audio": settings.get("normalize_audio", True),
+            "timeout": 3600 if preset == "final" else 900,
+        }
+        return result
+
     def _perform_job(self, job):
         project = json.loads(
             (self._job_path(job["id"]).parent / "snapshot.json").read_text(
@@ -567,22 +753,154 @@ class Studio:
             )
         )
         self._check_source(project)
-        if job["action"] == "inspect":
+        action = job["action"]
+        if action == "inspect":
             return probe(project["source"])
-        if job["action"] in {"silence", "transcribe"}:
-            from .runtime import invoke_worker
+        directory = self._job_path(job["id"]).parent
+        outputs = directory / "outputs"
+        if action == "storyboard":
+            return self._storyboard(project, outputs)
+        from .runtime import invoke_worker
 
-            arguments = {"source": project["source"], **job["options"]}
-            if job["action"] == "transcribe":
-                arguments["model_path"] = project["settings"].get("whisper_model")
+        settings = project["settings"]
+
+        def run(operation, arguments, timeout=1800):
             return invoke_worker(
-                job["action"],
+                operation,
                 arguments,
-                self._job_path(job["id"]).parent / "engine",
-                python=project["settings"].get("runtime_python"),
+                directory / ("engine-" + operation),
+                python=settings.get("runtime_python"),
+                cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
+                timeout=timeout,
+            )
+
+        if action in {"silence", "transcribe"}:
+            arguments = {"source": project["source"], **job["options"]}
+            if action == "transcribe":
+                arguments["model_path"] = settings.get("whisper_model")
+            return invoke_worker(
+                action,
+                arguments,
+                directory / "engine",
+                python=settings.get("runtime_python"),
                 cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
             )
-        raise ValueError("Operation is not installed: " + job["action"])
+        if action == "vision":
+            return run(
+                "vision",
+                {
+                    "source": project["source"],
+                    "face_model": settings["face_model"],
+                    "frame_step": job["options"].get(
+                        "frame_step", settings.get("frame_step", 1)
+                    ),
+                },
+                timeout=3600,
+            )
+        outputs.mkdir(exist_ok=False)
+        if action == "segment":
+            return run(
+                "segment",
+                {
+                    "source": project["source"],
+                    "segmentation_model": settings["segmentation_model"],
+                    "output": str(outputs / "segmented.mp4"),
+                    "background": settings.get("background") or None,
+                    "graphic": settings.get("graphic") or None,
+                    "max_width": settings.get("max_width", 1280),
+                },
+                timeout=7200,
+            )
+        cues = self._cues(project)
+        if action in {"preview", "final"}:
+            from .speech import write_subtitles
+
+            source = project["source"]
+            if settings.get("use_segmented"):
+                source = project["artifacts"]["segmented"]
+            result = run(
+                action,
+                {
+                    "source": source,
+                    "segments": project["segments"],
+                    "output": str(outputs / (action + ".mp4")),
+                    "settings": self._render_settings(project, action),
+                    "captions": cues if settings.get("captions") is True else None,
+                },
+                timeout=7200 if action == "final" else 3600,
+            )
+            artifacts = {action: result["output"]}
+            if cues:
+                for format in ("srt", "vtt"):
+                    written = write_subtitles(
+                        cues, outputs / ("captions." + format), format=format
+                    )
+                    artifacts["captions_" + format] = written["path"]
+            return {**result, "render_source": source, "artifacts": artifacts}
+        video = project["artifacts"][job["upstream"]]
+        if action == "cover":
+            preset = "final" if job["upstream"] == "final" else "preview"
+            render = self._render_settings(project, preset)
+            result = run(
+                "cover",
+                {
+                    "video": video,
+                    "output": str(outputs / "cover.png"),
+                    "title": render.pop("title"),
+                    "settings": render,
+                    "time": job["options"].get("time", 0),
+                },
+            )
+            return {**result, "artifacts": {"cover": result["output"]}}
+        if action == "qa":
+            preset = "final" if job["upstream"] == "final" else "preview"
+            render = self._render_settings(project, preset)
+            render.pop("title")
+            render["expected_duration"] = sum(
+                s["end"] - s["start"] for s in project["segments"]
+            )
+            report = run(
+                "qa",
+                {
+                    "video": video,
+                    "settings": render,
+                    "captions": cues or None,
+                },
+                timeout=3600,
+            )
+            report = {**report, "video": job["upstream"]}
+            path = outputs / "quality.json"
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(report, stream, indent=2, allow_nan=False)
+            return {**report, "artifacts": {"quality": str(path)}}
+        raise ValueError("Operation is not installed: " + action)
+
+    def _storyboard(self, project, outputs):
+        """Deterministic, source-quoted hooks and storyboard; no invented text."""
+        from .narrative import publication_caption, story_options
+
+        transcript = {**project["transcript"], "segments": project["segments"]}
+        story = story_options(
+            transcript, brief=project["brief"], voice=project["voice"]
+        )
+        selected = project.get("selected_hook")
+        story["selected_hook"] = selected
+        if selected is None:
+            story["storyboard"] = []
+            story["status"] = "awaiting_hook_selection"
+        else:
+            story["opening_hook"] = story["hooks"][selected]
+        caption = publication_caption(
+            transcript, brief=project["brief"], voice=project["voice"]
+        )
+        outputs.mkdir(exist_ok=False)
+        artifacts = {}
+        for key, data in (("storyboard", story), ("caption", caption)):
+            path = outputs / (key + ".json")
+            with path.open("x", encoding="utf-8") as stream:
+                json.dump(data, stream, indent=2, allow_nan=False)
+            artifacts[key] = str(path)
+        return {"story": story, "caption": caption, "artifacts": artifacts}
 
     def _transcription_assets(self, project):
         if not project["source_info"]["has_audio"]:
@@ -606,19 +924,86 @@ class Studio:
         self._check_source(current)
         if self._digest(current) != job["review_digest"]:
             raise PermissionError("Project assets changed; review and retry")
-        if job["action"] == "transcribe" and (
-            self._transcription_assets(current) != job.get("input_digests")
+        expected = job.get("input_digests") or {}
+        if self._job_inputs(current, job["action"], job.get("upstream")) != expected:
+            if job["action"] == "transcribe":
+                raise PermissionError(
+                    "Transcription model changed; retry with the current model"
+                )
+            raise PermissionError("Job inputs changed; submit a new job")
+        if job["action"] == "final" and (
+            current.get("approval", {}).get("digest") != self._digest(current)
         ):
-            raise PermissionError(
-                "Transcription model changed; retry with the current model"
-            )
+            raise PermissionError("Final export lost its current human approval")
         return current
+
+    def _owned(self, job, value):
+        outputs = (self._job_path(job["id"]).parent / "outputs").resolve()
+        path = _local_path(value)
+        if not path.is_relative_to(outputs) or not path.is_file():
+            raise PermissionError(
+                "Job artifact must be a file in its own output directory"
+            )
+        return path
+
+    def _publish(self, project, job, artifacts, **extra):
+        lineage = project.setdefault("artifact_lineage", {})
+        for kind, value in artifacts.items():
+            path = self._owned(job, value)
+            stat = path.stat()
+            project["artifacts"][kind] = str(path)
+            lineage[kind] = {
+                "job_id": job["id"],
+                "sha256": file_digest(path),
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                **extra,
+            }
+        digest = self._digest(project)
+        for kind in artifacts:
+            if kind == "segmented":
+                lineage[kind]["inputs"] = self._segment_inputs(project)
+            else:
+                lineage[kind]["digest"] = digest
 
     def _complete_job(self, job, result):
         with self._lock():
             current = self._check_job_project(job)
             job = self.job(job["id"])
-            if job["action"] in {"silence", "transcribe"}:
+            action = job["action"]
+            if action in {"vision", "segment", "storyboard"}:
+                updated = copy.deepcopy(current)
+                if action == "vision":
+                    frames = result.get("frames", [])
+                    result = {
+                        **result,
+                        "frames": frames[:2000],
+                        "frames_truncated": len(frames) > 2000,
+                    }
+                    updated["analysis"] = result
+                elif action == "segment":
+                    summary = {
+                        k: v
+                        for k, v in result.items()
+                        if k not in {"artifacts", "output"}
+                    }
+                    updated["segmentation"] = summary
+                    result = summary | {"artifacts": {"segmented": result["output"]}}
+                else:
+                    updated["story"] = result["story"]
+                updated["revision"] += 1
+                updated["status"] = "draft"
+                updated.pop("approval", None)
+                self._publish(updated, job, result.get("artifacts", {}))
+                self._prune_artifacts(updated)
+                self._write(updated)
+                job["applied_revision"] = updated["revision"]
+            elif action in {"preview", "final", "cover", "qa"}:
+                updated = copy.deepcopy(current)
+                extra = {"from": job["upstream"]} if job.get("upstream") else {}
+                self._publish(updated, job, result["artifacts"], **extra)
+                self._write(updated)
+            if action in {"silence", "transcribe"}:
                 from .plan import validate_plan
 
                 updated = copy.deepcopy(current)
@@ -701,9 +1086,19 @@ class Studio:
         }
         if kind not in allowed or kind not in project["artifacts"]:
             raise FileNotFoundError("Artifact is not available")
+        if not self._artifact_current(project, kind):
+            raise FileNotFoundError("Artifact is stale for the current revision")
         path = _local_path(project["artifacts"][kind])
         if not path.is_relative_to(self.root):
             raise PermissionError("Artifact must remain inside this workspace")
+        lineage = project.get("artifact_lineage", {}).get(kind)
+        if lineage:
+            stat = path.stat()
+            if (stat.st_size, stat.st_mtime_ns) != (
+                lineage["size"],
+                lineage["mtime_ns"],
+            ):
+                raise PermissionError("Artifact changed after publication")
         return path
 
     def list(self):

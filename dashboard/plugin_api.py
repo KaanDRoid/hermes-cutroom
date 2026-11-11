@@ -146,6 +146,8 @@ def list_projects(studio=Depends(get_studio)):
 
 
 Action = Literal[
+    "inspect",
+    "silence",
     "transcribe",
     "vision",
     "segment",
@@ -289,6 +291,22 @@ def file_artifact(
     )
 
 
+@router.get("/projects/{project_id}/artifact-info/{kind}")
+def artifact_info(
+    project_id: ProjectId, kind: ArtifactKind, studio=Depends(get_studio)
+):
+    """Persisted, facade-validated paths for the SDK's captured file-save action."""
+    path, mime = artifact_path(studio, project_id, kind)
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "name": path.name,
+        "mime": mime,
+        "size": stat.st_size,
+        "version": f"{stat.st_size:x}-{stat.st_mtime_ns:x}",
+    }
+
+
 @router.get("/projects/{project_id}/media/{kind}")
 def media_chunk(
     project_id: ProjectId,
@@ -303,8 +321,29 @@ def media_chunk(
     Native grants never enter media URLs. The renderer builds and revokes a
     local Blob URL from bounded, authenticated chunks after an explicit click.
     """
+    return artifact_chunk(
+        studio, project_id, kind, offset, length, version, media_only=True
+    )
+
+
+@router.get("/projects/{project_id}/artifact-data/{kind}")
+def artifact_data(
+    project_id: ProjectId,
+    kind: ArtifactKind,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    length: Annotated[int, Query(ge=1, le=1_048_576)] = 1_048_576,
+    version: Annotated[str | None, Query(max_length=128)] = None,
+    studio=Depends(get_studio),
+):
+    """Bounded JSON download fallback for hosts without native file saving."""
+    return artifact_chunk(studio, project_id, kind, offset, length, version)
+
+
+def artifact_chunk(
+    studio, project_id, kind, offset, length, version, *, media_only=False
+):
     path, mime = artifact_path(studio, project_id, kind)
-    if not mime.startswith(("video/", "image/")):
+    if media_only and not mime.startswith(("video/", "image/")):
         raise HTTPException(422, "Artifact is not playable media")
     stat = path.stat()
     current = f"{stat.st_size:x}-{stat.st_mtime_ns:x}"
@@ -323,6 +362,7 @@ def media_chunk(
     if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
         raise HTTPException(409, "Media changed while loading; reload the player")
     return {
+        "filename": path.name,
         "data": base64.b64encode(chunk).decode("ascii"),
         "offset": offset,
         "next_offset": offset + len(chunk),

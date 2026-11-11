@@ -1,6 +1,47 @@
 # Studio background jobs
 
-The public Python facade currently executes **`inspect`, `silence` and `transcribe`**. Other accepted action names still fail as uninstalled operations; they are not completed workflows. Transcription routing is implemented, but real-model Studio acceptance is deferred; contract tests are not evidence of recognition accuracy.
+The public Studio facade (`cutroom.studio.Studio`) executes every editing action as a detached, revision-bound job: **`inspect`, `silence`, `transcribe`, `vision`, `segment`, `storyboard`, `preview`, `final`, `cover` and `qa`**. External adapters (`download`, `publish`, `obs`, `calendar`) are accepted names that still require explicit consent and are not wired into the Studio pipeline.
+
+The same jobs are reachable from three surfaces: the Python facade, the plugin REST API (`dashboard/plugin_api.py`) used by the Desktop page, and the `cutroom_project` / `cutroom_job` agent tools. Approval exists only on the human surfaces (Desktop page and REST); no agent tool can approve.
+
+## Action reference
+
+| Action | Options | Requires | Publishes | Revision |
+|---|---|---|---|---|
+| `inspect` | none | source | job result only | unchanged |
+| `silence` | `noise_db`, `min_duration`, `padding` | source | intersected `base_segments` | +1, approval removed |
+| `transcribe` | `language` | `settings.whisper_model` for audio sources | `transcript` with review-only fillers | +1, approval removed |
+| `vision` | `frame_step` | `settings.face_model` | `analysis` (frames capped at 2000 in the project; review-only intervals) | +1, approval removed |
+| `segment` | none | `settings.segmentation_model`; optional `background` (file or `#RRGGBB`), `graphic`, `max_width` | `segmented` artifact and `segmentation` summary | +1, approval removed |
+| `storyboard` | none | a transcript with words | `story` (three hooks; scenes once a hook is selected), `storyboard` and `caption` JSON artifacts | +1, approval removed |
+| `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain | unchanged |
+| `final` | none | current human approval; selected hook and current storyboard if a story exists | `final` MP4 plus caption sidecars | unchanged |
+| `cover` | `time` | a current `final` (preferred) or `preview` | `cover` PNG | unchanged |
+| `qa` | none | a current `final` (preferred) or `preview` | `quality` JSON report | unchanged |
+
+Unknown options are rejected before a job is created. Source, model and asset paths always come from the saved project settings, never from job options.
+
+## Hook and storyboard flow
+
+1. Run `storyboard` after transcription. It returns three source-quoted hook options (opening, middle and closing excerpts) and an empty storyboard with status `awaiting_hook_selection`. Duplicate excerpts are marked with `duplicate_of`.
+2. The person picks a hook (`selected_hook` 0–2).
+3. Run `storyboard` again. Scenes are built for the current cut and the chosen hook is recorded as `opening_hook`. When `settings.title` is empty, the opening hook becomes the on-screen title, wrapped to at most three lines for the target aspect.
+4. `final` is refused while a story exists without a selected hook, or when the storyboard no longer matches the selected hook, the current cut, brief or voice.
+
+Hooks and storyboards are deterministic excerpts of the transcript. Nothing is generated, paraphrased or invented, and footage is never reordered.
+
+## Artifact lineage and staleness
+
+Every published file must live in its job's own `jobs/<id>/outputs/` directory. Its lineage records the job, SHA-256, size, modification time and the review digest it was rendered for (`segmented` records a fingerprint of the source, segmentation model, background, graphic and width instead).
+
+- Any edit that changes the review digest unlinks the dependent renders (`preview`, `final`, `cover`, captions, `quality`, `storyboard`, `caption`). Files are kept on disk; links are removed.
+- `Studio.artifact()` refuses stale links and files whose size or modification time changed after publication.
+- A job whose project, source, approval or input files changed while it ran fails without publishing, and its unpublished outputs are deleted.
+- `cover` and `qa` record whether they used the `final` or the `preview`.
+
+## End-to-end acceptance harness
+
+`scripts/acceptance.py` runs the whole chain through the public facade on the attributed reference speech placed over a synthetic test pattern: transcribe → silence → storyboard → choose hook → storyboard → vision → preview → (stand-in human approval) → final → cover → qa. It writes `summary.json` with timings, transcript, hooks, artifact names, final dimensions and QA results under `artifacts/`.
 
 ## Silence selection
 
@@ -63,10 +104,8 @@ The resulting selection must remain valid and nonempty before anything is writte
 
 ## Limits
 
-- This is a Python facade workflow, not a completed native Desktop or advanced CLI workflow.
-- Real-model transcription acceptance, preview/final export and other advanced action routing remain open.
+- Real-model routing is accepted on the attributed reference speech and the consented portrait clip; it is not a claim of editorial quality across languages, accents or long recordings.
 - Applying project state and completing a job are separate atomic JSON replacements under one lock, **not** a crash-atomic multi-file transaction. Recovery from a crash between those writes remains a P1 task.
-- Artifact lineage and invalidation across edits still need the broader P1 implementation.
 - Synthetic tone/silence fixtures prove mechanics, not editorial quality on human speech.
 
 ## Local verification
@@ -85,6 +124,6 @@ Six focused transcription checks pass: worker dispatch, bad-option/missing-model
 
 The transcription branch's local suite collected **126 tests: 113 passed, 12 skipped and one existing error**. Ruff and all four Node Desktop contract tests pass; no new native Desktop acceptance or branch CI result is implied. Skips include missing native models/consented media and unavailable Windows symlink privileges. Extensive transcription acceptance is deliberately deferred; see [the pending checklist](testing.md#deferred-transcription-acceptance).
 
-### Existing export-duration defect
+### Export duration on FFmpeg 7.1 (resolved)
 
-`test_final_portrait_and_real_safe_area_cover` raises `Cover time must precede end of video`; the same error was present in the pre-change 110-test baseline. Further synthetic reproduction with local FFmpeg 7.1 shows that `export_video` reports a 0.1-second MP4 for a requested 0.2-second, 10-fps selection. `ffprobe -show_frames` decodes only the first frame despite the stream declaring two frames; the cover request at 0.1 seconds therefore falls at the incorrectly shortened end. This is not fixed by relaxing the cover bounds check. Forcing a constant output frame rate fixes that fixture but can alter variable-frame-rate media, so it has not been applied as an unreviewed export-semantics change. Reproduction scripts and media are local in ignored `artifacts/`, and the original failing acceptance test remains enabled.
+On FFmpeg 7.1, `export_video` could report a 0.1-second MP4 for a 0.2-second, 10-fps selection because the container dropped the last frame's duration, which made `test_final_portrait_and_real_safe_area_cover` fail with `Cover time must precede end of video`. Exports from constant-frame-rate sources (`r_frame_rate` equal to `avg_frame_rate`) now request a constant output timeline at the source rate (`-fps_mode cfr -r <rate>`). Variable-frame-rate sources keep their original timestamps. `test_constant_rate_sources_keep_every_frame_duration_in_exports` covers both branches; FFmpeg 9.0 did not reproduce the original defect, so confirm on 7.1 when available.

@@ -5,7 +5,7 @@
 | Location | Responsibility |
 |---|---|
 | `plugin.yaml`, root `__init__.py` | Native Hermes manifest and entry point |
-| `cutroom/hermes_plugin.py` | Four currently registered core tools |
+| `cutroom/hermes_plugin.py`, `cutroom/studio_tools.py` | Six registered tools: four plan-file core tools plus `cutroom_project` / `cutroom_job` for the Studio |
 | `cutroom/media.py` | Local ffprobe, silence detection, trim/concat rendering |
 | `cutroom/plan.py`, `project.py` | Legacy edit plans, HTML review and exact-plan receipts |
 | `cutroom/speech.py` | Local transcription, word exclusions, filler suggestions, timeline remapping and subtitle files |
@@ -24,7 +24,7 @@
 
 The working core uses `plan.json` and `approval.json` inside a caller-selected new project directory. The evolving Studio uses version-2 `studio.json` records under a workspace's `projects/<id>/` directory, plus `jobs/<id>/` records and snapshots.
 
-Do not confuse these formats or imply that every advanced action is already routed. At this checkpoint, the Studio supervisor and engine dispatcher execute `inspect`, `silence` and `transcribe`; other action routing remains an integration task. Silence/transcript results are applied under the state lock to matching revisions. Transcription also fingerprints recognized local model assets; replacing a transcript preserves existing word-derived cuts as base ranges instead of reusing old word IDs. See [Studio background jobs](studio-jobs.md) for the contract-tested boundary and deferred model acceptance.
+Do not confuse these formats. The Studio supervisor and engine dispatcher execute every editing action (`inspect`, `silence`, `transcribe`, `vision`, `segment`, `storyboard`, `preview`, `final`, `cover`, `qa`); see [Studio jobs](studio-jobs.md) for options, prerequisites and publication rules. External adapters are not part of the Studio pipeline.
 
 ## Planned execution path
 
@@ -54,4 +54,9 @@ Queued cancellation, facade reopening and a queued silence job surviving real su
 
 Final exports must bind approval to the current source, settings, edit ranges and relevant assets. Source changes invalidate the project. A review receipt is a consistency guard, not proof of a real human's identity. Keep approval out of model-facing tool schemas.
 
-The REST backend accepts only facade-resolved artifact kinds; it does not offer an arbitrary file-read route. Canonical report/subtitle keys are `quality`, `captions_srt`, `captions_vtt` and `captions_ass`; legacy aliases map explicitly as `qa` -> `quality`, `captions` -> `captions_srt` and `subtitles` -> `captions_vtt`. Native media playback uses bounded authenticated JSON chunks to construct a local Blob URL, not credentials embedded in a video URL. The media player controls still need to be wired into the Desktop page.
+The REST backend accepts only facade-resolved artifact kinds; it does not offer an arbitrary file-read route. Canonical report/subtitle keys are `quality`, `captions_srt`, `captions_vtt` and `captions_ass`; legacy aliases map explicitly as `qa` -> `quality`, `captions` -> `captions_srt` and `subtitles` -> `captions_vtt`. Native media playback uses bounded authenticated JSON chunks to construct a local Blob URL, not credentials embedded in a video URL. The Desktop page loads media through those chunks and saves artifacts through the SDK's captured native file-save action, using the persisted path returned by `/artifact-info/{kind}`; `/artifact-data/{kind}` is a bounded JSON fallback.
+
+
+## Artifact lineage
+
+Published Studio files carry lineage (job, SHA-256, size, modification time and the review digest or, for the person layer, an input fingerprint). Edits unlink stale renders; `Studio.artifact()` refuses stale or modified files. Details are in [Studio jobs](studio-jobs.md#artifact-lineage-and-staleness).
