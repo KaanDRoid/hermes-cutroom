@@ -47,6 +47,22 @@ For platform projects:
 - `final` is refused before a job is created when the kept ranges run longer than the profile's hard limit (Shorts 180 s, Reels 1,200 s, TikTok 3,600 s). `preview` still runs so the edit can be reviewed and trimmed.
 - `qa` adds `platform_frame`, `platform_duration`, `platform_fps`, `platform_upscale`, `platform_loudness` and `safe_zone`. A warning (for example a Reels edit over three minutes, a 25 fps Reels render or a 320×180 source enlarged to 1080×1920) makes `passed` false, as for other checks. `platform_fps` accepts NTSC 30000/1001 as 30 fps and, for variable-rate video, also checks the slowest frame interval (`min_instantaneous_fps`). `platform_upscale` compares the fitted picture with the source size of the render, which Studio passes as `source_video` in the QA settings; it is skipped when that is unknown. The `safe_zone` check recomputes the text boxes from the render geometry; it does not inspect glyph pixels.
 
+## Music, cut sounds and voice clean-up
+
+```python
+project = studio.update(project["id"], {"settings": {
+    "music": {"path": "C:/Music/own-track.wav", "volume_db": -18, "duck_db": 15,
+              "source_note": "Recorded by the channel owner"},
+    "cut_sfx": {"path": "C:/Music/click.wav", "volume_db": -12},
+    "voice_cleanup": "light",
+}}, project["revision"])
+```
+
+- Files must be local audio files of at most 256 MiB (cut sounds at most 5 s). Their SHA-256 becomes part of the digest. A render refuses a file that changed after it was saved; select it again.
+- `null` removes music or a cut sound; `voice_cleanup: "off"` removes the clean-up setting.
+- `preview` and `final` render the cut voice (cleaned if requested), duck the music under detected speech, place the cut sound on each cut, and normalise the mix to the profile target. The result gains `audio_mix` (what was mixed and the measured ducking depth). `audio_normalization.method` says whether the gain was linear, linear after true-peak limiting, or a dynamic fallback.
+- `qa` on such a render adds `music` (measured depth against the requested depth) and `mix_loudness` (±0.5 LU, true peak).
+
 ## Platform versions (derived projects)
 
 `Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling project for another platform:

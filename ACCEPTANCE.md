@@ -44,7 +44,9 @@ Status (F0, 2026-11-12):
 
 - **A19 verified by automated tests on synthetic media.** Four sourced, dated profiles; a landscape test pattern renders at exactly 1080×1920 for Shorts and passes frame, length, loudness and safe-zone checks; one source produces four derived projects whose preview QA passes their own platform checks; a 185-second Shorts edit fails QA and a 190-second Shorts final is refused. Evidence: `tests/test_platforms.py`, `tests/test_studio_platforms.py`, [creator formats F0](docs/creator-formats.md#f0--platform-profiles-and-derived-projects). Native Desktop runs per platform belong to A28.
 - **A20 pending.** Platform siblings with their own settings, digest and approval are implemented and tested; siblings limited to a source range arrive with F5.
-- A21–A28 pending.
+- A21–A23 pending.
+- **A24 verified by automated tests and a real-footage preview.** Person-supplied music is hashed into the digest, ducked under detected speech by at least the requested depth (measured on the delivered file), faded and looped or padded. Voice clean-up keeps sample-exact sync. The mix meets −14 LUFS ±0.5 LU at −1 dBTP, limiting peaks when linear gain would not fit. Evidence: `tests/test_audio_mix.py`, `tests/test_av_sync.py`, and a Reels preview of real speech in [creator formats F4](docs/creator-formats.md#f4--music-cut-sounds-and-voice-clean-up). Native Desktop runs belong to A28.
+- A25–A28 pending.
 
 ## Consented acceptance source
 

@@ -11,6 +11,7 @@
 | `cutroom/speech.py` | Local transcription, word exclusions, filler suggestions, timeline remapping and subtitle files |
 | `cutroom/narrative.py` | Extractive hook/storyboard/caption drafts grounded in timed source text |
 | `cutroom/vision.py` | Face/head-facing/mouth review and person-layer compositing |
+| `cutroom/audio.py` | Local music and cut-sound validation and hashing, voice clean-up filters, speech detection, ducking envelope, mix rendering and peak limiting |
 | `cutroom/platforms.py` | Sourced, dated platform profiles (frame, length, frame rate, safe zone, loudness, text and cover limits) |
 | `cutroom/postproduction.py` | Brand validation, preview/final export, platform safe-zone layout, covers and quality reports |
 | `cutroom/integrations.py` | Consent-gated download, OBS, rclone, local package and ICS adapters |
@@ -50,6 +51,12 @@ Verified artifacts + project update + review checkpoint
 ```
 
 Native dependencies stay in a dedicated runtime rather than being injected into Hermes's interpreter. That interpreter comes only from user-owned sources: `CUTROOM_PYTHON`, then the bundled `.venv`, then Hermes' own interpreter. It is never project data, so a model-writable project cannot make a later job execute an arbitrary file. Every child process (job supervisor, model worker, FFmpeg, consented integrations) starts from the allowlist in `cutroom/childenv.py` rather than the parent environment. Import and tool registration must not load models, execute media jobs or start network requests.
+
+## Audio path
+
+For constant-frame-rate sources, `export_video` trims audio from each range's first kept frame. Each range lasts exactly as many samples as its frames, counted cumulatively, and the audio is joined separately from the video, so sync holds across any number of cuts.
+
+When `settings.audio` is set, `audio.prepare_mix` renders the cut voice, the music stem and the cut sounds to a 32-bit float mix before loudness normalisation. Normalisation then reads that file. If linear gain would push the true peak over the limit, `audio.limit_peaks` applies the gain and an oversampled limiter first. QA reads the measured mix report from the render job.
 
 ## Persistence and concurrency
 

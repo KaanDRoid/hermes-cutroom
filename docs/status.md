@@ -1,6 +1,13 @@
 # Implementation status
 
-## November 12 — F0 platform profiles (branch `feat/f0-platform-profiles`)
+## November 12 — F4 music, cut sounds and voice clean-up (branch `feat/f4-music-voice`)
+
+- Added optional local music (ducking, fades, loop, offset, source note), a cut sound and voice clean-up presets. Files are hashed into the digest. When linear loudness gain would exceed the true-peak limit, Cutroom limits peaks first and labels the method honestly. QA compares measured ducking with the request. Desktop gets audio controls. Details: [creator formats F4](creator-formats.md#f4--music-cut-sounds-and-voice-clean-up).
+- Fixed in every constant-frame-rate export: audio ran half a frame plus the video start offset behind the picture, drifted about 0.4 ms per cut on millisecond-timestamped sources, and could end before the last frame. A flash/click test now holds sync within 0.5 ms across twelve cuts.
+- On real speech (Sandra clip, 24 s Reels preview), the mix measured −14.1 LUFS and −1.3 dBTP, 15.75 dB of ducking measured on the delivered file, and sync within one sample.
+- Local gates: **284 Python tests OK** (14 skipped without local models and media), **22/22 Desktop tests**, Ruff clean.
+
+## November 12 — F0 platform profiles (merged, pull request #12)
 
 - Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
 - Review fixes on the same branch: captions and lower thirds clamped into the safe zone for every brand-valid position, burned cues split into two-line events, NTSC frame rates accepted and variable-rate video checked by its slowest frame interval, a `platform_upscale` QA check with rotation-aware source sizes, corrected and current source links, cover data as stated by the platforms, frames marked as Cutroom's choice, `derive` resetting the final resolution (optional `final_resolution`) and stripping names, missing files reported as REST 422, and a Desktop overlay that follows the render's recorded platform after its metadata loads. Details: [creator formats, review fixes](creator-formats.md#review-fixes).

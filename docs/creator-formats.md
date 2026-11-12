@@ -64,7 +64,7 @@ F7 and F8 also close the two items still open from 0.1: live acceptance of the o
 
 ## F0 — Platform profiles and derived projects
 
-Status: implemented on `feat/f0-platform-profiles`; not yet merged into `feat/creator-formats`.
+Status: merged into `feat/creator-formats` (pull request #12).
 
 ### What shipped
 
@@ -107,6 +107,95 @@ An independent review of F0 found the following; each is fixed with a test writt
 - Source links: the Reels length now cites the Help Center article that states 20 minutes and the 3-minute recommendation; dead AES and EBU links and redirected Google, Meta and TikTok links were replaced by their current addresses. Covers now record what the pages state (Reels 420×654, YouTube 3840×2160 and Shorts 2160×3840 thumbnails), and frames are marked as Cutroom's choice within each platform's rule.
 - Deriving no longer carries a parent's 4K setting silently and stores the stripped name; a missing source or asset is reported as such (REST 422) instead of "Project not found".
 - The Desktop overlay uses the platform recorded with the loaded render and appears only after the video metadata has loaded.
+
+## F4 — Music, cut sounds and voice clean-up
+
+Status: implemented on `feat/f4-music-voice`.
+
+### What shipped
+
+- **Settings.** All three are optional and off by default. Projects without them keep the same render settings and digest.
+  - `settings.music`: `path` (required), `volume_db` (−60 to 0, default −18), `fade_in` and `fade_out` (0–30 s, default 0.5), `duck` (default true), `duck_db` (12–36, default 12), `loop` (default true), `start_offset` (seconds into the file, default 0) and `source_note` (where the music came from, up to 2,000 characters).
+  - `settings.cut_sfx`: `path` (a sound of at most 5 s) and `volume_db` (−60 to 0, default −12).
+  - `settings.voice_cleanup`: `off`, `light` or `strong`.
+
+  Studio, the REST model and the `cutroom_project` tool all apply the same rules, and `null` removes music or a cut sound.
+- **Local files only.** An audio file must be a local regular file of at most 256 MiB, whose container FFprobe reads as an audio data format (WAV, MP3, FLAC, Ogg, AAC, MP4/M4A/MOV/3GP, Matroska/WebM or AIFF) with an audio stream. Music may be up to 24 h long.
+  - Cutroom records the file's SHA-256, duration and format, and the file is part of the review digest, so replacing it revokes approval.
+  - A render checks the hash again before and after mixing, and refuses a file that changed since it was saved ("select the file again").
+  - Nothing is downloaded and no music library is shipped.
+- **Voice clean-up.**
+  - `light`: an 80 Hz high-pass, FFT noise reduction (12 dB, noise floor −25 dB) and gentle 2:1 compression.
+  - `strong`: 18 dB noise reduction and a de-esser.
+  - The FFT denoiser delays audio by 1,200 samples (25 ms) at 48 kHz. Cutroom pads and trims around it, so the cleaned voice stays on its frames.
+- **Mix.** The cut, cleaned voice is rendered to 32-bit float PCM first.
+  - **Speech detection.** Speech is found from 50 ms RMS windows above max(−50 dBFS, loudest − 30 dB), and gaps up to 0.25 s are bridged.
+  - **Ducking.** The music gain reaches its full depth 0.15 s before speech and recovers over 0.25 s after it. The depth is `duck_db` plus a 0.75 dB guard.
+  - **Music bed.** Music is looped or padded with silence to the program length, with fades at both ends.
+  - **Cut sounds.** A cut sound is resampled to 48 kHz and placed on every cut in program time.
+  - **Measurement.** The music stem is rendered separately and its level is measured on speech and pause plateaus, so the reported depth is measured, not configured.
+- **Loudness.**
+  - The mix is normalised in two passes to the profile target (−14 LUFS and −1 dBTP for platforms, −16 LUFS and −1.5 dBTP for `custom`).
+  - FFmpeg's `loudnorm` applies a linear gain only if the gained true peak stays under the limit; otherwise it silently switches to dynamic mode and can miss the target. When the gain would not fit, Cutroom applies the gain itself, limits peaks at 0.3 dB under the limit with a 4× oversampled limiter (look-ahead compensated), measures again, and repeats at most three times.
+  - The export result names the method: `two-pass measured loudnorm`, `two-pass measured loudnorm (true-peak limited)`, or `dynamic loudnorm (linear gain would exceed the true-peak limit)`. Plain renders without music now report a dynamic fallback too, instead of claiming a measured two-pass result.
+- **QA.** `qa` adds two checks:
+  - `music`: the measured ducking depth must be at least the requested depth minus 0.5 dB, and never below 12 dB.
+  - `mix_loudness`: within ±0.5 LU of the target, and a true peak no more than 0.3 dB over the limit.
+- **Desktop.** Settings has a "Music, cut sounds & voice" group: file paths, levels, fades, offset and a source note, switches for loop and ducking, and three voice clean-up buttons. A blank number uses the default. A blank path removes a saved sound, or sends nothing if there was none. Out-of-range numbers are refused before saving.
+
+### Audio/video sync across cuts (all renders)
+
+Measuring the mix against the plain export found an older timing error in every constant-frame-rate export, with or without music.
+
+Frame-aligned ranges begin half a frame before their first kept frame, and `concat` also drops the video stream's start offset. Audio trimmed at those edges therefore played half a frame (16.7 ms at 29.97 fps), plus the start offset, behind the picture. In addition, the joint `concat` padded each audio range to the video's container timestamps. WebM rounds these to milliseconds, so the error added about 0.4 ms per cut. The normalised audio could also end 9.7 ms before the video.
+
+Each audio range now:
+
+- starts at its first kept frame's timestamp,
+- lasts exactly as many samples as its frames, counted cumulatively so rounding cannot add up,
+- and is joined separately from the video.
+
+The plain and mixed paths share the same audio ranges. Variable-frame-rate sources keep the previous path.
+
+### How it was verified
+
+- **RED before each fix.** The logs are in `artifacts/f4/`:
+  - `latency-red.log`: the denoiser shifted audio by 1,200 samples.
+  - `headroom-red.log`: the loudness fallback was unlabelled and missed the target.
+  - `qa-depth-red.log`: QA ignored the requested depth.
+  - `av-sync-red.log`, `av-sync-many-red.log` and `av-duration-red.log`: the A/V offset, the per-cut drift and the short audio.
+  - The Desktop removal path was checked by mutation (`desktop-mutation.log`).
+- **GREEN.**
+  - `artifacts/f4/full-4.log`: 284 Python tests OK, 14 skipped without local models and media.
+  - Desktop checks 22/22, Ruff clean.
+- **`tests/test_audio_mix.py`:**
+  - Strict settings, hashing and refusal of changed files.
+  - Speech detection and the ducking envelope.
+  - Ducking depth measured on the delivered file, loudness, true peak and duration.
+  - Loop and pad with fades.
+  - The custom target is kept, and an unchanged graph when audio settings are absent.
+  - Cut sounds on each cut, including a 44.1 kHz effect.
+  - Hum and hiss reduction with no shift against the plain render.
+  - Sample-exact denoiser latency.
+  - True-peak limiting and labelling.
+  - QA against the requested depth.
+- **`tests/test_av_sync.py`.** A synthetic source with a flash every 30 frames, a click at a fixed offset, and video starting 7 ms after audio. Every flash/click pair keeps the source offset within 0.5 ms, and audio ends with the last frame, on these cases:
+  - plain, normalised and mixed renders,
+  - three ranges,
+  - twelve ranges cut between frames.
+- **Real footage.** `artifacts/f4/render_evidence.py`, `artifacts/f4/evidence/measurements.json`. The Sandra clip (Wikitongues / Elise Lieberman, CC BY-SA 4.0), kept ranges 0–12 s and 14–26 s, rendered as a 24 s Reels preview with music, a cut sound and `light` clean-up. The music bed and cut sound were generated for the test.
+  - Loudness −14.1 LUFS, true peak −1.3 dBTP; `music`, `mix_loudness` and `duration` pass. Before the limiter fix, the same render measured −13.4 LUFS and the method said "two-pass" while FFmpeg had run in dynamic mode.
+  - Ducking measured independently on the delivered file is 15.75 dB, against an identical render without ducking with the voice band as the gain reference. The request was 15 dB plus the 0.75 dB guard; the stem report says 15.95 dB.
+  - The cut sound is 34.8 dB above the plain render in its band at the cut (12.012 s).
+  - Voice offset against the plain render is 0 or −1 sample in both ranges, and audio and video lengths match to within one sample.
+  - The source file is unchanged (hash compared before and after).
+
+### Open items
+
+- A native Desktop run of the new controls (F8 / A28).
+- Ducking follows detected speech energy. Loud non-speech sound in the voice track also ducks the music.
+- The limiter and its latency compensation use `alimiter` options available since FFmpeg 5.1. The FFmpeg 7.1 run in F8 will confirm them.
+- A source whose peaks sit within 13 dB of its loudness cannot reach −14 LUFS at −1 dBTP without heavy limiting. After three attempts Cutroom falls back to dynamic loudness and QA reports `mix_loudness` as a warning.
 
 ## Order and branches
 
