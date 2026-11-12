@@ -533,6 +533,59 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
 });
 
+test('saves optional local music, cut sounds and voice cleanup without enabling audio on legacy projects', async () => {
+  jobRows = [];
+  const ui = await studio(async (_path, options) => {
+    if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 };
+    return selectedProject;
+  });
+  const field = name => nodes(ui.draw()).find(n => n.type === 'Input' && n.props.name === name);
+  assert.ok(field('music.path'), 'Music path control');
+  assert.ok(field('cut_sfx.path'), 'Cut sound path control');
+  await button(ui.draw(), 'Save settings').props.onClick();
+  assert.equal(ui.calls.find(c => c.options?.method === 'PATCH').options.body.changes.settings.music, undefined);
+  for (const [name, value] of [['music.path', 'C:/audio/bed.wav'], ['music.volume_db', '-20'], ['music.duck_db', '18'], ['music.fade_in', '1'], ['music.fade_out', '2'], ['music.start_offset', '0.5'], ['music.source_note', 'Own recording'], ['cut_sfx.path', 'C:/audio/click.wav'], ['cut_sfx.volume_db', '-10']]) field(name).props.onChange({ target: { value } });
+  await button(ui.draw(), 'Voice cleanup: light').props.onClick();
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const saved = ui.calls.filter(c => c.options?.method === 'PATCH').at(-1).options.body.changes.settings;
+  assert.equal(saved.music.path, 'C:/audio/bed.wav');
+  assert.equal(saved.music.duck_db, 18);
+  assert.equal(saved.music.volume_db, -20);
+  assert.equal(saved.music.source_note, 'Own recording');
+  assert.equal(saved.music.loop, true);
+  assert.equal(saved.music.duck, true);
+  assert.equal(saved.voice_cleanup, 'light');
+  assert.equal(saved.cut_sfx.volume_db, -10);
+  for (const label of ['Loop music', 'Duck music during speech']) assert.ok(nodes(ui.draw()).find(n => n.props['aria-label'] === label));
+});
+
+test('a blank path removes a saved sound, computed fields are not sent back, and out-of-range numbers are refused', async () => {
+  jobRows = [];
+  const music = { path: 'C:/audio/bed.wav', volume_db: -18, duck_db: 12, fade_in: 0.5, fade_out: 0.5, start_offset: 0, loop: false, duck: true, source_note: 'Own', sha256: 'a'.repeat(64), duration: 20, format: 'wav' };
+  const cut_sfx = { path: 'C:/audio/click.wav', volume_db: -12, sha256: 'b'.repeat(64), duration: 0.2, format: 'wav' };
+  const ui = await studio(async (_path, options) => {
+    if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 };
+    return selectedProject;
+  }, { settings: { aspect: 'source', brand: {}, music, cut_sfx, voice_cleanup: 'strong' } });
+  const field = name => nodes(ui.draw()).find(n => n.type === 'Input' && n.props.name === name);
+  const patches = () => ui.calls.filter(c => c.options?.method === 'PATCH');
+  assert.equal(field('music.path').props.value, 'C:/audio/bed.wav', 'Saved music is shown');
+  assert.equal(nodes(ui.draw()).find(n => n.props['aria-label'] === 'Loop music').props.checked, false, 'Saved loop setting is shown');
+  field('music.duck_db').props.onChange({ target: { value: '40' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  assert.equal(patches().length, 0, 'Out-of-range ducking is not sent');
+  assert.match(text(nodes(ui.draw()).find(n => n.props.role === 'alert')), /music\.duck_db must be between 12 and 36/);
+  field('music.duck_db').props.onChange({ target: { value: '' } });
+  field('cut_sfx.path').props.onChange({ target: { value: '  ' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const saved = patches().at(-1).options.body.changes.settings;
+  assert.equal(saved.cut_sfx, null, 'Blank path removes the saved cut sound');
+  assert.equal(saved.music.duck_db, undefined, 'Blank number falls back to the default');
+  assert.equal(saved.music.loop, false);
+  for (const key of ['sha256', 'duration', 'format']) assert.equal(saved.music[key], undefined, `${key} is recomputed by the backend`);
+  assert.equal(saved.voice_cleanup, 'strong');
+});
+
 test('uses only public SDK/React imports and no renderer or polling bypasses', async () => {
   await load();
   assert.ok(imports.length > 0);

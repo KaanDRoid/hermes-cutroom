@@ -227,7 +227,10 @@ def definitions():
         "description": "Editable project fields only (update). Approval, "
         "artifacts, source, revision and status cannot be changed here.",
         "properties": {
-            "settings": {"type": "object", "description": "Render/model settings"},
+            "settings": {
+                "type": "object",
+                "description": "Render/model settings; settings.music is an optional local audio object (path, volume_db, fade_in, fade_out, duck, duck_db, loop, start_offset, source_note); settings.cut_sfx takes path and volume_db; assets are hashed into approval. settings.voice_cleanup is off/light/strong.",
+            },
             "brief": {"type": "string", "description": "Editorial brief"},
             "voice": {"type": "string", "description": "Narrative voice"},
             "excluded_word_ids": {

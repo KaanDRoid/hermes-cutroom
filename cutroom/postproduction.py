@@ -12,10 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
-    from . import platforms
+    from . import audio, platforms
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
-    from cutroom import platforms
+    from cutroom import audio, platforms
     from cutroom.childenv import child_env
 
 
@@ -276,6 +276,8 @@ def _settings(settings):
         "platform",
         "final_resolution",
         "source_video",
+        "audio",
+        "audio_mix",
     }
     if settings is None:
         settings = {}
@@ -302,6 +304,8 @@ def _settings(settings):
         platform="custom",
         final_resolution=None,
         source_video=None,
+        audio=None,
+        audio_mix=None,
     )
     entry = platforms.profile(settings.get("platform", "custom"))
     if entry["loudness"] is not None:
@@ -310,6 +314,7 @@ def _settings(settings):
         result["true_peak_db"] = entry["loudness"]["true_peak_db"]
     result.update(settings)
     result["brand"] = brand
+    result["audio"] = audio.validate_settings(result["audio"])
     if result["final_resolution"] not in (None, *platforms.FINAL_RESOLUTIONS):
         raise ValueError("final_resolution must be '1080' or '2160'")
     validate_brand({**brand, "preset": result["preset"], "aspect": result["aspect"]})
@@ -704,14 +709,31 @@ def _output_path(output, suffixes):
     return path
 
 
+def _linear_fits(measured, settings):
+    """FFmpeg's loudnorm applies a linear gain only if the gained true peak fits the limit.
+
+    When it does not, loudnorm silently switches to dynamic mode even with
+    linear=true, so the delivered loudness can miss the target.
+    """
+    gain = settings["loudness_lufs"] - measured["input_i"]
+    return measured["input_tp"] + gain <= settings["true_peak_db"]
+
+
 def _measure_loudness(source, audio_graph, directory, settings):
     """First loudnorm pass over the exact cut audio; returns FFmpeg's measurements."""
     script = directory / "measure.txt"
+    calibrated = bool(settings.get("audio"))
+    if calibrated:
+        audio_graph = audio_graph + [
+            "[audio]asplit=2[loudness_input][ebu_input]",
+            "[ebu_input]ebur128=peak=true[ebu_measured]",
+        ]
     script.write_text(
         ";\n".join(
             audio_graph
             + [
-                f"[audio]loudnorm=I={settings['loudness_lufs']}:"
+                ("[loudness_input]" if calibrated else "[audio]")
+                + f"loudnorm=I={settings['loudness_lufs']}:"
                 f"TP={settings['true_peak_db']}:LRA=11:print_format=json[measured]"
             ]
         ),
@@ -733,6 +755,7 @@ def _measure_loudness(source, audio_graph, directory, settings):
             "measure.txt",
             "-map",
             "[measured]",
+            *(["-map", "[ebu_measured]"] if calibrated else []),
             "-f",
             "null",
             "-",
@@ -760,6 +783,15 @@ def _measure_loudness(source, audio_graph, directory, settings):
     # Silent or near-silent programs report -inf; linear correction is undefined.
     if not all(math.isfinite(value) for value in values.values()):
         return None
+    if calibrated:
+        # Use the same EBU integrated scan as delivery QA. Short gated mixtures
+        # can differ from loudnorm's oversampled first-pass gate by over 1 LU.
+        matches = re.findall(r"I:\s*([-+\d.inf]+) LUFS", text)
+        if matches and math.isfinite(float(matches[-1])):
+            # Dynamic mode needs loudnorm's own figures; linear mode uses the EBU scan.
+            values["loudnorm"] = dict(values)
+            values["input_i"] = float(matches[-1])
+            values["target_offset"] = 0.0
     return values
 
 
@@ -795,6 +827,39 @@ def _frame_aligned(ranges, rate, source_duration, start_time=None):
 
         aligned.append((round(edge(first), 6), round(edge(stop), 6)))
     return aligned
+
+
+def _audio_ranges(ranges, rate, start_time=None, sample_rate=48000):
+    """Audio intervals that start at each range's first kept video frame.
+
+    Frame-aligned video ranges begin half a frame before their first frame, and
+    concat drops the video stream's start offset. Trimming audio at those edges
+    would put it half a frame (plus that offset) behind the picture. Each audio
+    interval therefore starts at its first frame's timestamp. Its sample count
+    follows the running total of kept frames, so per-range rounding to whole
+    samples cannot accumulate across many cuts.
+    """
+    numerator, _, denominator = rate.partition("/")
+    fps = Fraction(int(numerator), int(denominator or 1))
+    try:
+        origin = Fraction(str(float(start_time or 0)))
+    except ValueError:
+        origin = Fraction(0)
+    result, total, emitted = [], Fraction(0), 0
+    for start, end in ranges:
+        first = max(0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2)))
+        stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
+        total += (stop - first) / fps
+        samples = round(total * sample_rate) - emitted
+        emitted += samples
+        result.append(
+            (
+                round(float(origin + first / fps), 6),
+                round(float(origin + stop / fps), 6),
+                samples,
+            )
+        )
+    return result
 
 
 def export_video(source, segments, output, settings=None, captions=None):
@@ -838,24 +903,54 @@ def export_video(source, segments, output, settings=None, captions=None):
             raise ValueError("Segments are shorter than one video frame")
     # Loudness processing can extend the tail; never let audio outlast the cut.
     program = sum(end - start for start, end in ranges)
-    for index, (start, end) in enumerate(ranges):
+    audio_stream = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "audio"), {}
+    )
+    try:
+        sample_rate = int(audio_stream.get("sample_rate") or 48000)
+    except ValueError:
+        sample_rate = 48000
+    sound_ranges = (
+        _audio_ranges(ranges, rate, video_stream.get("start_time"), sample_rate)
+        if constant_rate
+        else [(start, end, None) for start, end in ranges]
+    )
+    if constant_rate:
+        # The kept frames, not the half-frame edges (the first edge is clamped at 0).
+        program = sum(samples for _, _, samples in sound_ranges) / sample_rate
+    for index, ((start, end), (sound_start, sound_end, samples)) in enumerate(
+        zip(ranges, sound_ranges)
+    ):
         graph.append(
             f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
         )
         labels.append(f"[v{index}]")
         if info["has_audio"]:
             trim = (
-                f"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]"
+                f"[0:a:0]atrim=start={sound_start}:end={sound_end},asetpts=PTS-STARTPTS"
             )
+            if samples is not None:
+                # Exact length; a joint concat would pad audio to the video's
+                # container timestamps, which are often rounded to milliseconds.
+                trim += f",apad,atrim=end_sample={samples}"
+            trim += f"[a{index}]"
             graph.append(trim)
-            labels.append(f"[a{index}]")
+            if not constant_rate:
+                labels.append(f"[a{index}]")
             audio_graph.append(trim)
             audio_labels.append(f"[a{index}]")
-    graph.append(
-        "".join(labels)
-        + f"concat=n={len(ranges)}:v=1:a={int(info['has_audio'])}[joined]"
-        + ("[audio]" if info["has_audio"] else "")
-    )
+    if constant_rate:
+        graph.append("".join(labels) + f"concat=n={len(ranges)}:v=1:a=0[joined]")
+        if info["has_audio"]:
+            graph.append(
+                "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
+            )
+    else:
+        graph.append(
+            "".join(labels)
+            + f"concat=n={len(ranges)}:v=1:a={int(info['has_audio'])}[joined]"
+            + ("[audio]" if info["has_audio"] else "")
+        )
     if info["has_audio"]:
         audio_graph.append(
             "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
@@ -956,29 +1051,101 @@ def export_video(source, segments, output, settings=None, captions=None):
             effects.append("lower_third")
         if captions:
             filters.append(_ass(directory, events, brand, width, height, layout))
+        mix_path, mix_report = None, None
+        has_audio = info["has_audio"]
+        if settings["audio"]:
+            mix_ranges = ranges
+            mix_audio_graph = audio_graph
+            if constant_rate:
+                fps = float(Fraction(rate))
+                lengths = [
+                    math.ceil((end - start) * fps - 0.001) / fps
+                    for start, end in ranges
+                ]
+                mix_ranges = [
+                    (start, start + length)
+                    for (start, _), length in zip(ranges, lengths)
+                ]
+                program = sum(lengths)
+                # audio_graph already holds exact-length ranges from each first frame.
+            mix_path, mix_report = audio.prepare_mix(
+                source,
+                mix_audio_graph,
+                directory,
+                program,
+                settings["audio"],
+                mix_ranges,
+                has_audio=has_audio,
+                timeout=settings["timeout"],
+            )
+            if has_audio:
+                graph.append("[audio]anullsink")
+            graph.append("[1:a:0]anull[audio]")
+            has_audio = True
         normalization_method = "no audio"
-        if info["has_audio"] and settings["normalize_audio"]:
-            measured = _measure_loudness(source, audio_graph, directory, settings)
+        if has_audio and (settings["normalize_audio"] or mix_path):
+            measured = _measure_loudness(
+                mix_path or source,
+                ["[0:a:0]anull[audio]"] if mix_path else audio_graph,
+                directory,
+                settings,
+            )
+            limited = False
+            if mix_path and measured and not _linear_fits(measured, settings):
+                # Limiting lowers loudness too, so the ceiling is recomputed from each
+                # result, always limiting the original mix. If it never fits, the
+                # unlimited mix goes through dynamic loudnorm and is labelled so.
+                original, original_measured = mix_path, measured
+                gain = settings["loudness_lufs"] - measured["input_i"]
+                for attempt in range(3):
+                    # 0.3 dB under the limit leaves room for the residual linear gain.
+                    mix_path = audio.limit_peaks(
+                        original,
+                        directory,
+                        gain,
+                        settings["true_peak_db"] - 0.3,
+                        settings["timeout"],
+                        f"mix-limited-{attempt}.wav",
+                    )
+                    measured = _measure_loudness(
+                        mix_path, ["[0:a:0]anull[audio]"], directory, settings
+                    )
+                    if not measured or _linear_fits(measured, settings):
+                        break
+                    gain += settings["loudness_lufs"] - measured["input_i"]
+                if measured and _linear_fits(measured, settings):
+                    limited = True
+                else:
+                    mix_path, measured = original, original_measured
             loudnorm = (
                 f"loudnorm=I={settings['loudness_lufs']}:"
                 f"TP={settings['true_peak_db']}:LRA=11"
             )
             if measured:
+                linear = _linear_fits(measured, settings)
+                values = measured if linear else measured.get("loudnorm", measured)
                 loudnorm += (
-                    f":measured_I={measured['input_i']}"
-                    f":measured_TP={measured['input_tp']}"
-                    f":measured_LRA={measured['input_lra']}"
-                    f":measured_thresh={measured['input_thresh']}"
-                    f":offset={measured['target_offset']}:linear=true"
+                    f":measured_I={values['input_i']}"
+                    f":measured_TP={values['input_tp']}"
+                    f":measured_LRA={values['input_lra']}"
+                    f":measured_thresh={values['input_thresh']}"
+                    f":offset={values['target_offset']}:linear=true"
                 )
-                normalization_method = "two-pass measured loudnorm"
+                if not linear:
+                    normalization_method = "dynamic loudnorm (linear gain would exceed the true-peak limit)"
+                elif limited:
+                    normalization_method = (
+                        "two-pass measured loudnorm (true-peak limited)"
+                    )
+                else:
+                    normalization_method = "two-pass measured loudnorm"
             else:
                 normalization_method = "single-pass dynamic loudnorm"
             graph.append(
                 f"[audio]{loudnorm},aresample=48000,"
                 f"atrim=duration={program:.6f}[normalized]"
             )
-        elif info["has_audio"]:
+        elif has_audio:
             normalization_method = "disabled"
         graph.append("[joined]" + ",".join(filters) + "[video]")
         (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
@@ -994,6 +1161,7 @@ def export_video(source, segments, output, settings=None, captions=None):
             "file",
             "-i",
             str(source),
+            *(["-protocol_whitelist", "file", "-i", str(mix_path)] if mix_path else []),
             "-filter_complex_threads",
             "2",
             "-/filter_complex",
@@ -1001,10 +1169,12 @@ def export_video(source, segments, output, settings=None, captions=None):
             "-map",
             "[video]",
         ]
-        if info["has_audio"]:
+        if has_audio:
             args += [
                 "-map",
-                "[normalized]" if settings["normalize_audio"] else "[audio]",
+                "[normalized]"
+                if settings["normalize_audio"] or mix_path
+                else "[audio]",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -1037,13 +1207,15 @@ def export_video(source, segments, output, settings=None, captions=None):
         result = _probe(temporary, settings["timeout"])
         result.pop("streams")
         os.link(temporary, output)
-    extra = {}
+    extra = {"audio_mix": mix_report} if mix_report else {}
     if layout is not None:
-        extra = {
-            "platform": settings["platform"],
-            "final_resolution": settings["final_resolution"],
-            "safe_zone_layout": layout,
-        }
+        extra.update(
+            {
+                "platform": settings["platform"],
+                "final_resolution": settings["final_resolution"],
+                "safe_zone_layout": layout,
+            }
+        )
     source_video = _source_video(info)
     content, factor = _content_upscale(source_video, width, height)
     return {
@@ -1064,7 +1236,7 @@ def export_video(source, segments, output, settings=None, captions=None):
         "lower_third_y": lower_y,
         "expected_duration": duration,
         "audio_normalization": {
-            "enabled": info["has_audio"] and settings["normalize_audio"],
+            "enabled": has_audio and (settings["normalize_audio"] or bool(mix_path)),
             "target_lufs": settings["loudness_lufs"],
             "true_peak_db": settings["true_peak_db"],
             "method": normalization_method,
@@ -1620,6 +1792,45 @@ def quality_report(video, settings=None, captions=None):
                         target_peak_db=settings["true_peak_db"],
                         tolerance_lu=1,
                         source=target["source"],
+                    ),
+                )
+            if settings["audio_mix"] is not None:
+                music = settings["audio_mix"].get("music") or {}
+                duck = music.get("ducking")
+                depth = duck.get("depth_db") if duck else None
+                add(
+                    "music",
+                    "skip"
+                    if not music.get("present")
+                    else "warning"
+                    if duck
+                    and (
+                        depth is None
+                        or depth < max(12, (duck.get("requested_db") or 12) - 0.5)
+                    )
+                    else "pass",
+                    dict(
+                        present=bool(music.get("present")),
+                        depth_db=depth,
+                        ducking=duck,
+                        method="render-stage measured stem; final mix cannot isolate arbitrary music",
+                    ),
+                )
+                mix_issue = (
+                    integrated is None
+                    or abs(integrated - settings["loudness_lufs"]) > 0.5
+                    or peak is not None
+                    and peak > settings["true_peak_db"] + 0.3
+                )
+                add(
+                    "mix_loudness",
+                    "warning" if mix_issue else "pass",
+                    dict(
+                        integrated_lufs=integrated,
+                        target_lufs=settings["loudness_lufs"],
+                        true_peak_dbfs=peak,
+                        target_peak_db=settings["true_peak_db"],
+                        tolerance_lu=0.5,
                     ),
                 )
             silences = _intervals(analysis, "silence", info["duration"])
