@@ -45,7 +45,10 @@ PROJECT_ACTIONS = {
         {"project_id", "changes", "revision"},
     ),
     "review": ({"project_id"}, {"project_id"}),
+    "derive": ({"project_id", "platform", "name"}, {"project_id", "platform"}),
 }
+# Mirrors cutroom.platforms.PLATFORMS; kept literal so registering tools stays cheap.
+PLATFORMS = ("custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube")
 JOB_ACTIONS = {
     "submit": ({"project_id", "operation", "options"}, {"project_id", "operation"}),
     "list": ({"project_id"}, set()),
@@ -86,7 +89,7 @@ def _arguments(args, actions):
         raise ValueError(
             f"Missing required arguments for {action}: " + ", ".join(sorted(missing))
         )
-    for field in ("source", "name", "project_id", "job_id", "operation"):
+    for field in ("source", "name", "project_id", "job_id", "operation", "platform"):
         if field in args and (
             not isinstance(args[field], str) or not args[field].strip()
         ):
@@ -135,6 +138,10 @@ def project_handler(args, **kwargs):
 
     def perform():
         action = _arguments(args, PROJECT_ACTIONS)
+        if action == "derive" and args["platform"] not in PLATFORMS:
+            raise ValueError(
+                "Unsupported platform; expected one of: " + ", ".join(PLATFORMS)
+            )
         if action == "update":
             changes = args["changes"]
             if not isinstance(changes, dict) or not changes:
@@ -155,7 +162,7 @@ def project_handler(args, **kwargs):
         result = getattr(get_studio(), action)(**values)
         if action == "list":
             return [_compact(project) for project in result]
-        if action in ("get", "create", "update"):
+        if action in ("get", "create", "update", "derive"):
             return _summarize(result)
         if action == "review" and isinstance(result, dict) and "project" in result:
             return dict(result, project=_summarize(result.get("project")))
@@ -245,8 +252,12 @@ def definitions():
             f"transcript summarized to word_count plus the first "
             f"{TRANSCRIPT_PREVIEW_WORDS} words to protect context; "
             "update(project_id, changes, revision) applies editable fields with "
-            "optimistic revision checking; review(project_id) returns the exact "
-            "plan digest and notice for the human. " + APPROVAL_NOTICE
+            "optimistic revision checking (settings.platform selects a delivery "
+            "profile, settings.final_resolution is '1080' or '2160'); "
+            "review(project_id) returns the exact plan digest and notice for the "
+            "human; derive(project_id, platform, name?) creates a sibling project "
+            "for another platform that copies the edit but starts unapproved at "
+            "revision 1 with its own digest. " + APPROVAL_NOTICE
         ),
         "parameters": {
             "type": "object",
@@ -255,12 +266,17 @@ def definitions():
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "get", "update", "review"],
+                    "enum": ["create", "list", "get", "update", "review", "derive"],
                     "description": "Operation to perform",
                 },
                 "source": _string("Absolute local video path (create)"),
-                "name": _string("Optional project name (create)"),
-                "project_id": _string("Project id (get, update, review)"),
+                "name": _string("Optional project name (create, derive)"),
+                "project_id": _string("Project id (get, update, review, derive)"),
+                "platform": {
+                    "type": "string",
+                    "enum": list(PLATFORMS),
+                    "description": "Delivery profile of the new sibling (derive)",
+                },
                 "changes": changes,
                 "revision": {
                     "type": "integer",

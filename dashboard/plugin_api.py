@@ -21,7 +21,7 @@ router = APIRouter()
 _import_lock = threading.Lock()
 
 
-def get_studio():
+def _module(name):
     """Load our adjacent package, not a same-named package on the host path.
 
     Hermes loads this file as a standalone module with spec_from_file_location,
@@ -45,8 +45,11 @@ def get_studio():
             except Exception:
                 sys.modules.pop(key, None)
                 raise
-        studio = importlib.import_module(key + ".studio")
-    return studio.get_studio()
+        return importlib.import_module(key + "." + name)
+
+
+def get_studio():
+    return _module("studio").get_studio()
 
 
 class RequestModel(BaseModel):
@@ -143,6 +146,30 @@ def create_project(body: CreateProject, studio=Depends(get_studio)):
 @router.get("/projects")
 def list_projects(studio=Depends(get_studio)):
     return invoke(studio.list)
+
+
+PlatformName = Literal[
+    "custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube"
+]
+
+
+class DeriveProject(RequestModel):
+    platform: PlatformName
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+@router.post("/projects/{project_id}/derive", status_code=201)
+def derive_project(
+    project_id: ProjectId, body: DeriveProject, studio=Depends(get_studio)
+):
+    """A sibling for another platform; it never carries the parent's approval."""
+    return invoke(studio.derive, project_id, body.platform, name=body.name)
+
+
+@router.get("/platforms")
+def platform_profiles():
+    """Sourced profile data for the Desktop selector and safe-zone overlay."""
+    return _module("platforms").public_profiles()
 
 
 Action = Literal[

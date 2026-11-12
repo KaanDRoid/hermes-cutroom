@@ -75,6 +75,23 @@ class FakeStudio:
     def list(self):
         return list(self.projects.values())
 
+    def derive(self, project_id, platform, name=None):
+        parent = self.get(project_id)
+        if platform == "custom-error":
+            raise ValueError("Unsupported platform")
+        child = {
+            **parent,
+            "id": "p2",
+            "name": name or parent["name"] + " (derived)",
+            "revision": 1,
+            "settings": {**parent["settings"], "platform": platform},
+            "artifacts": {},
+            "derived_from": {"project_id": project_id},
+        }
+        self.calls.append(("derive", project_id, platform, name))
+        self.projects["p2"] = child
+        return child
+
     def get(self, project_id):
         return self.projects[project_id]
 
@@ -477,6 +494,62 @@ class DashboardTests(unittest.TestCase):
             422,
         )
         self.assertEqual(self.client.get("/projects/bad%5Cid").status_code, 422)
+
+    def test_derive_creates_a_platform_sibling_without_approval_fields(self):
+        self.studio.create("input.mp4")
+        response = self.client.post("/projects/p1/derive", json={"platform": "tiktok"})
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["id"], "p2")
+        self.assertIn(("derive", "p1", "tiktok", None), self.studio.calls)
+        response = self.client.post(
+            "/projects/p1/derive", json={"platform": "youtube", "name": "Long form"}
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["name"], "Long form")
+        for body in (
+            {},
+            {"platform": "vine"},
+            {"platform": "tiktok", "approval": {"digest": "a" * 64}},
+            {"platform": "tiktok", "confirmed": True},
+            {"platform": "tiktok", "name": ""},
+            {"platform": 3},
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(
+                    self.client.post("/projects/p1/derive", json=body).status_code,
+                    422,
+                )
+        self.assertEqual(
+            self.client.post(
+                "/projects/missing/derive", json={"platform": "tiktok"}
+            ).status_code,
+            404,
+        )
+
+    def test_platform_profiles_are_published_for_the_desktop(self):
+        response = self.client.get("/platforms")
+        self.assertEqual(response.status_code, 200, response.text)
+        profiles = {item["name"]: item for item in response.json()}
+        self.assertEqual(
+            list(profiles),
+            ["custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube"],
+        )
+        self.assertEqual(profiles["instagram_reels"]["safe_zone"]["top"], 0.14)
+        self.assertEqual(profiles["youtube_shorts"]["frame"]["preview"], [1080, 1920])
+
+    def test_platform_settings_pass_through_the_update_contract(self):
+        self.studio.create("input.mp4")
+        response = self.client.patch(
+            "/projects/p1",
+            json={
+                "revision": 0,
+                "changes": {
+                    "settings": {"platform": "youtube", "final_resolution": "2160"}
+                },
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["settings"]["platform"], "youtube")
 
     def test_create_and_list_projects(self):
         response = self.client.post(

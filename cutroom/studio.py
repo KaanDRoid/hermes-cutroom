@@ -242,12 +242,26 @@ class Studio:
                     "frame_step",
                     "max_width",
                     "use_segmented",
+                    "platform",
+                    "final_resolution",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
                 merged = updated["settings"] | settings
                 # Interpreter paths are no longer project data; drop legacy values.
                 merged.pop("runtime_python", None)
+                from .platforms import FINAL_RESOLUTIONS, profile
+
+                if "platform" in merged:
+                    entry = profile(merged["platform"])
+                    if entry["orientation"]:
+                        # A platform fixes the frame shape; other settings still apply.
+                        merged["aspect"] = entry["orientation"]
+                if (
+                    "final_resolution" in merged
+                    and merged["final_resolution"] not in FINAL_RESOLUTIONS
+                ):
+                    raise ValueError("final_resolution must be '1080' or '2160'")
                 if merged.get("aspect") not in {
                     "source",
                     "portrait",
@@ -320,6 +334,90 @@ class Studio:
             self._prune_artifacts(updated)
             self._write(updated)
             return updated
+
+    @staticmethod
+    def platform(project):
+        """Platform name of a project; projects without the setting are custom."""
+        return (project.get("settings") or {}).get("platform") or "custom"
+
+    def derive(self, project_id, platform, name=None):
+        """Create a sibling project for another platform from the same source.
+
+        The sibling copies the reviewed edit (transcript, cuts, story, brief,
+        voice, brand and model settings) but starts at revision 1 with no
+        artifacts, approval or jobs; a person reviews and approves it
+        separately. `derived_from` records the parent's revision and digest.
+        """
+        from .platforms import profile
+
+        entry = profile(platform)
+        if name is not None and (
+            not isinstance(name, str) or not 1 <= len(name.strip()) <= 200
+        ):
+            raise ValueError("Name must contain 1 to 200 characters")
+        with self._lock():
+            parent = self.get(project_id)
+            self._check_source(parent)
+            child = self._derived_project(parent, platform, entry, name)
+            self._directory(child["id"]).mkdir(parents=True, exist_ok=False)
+            self._write(child)
+            return child
+
+    def _derived_project(self, parent, platform, entry, name):
+        """Build a sibling record; a later source range would narrow its cuts here."""
+        settings = copy.deepcopy(parent["settings"])
+        settings.pop("runtime_python", None)
+        # The person layer is an artifact of the parent; the sibling must rebuild it.
+        settings.pop("use_segmented", None)
+        settings["platform"] = platform
+        if entry["orientation"]:
+            settings["aspect"] = entry["orientation"]
+        child = {
+            "version": 2,
+            "id": uuid.uuid4().hex,
+            "name": name or f"{parent['name']} ({entry['short_label']})",
+            "source": parent["source"],
+            "source_sha256": parent["source_sha256"],
+            "source_info": copy.deepcopy(parent["source_info"]),
+            "revision": 1,
+            "status": "draft",
+            "settings": settings,
+            "derived_from": {
+                "project_id": parent["id"],
+                "revision": parent["revision"],
+                "digest": self._digest(parent),
+            },
+            "analysis": None,
+            "artifacts": {},
+        }
+        for key in (
+            "segments",
+            "base_segments",
+            "excluded_word_ids",
+            "gaze_exclusions",
+            "brief",
+            "voice",
+            "transcript",
+            "story",
+            "selected_hook",
+        ):
+            if key in parent:
+                child[key] = copy.deepcopy(parent[key])
+        return child
+
+    def _platform_problem(self, project):
+        """Why the current edit cannot be exported for its platform, if at all."""
+        from .platforms import profile
+
+        name = self.platform(project)
+        limit = (profile(name)["max_duration_s"] or {}).get("value")
+        length = sum(s["end"] - s["start"] for s in project["segments"])
+        if limit is not None and length > limit:
+            return (
+                f"This edit runs {length:.1f} s; {profile(name)['label']} allows at "
+                f"most {limit} s. Shorten the cut before final export"
+            )
+        return None
 
     def _segment_inputs(self, project):
         """Fingerprint of everything a person-layer render depends on."""
@@ -694,6 +792,9 @@ class Studio:
                     "Run segment for the current settings before rendering the person layer"
                 )
         if action == "final":
+            problem = self._platform_problem(project)
+            if problem:
+                raise ValueError(problem)
             problem = self._story_ready(project)
             if problem:
                 raise PermissionError(problem)
@@ -749,12 +850,20 @@ class Studio:
         }
         title = settings.get("title") or ""
         story = project.get("story") or {}
+        platform = self.platform(project)
+        entry = None
+        if platform != "custom":
+            from .platforms import profile
+
+            entry = profile(platform)
         if not title and story.get("opening_hook"):
             title = story["opening_hook"]["text"]
         if title and "\n" not in title:
             import textwrap
 
             aspect = settings.get("aspect", "source")
+            if entry is not None:
+                aspect = entry["orientation"]
             if aspect == "source":
                 info = project["source_info"]
                 aspect = "portrait" if info["height"] > info["width"] else "landscape"
@@ -772,7 +881,26 @@ class Studio:
             "normalize_audio": settings.get("normalize_audio", True),
             "timeout": 3600 if preset == "final" else 900,
         }
+        if entry is not None:
+            # Platform renders use the profile's frame, shape and delivery loudness.
+            result["aspect"] = entry["orientation"]
+            result["platform"] = platform
+            result["final_resolution"] = (
+                settings.get("final_resolution") or entry["frame"]["default_final"]
+            )
+            result["loudness_lufs"] = entry["loudness"]["integrated_lufs"]
+            result["true_peak_db"] = entry["loudness"]["true_peak_db"]
         return result
+
+    def _quality_settings(self, project, preset):
+        """QA settings; platform checks need the title to rebuild text geometry."""
+        render = self._render_settings(project, preset)
+        if "platform" not in render:
+            render.pop("title")
+        render["expected_duration"] = sum(
+            s["end"] - s["start"] for s in project["segments"]
+        )
+        return render
 
     def _perform_job(self, job):
         project = json.loads(
@@ -881,11 +1009,7 @@ class Studio:
             return {**result, "artifacts": {"cover": result["output"]}}
         if action == "qa":
             preset = "final" if job["upstream"] == "final" else "preview"
-            render = self._render_settings(project, preset)
-            render.pop("title")
-            render["expected_duration"] = sum(
-                s["end"] - s["start"] for s in project["segments"]
-            )
+            render = self._quality_settings(project, preset)
             report = run(
                 "qa",
                 {

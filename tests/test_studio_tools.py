@@ -57,6 +57,21 @@ class ProjectToolTests(_ToolCase):
                 "update",
                 {"project_id": "p", "changes": {"brief": "Edit"}, "revision": 1},
             ),
+            (
+                {"action": "derive", "project_id": "p", "platform": "tiktok"},
+                "derive",
+                {"project_id": "p", "platform": "tiktok"},
+            ),
+            (
+                {
+                    "action": "derive",
+                    "project_id": "p",
+                    "platform": "youtube",
+                    "name": "Long form",
+                },
+                "derive",
+                {"project_id": "p", "platform": "youtube", "name": "Long form"},
+            ),
         ]
         for args, method, expected in cases:
             with self.subTest(args=args):
@@ -186,6 +201,23 @@ class ProjectToolTests(_ToolCase):
             {"action": "review", "project_id": "p", "digest": "d"},
             {"action": "update", "project_id": "p", "changes": {"brief": "x"}},
             {"action": "update", "changes": {"brief": "x"}, "revision": 1},
+            {"action": "derive", "project_id": "p"},
+            {"action": "derive", "platform": "tiktok"},
+            {"action": "derive", "project_id": "p", "platform": "vine"},
+            {"action": "derive", "project_id": "p", "platform": 3},
+            {"action": "derive", "project_id": "p", "platform": "tiktok", "name": ""},
+            {
+                "action": "derive",
+                "project_id": "p",
+                "platform": "tiktok",
+                "approval": {"digest": "d"},
+            },
+            {
+                "action": "derive",
+                "project_id": "p",
+                "platform": "tiktok",
+                "revision": 1,
+            },
         ]
         for revision in (True, 0, -1, 1.2, "1", None):
             cases.append(
@@ -368,11 +400,23 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(parameters["required"], ["action"])
         self.assertEqual(
             project["properties"]["action"]["enum"],
-            ["create", "list", "get", "update", "review"],
+            ["create", "list", "get", "update", "review", "derive"],
         )
         self.assertEqual(
             set(project["properties"]),
-            {"action", "source", "name", "project_id", "changes", "revision"},
+            {
+                "action",
+                "source",
+                "name",
+                "project_id",
+                "changes",
+                "revision",
+                "platform",
+            },
+        )
+        self.assertEqual(
+            project["properties"]["platform"]["enum"],
+            ["custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube"],
         )
         self.assertEqual(
             sorted(project["properties"]["changes"]["properties"]),

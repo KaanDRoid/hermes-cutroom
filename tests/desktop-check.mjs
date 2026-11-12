@@ -23,6 +23,15 @@ const invalidations = [];
 let projectRows = [];
 let selectedProject = null;
 let jobRows = [];
+const zone = (top, bottom, left, right) => ({ top, bottom, left, right, source: 'https://example.test/spec', checked: '2026-11-12' });
+const frames = portrait => ({ preview: portrait ? [1080, 1920] : [1920, 1080], final: portrait ? { 1080: [1080, 1920], 2160: [2160, 3840] } : { 1080: [1920, 1080], 2160: [3840, 2160] }, default_final: '1080' });
+const platformRows = [
+  { name: 'custom', label: 'Custom', short_label: 'Custom', orientation: null, frame: null, safe_zone: null },
+  { name: 'instagram_reels', label: 'Instagram Reels', short_label: 'Reels', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.14, 0.35, 0.06, 0.06), max_duration_s: { value: 1200 } },
+  { name: 'youtube_shorts', label: 'YouTube Shorts', short_label: 'Shorts', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.15, 0.35, 0.05, 0.18), max_duration_s: { value: 180 } },
+  { name: 'tiktok', label: 'TikTok', short_label: 'TikTok', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.13, 0.35, 0.12, 0.28), max_duration_s: { value: 3600 } },
+  { name: 'youtube', label: 'YouTube', short_label: 'YouTube', orientation: 'landscape', frame: frames(false), safe_zone: zone(0.05, 0.05, 0.05, 0.05), max_duration_s: { value: null } },
+];
 react.useState = initial => {
   const store = activeHooks;
   const index = store.index++;
@@ -43,8 +52,8 @@ react.useEffect = (effect, dependencies) => {
 sdk.useValue = value => value.get();
 sdk.useQuery = options => {
   queries.push(options);
-  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs'].includes(x));
-  return { data: options.enabled === false ? undefined : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : jobRows,
+  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs', 'platforms'].includes(x));
+  return { data: options.enabled === false ? undefined : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : kind === 'platforms' ? platformRows : jobRows,
     isPending: false, isFetching: false, error: null, refetch: () => options.queryFn() };
 };
 sdk.useQueryClient = () => ({ invalidateQueries: options => invalidations.push(options), setQueryData: () => {} });
@@ -437,6 +446,77 @@ test('keeps selected project fresh after a job finishes and releases player URLs
     ui.draw();
     assert.deepEqual(revoked, ['blob:revision-test']);
     assert.equal(nodes(ui.draw()).find(n => n.type === 'video'), undefined);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('selects a platform profile and final resolution in the settings form', async () => {
+  jobRows = [];
+  const ui = await studio(async (_path, options) => { if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 }; return selectedProject; }, { settings: { aspect: 'source', brand: {} } });
+  let tree = ui.draw();
+  assert.ok(queries.some(q => q.queryKey.includes('platforms')), 'Profiles come from the API');
+  for (const label of ['Custom', 'Instagram Reels', 'YouTube Shorts', 'TikTok', 'YouTube']) assert.ok(button(tree, label), `${label} platform button`);
+  const group = nodes(tree).find(n => n.props?.['aria-label'] === 'Platform profile');
+  assert.equal(nodes(group.props.children).filter(n => n.type === 'Button').length, 5, 'One button per profile');
+  assert.match(source, /`platform:\$\{item\.name\}`/, 'Platform buttons use namespaced keys');
+  assert.equal(button(tree, '4K final (2160)').props.disabled, true, 'Resolution only applies to platform profiles');
+  button(tree, 'YouTube Shorts').props.onClick();
+  tree = ui.draw();
+  assert.match(text(tree), /1080 × 1920/);
+  assert.match(text(tree), /180 s/);
+  button(tree, '4K final (2160)').props.onClick();
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const saved = ui.calls.find(c => c.options?.method === 'PATCH').options.body.changes.settings;
+  assert.equal(saved.platform, 'youtube_shorts');
+  assert.equal(saved.final_resolution, '2160');
+  assert.equal(saved.aspect, 'portrait');
+});
+
+test('creates platform versions from the current project and opens the new one', async () => {
+  jobRows = [];
+  hookStores.clear(); queries.length = 0; invalidations.length = 0;
+  selectedProject = { id: 'p1', name: 'Talk', revision: 3, source: 'in.mp4', settings: { aspect: 'source', brand: {} }, artifacts: {}, source_info: { duration: 12 } };
+  projectRows = [selectedProject];
+  const stored = [], calls = [], entries = [];
+  (await load()).default.register({ register: x => entries.push(x), storage: { get: () => 'p1', set: (key, value) => stored.push([key, value]) },
+    rest: async (path, options) => { calls.push({ path, options }); if (path.endsWith('/derive')) return { ...selectedProject, id: `child-${options.body.platform}`, revision: 1 }; return selectedProject; } });
+  const route = entries.find(x => x.area === sdk.ROUTES_AREA);
+  let tree = draw(route);
+  for (const label of ['Create version for Reels', 'Create version for Shorts', 'Create version for TikTok', 'Create version for YouTube']) assert.ok(button(tree, label), label);
+  await button(tree, 'Create version for Reels').props.onClick();
+  assert.deepEqual(calls.at(-1), { path: '/projects/p1/derive', options: { method: 'POST', body: { platform: 'instagram_reels' } } });
+  assert.deepEqual(stored.at(-1)[1], 'child-instagram_reels');
+  assert.ok(invalidations.length >= 1);
+  assert.ok(!calls.some(c => c.path.endsWith('/approve')), 'Deriving never approves');
+  selectedProject = { ...selectedProject, id: 'child-tiktok', settings: { platform: 'tiktok', aspect: 'portrait' }, derived_from: { project_id: 'p1', revision: 3, digest: 'd'.repeat(64) } };
+  tree = draw(route);
+  assert.match(text(tree), /Derived from p1 at revision 3/);
+});
+
+test('overlays the platform unsafe areas on a loaded render and not for custom projects', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:zone'; URL.revokeObjectURL = () => {};
+  try {
+    jobRows = [];
+    const media = async path => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : selectedProject;
+    let ui = await studio(media, { settings: { platform: 'instagram_reels', aspect: 'portrait' }, artifacts: { preview: 'preview.mp4' } });
+    let toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
+    assert.ok(toggle, 'Safe-zone toggle is rendered');
+    assert.notEqual(toggle.props.disabled, true);
+    await button(ui.draw(), 'Load preview').props.onClick();
+    toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
+    toggle.props.onCheckedChange(true);
+    const tree = ui.draw();
+    const boxes = nodes(tree).filter(n => n.props?.['data-cutroom-unsafe']);
+    assert.deepEqual(boxes.map(n => n.props['data-cutroom-unsafe']).sort(), ['bottom', 'left', 'right', 'top']);
+    const top = boxes.find(n => n.props['data-cutroom-unsafe'] === 'top');
+    assert.equal(top.props.style.height, '14%');
+    assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'bottom').props.style.height, '35%');
+    assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'left').props.style.width, '6%');
+    assert.match(String(top.props.style.background), /^var\(--ui-/);
+    assert.ok(nodes(tree).find(n => n.type === 'video'), 'The player stays visible under the overlay');
+    ui = await studio(media, { settings: { aspect: 'source' }, artifacts: { preview: 'preview.mp4' } });
+    toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
+    assert.equal(toggle.props.disabled, true, 'Custom projects have no platform safe zone');
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
 });
 
