@@ -8,6 +8,8 @@ import sys
 import time
 from pathlib import Path
 
+from .childenv import child_env
+
 OPERATIONS = {
     "inspect",
     "transcribe",
@@ -26,9 +28,15 @@ OPERATIONS = {
 }
 
 
-def runtime_python(configured=None):
+def runtime_python():
+    """Interpreter for native-model workers.
+
+    Only user-owned sources are honoured: the ``CUTROOM_PYTHON`` environment
+    variable, then the plugin's bundled ``.venv``, then the Hermes interpreter.
+    Project settings and agent tools cannot choose an executable.
+    """
     root = Path(__file__).resolve().parents[1]
-    candidate = configured or os.environ.get("CUTROOM_PYTHON")
+    candidate = os.environ.get("CUTROOM_PYTHON")
     if candidate:
         path = Path(candidate).expanduser().resolve(strict=True)
         if not path.is_file() or not path.name.lower().startswith("python"):
@@ -42,9 +50,12 @@ def _terminate(process):
     if process.poll() is not None:
         return
     if os.name == "nt":
+        system_root = os.environ.get("SYSTEMROOT", r"C:\Windows")
+        taskkill = Path(system_root) / "System32" / "taskkill.exe"
         subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
             stdin=subprocess.DEVNULL,
+            env=child_env(python=False),
             capture_output=True,
             timeout=10,
             check=False,
@@ -61,9 +72,7 @@ def _terminate(process):
         process.wait(timeout=5)
 
 
-def invoke_worker(
-    operation, arguments, directory, python=None, cancelled=None, timeout=1800
-):
+def invoke_worker(operation, arguments, directory, cancelled=None, timeout=1800):
     if operation not in OPERATIONS:
         raise ValueError("Unsupported worker operation")
     if cancelled and cancelled():
@@ -76,19 +85,18 @@ def invoke_worker(
         encoding="utf-8",
     )
     root = Path(__file__).resolve().parents[1]
-    env = dict(
-        os.environ,
-        OMP_NUM_THREADS="4",
-        MKL_NUM_THREADS="4",
-        HF_HUB_OFFLINE="1",
-        HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
+    env = child_env(
+        OMP_NUM_THREADS=4,
+        MKL_NUM_THREADS=4,
+        HF_HUB_OFFLINE=1,
+        HF_HUB_DISABLE_IMPLICIT_TOKEN=1,
+        HF_HUB_DISABLE_TELEMETRY=1,
     )
-    env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
     started = time.monotonic()
     log_path = directory / "engine.log"
     with log_path.open("wb") as log:
         process = subprocess.Popen(
-            [runtime_python(python), "-m", "cutroom.worker", str(request), str(result)],
+            [runtime_python(), "-m", "cutroom.worker", str(request), str(result)],
             cwd=root,
             env=env,
             stdin=subprocess.DEVNULL,

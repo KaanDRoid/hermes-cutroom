@@ -73,18 +73,17 @@ Source identity, project revision, asset digest and cancellation are checked und
 
 ## Transcription and text editing
 
-For media with an audio stream, first set an existing local model directory and, optionally, a dedicated runtime interpreter:
+For media with an audio stream, first set an existing local model directory. Model workers run under `CUTROOM_PYTHON` when that environment variable is set, otherwise the plugin's bundled `.venv`; the interpreter is not a project setting.
 
 ```python
 project = studio.update(project["id"], {"settings": {
     "whisper_model": "/absolute/path/to/repo/models/whisper-tiny",
-    # "runtime_python": "/absolute/path/to/repo/.venv/Scripts/python.exe",
 }}, project["revision"])
 job = studio.submit(project["id"], "transcribe", {"language": "en"})
 # Poll job status as above, then reload the current project before editing.
 ```
 
-The only job option is `language`: a lowercase two/three-letter code or `None` for detection. Source, model and runtime paths come from the project snapshot, not job-option overrides. Unknown language codes that match the format can still be rejected by the inference library.
+The only job option is `language`: a lowercase two/three-letter code or `None` for detection. Source and model paths come from the project snapshot, not job-option overrides. Earlier projects that stored `runtime_python` keep loading; the value is ignored and dropped. Unknown language codes that match the format can still be rejected by the inference library.
 
 Required local assets are `config.json`, `model.bin` and `tokenizer.json`. Present optional `vocabulary.txt`, `vocabulary.json` and `preprocessor_config.json` are validated too. Recognized model files are fingerprinted at submission and checked again before execution and before publication. Missing, empty, escaped or changed model assets fail closed; no download is attempted. A no-audio video requires no model and completes with an empty `no_audio` transcript.
 

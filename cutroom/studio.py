@@ -98,7 +98,12 @@ class Studio:
         path = self._directory(project_id) / "studio.json"
         if path.stat().st_size > 32_000_000:
             raise ValueError("Project exceeds 32 MB")
-        return _load_json(path)
+        project = _load_json(path)
+        settings = project.get("settings")
+        if isinstance(settings, dict):
+            # Legacy interpreter paths are ignored and never surfaced or re-saved.
+            settings.pop("runtime_python", None)
+        return project
 
     @contextmanager
     def _lock(self, name="state", timeout=15, cancelled=None):
@@ -234,7 +239,6 @@ class Studio:
                     "whisper_model",
                     "face_model",
                     "segmentation_model",
-                    "runtime_python",
                     "frame_step",
                     "max_width",
                     "use_segmented",
@@ -242,6 +246,8 @@ class Studio:
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
                 merged = updated["settings"] | settings
+                # Interpreter paths are no longer project data; drop legacy values.
+                merged.pop("runtime_python", None)
                 if merged.get("aspect") not in {
                     "source",
                     "portrait",
@@ -631,8 +637,9 @@ class Studio:
             )
             self._write_job(job)
         package_root = Path(__file__).resolve().parents[1]
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(package_root) + os.pathsep + env.get("PYTHONPATH", "")
+        from .childenv import child_env
+
+        env = child_env()
         with (directory / "worker.log").open("ab") as log:
             try:
                 process = subprocess.Popen(
@@ -791,7 +798,6 @@ class Studio:
                 operation,
                 arguments,
                 directory / ("engine-" + operation),
-                python=settings.get("runtime_python"),
                 cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
                 timeout=timeout,
             )
@@ -804,7 +810,6 @@ class Studio:
                 action,
                 arguments,
                 directory / "engine",
-                python=settings.get("runtime_python"),
                 cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
             )
         if action == "vision":
@@ -1155,14 +1160,9 @@ _STUDIOS = {}
 
 def get_studio(root=None):
     if root is None:
-        root = os.environ.get("CUTROOM_WORKSPACE")
-    if root is None:
-        try:
-            from plugins.plugin_storage import plugin_data_dir
+        from .paths import studio_root
 
-            root = plugin_data_dir("cutroom") / "studio"
-        except ImportError:
-            root = Path(__file__).resolve().parents[1] / "artifacts" / "studio"
+        root = studio_root()
     key = str(Path(root).expanduser().resolve())
     if key not in _STUDIOS:
         _STUDIOS[key] = Studio(key)

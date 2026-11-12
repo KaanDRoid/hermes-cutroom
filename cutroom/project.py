@@ -6,7 +6,9 @@ Receipts prevent accidental stale-plan renders, not malicious local code.
 import hashlib
 import html
 import json
+import os
 import shlex
+import uuid
 from pathlib import Path
 
 from .plan import validate_plan
@@ -56,6 +58,48 @@ def save_draft(plan, directory, expected_source_sha256=None):
     return path
 
 
+REVIEW_RECEIPT = ".review.sha256"
+LEGACY_REVIEW_HEADER = b'<!doctype html><html lang="en"><meta charset="utf-8">'
+
+
+def _replace(target, data):
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _publish_review(review, document):
+    """Write review.html, overwriting only a page this module wrote itself."""
+    receipt = review.with_name(REVIEW_RECEIPT)
+    for path in (review, receipt):
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise FileExistsError(f"Refusing to replace a link or directory: {path}")
+    current = None
+    if review.exists():
+        page = review.read_bytes()
+        current = hashlib.sha256(page).hexdigest()
+        if receipt.exists():
+            known = receipt.read_text(encoding="ascii").split()
+        else:
+            # Reviews written before receipts existed carry Cutroom's own header.
+            known = [current] if page.startswith(LEGACY_REVIEW_HEADER) else []
+        if current not in known:
+            raise FileExistsError(
+                f"{review} was not created by Cutroom (or was edited); "
+                "refusing to overwrite it"
+            )
+    data = document.encode("utf-8")
+    new = hashlib.sha256(data).hexdigest()
+    # Record both pages while swapping so an interruption never locks the review.
+    _replace(receipt, " ".join(filter(None, (current, new))).encode("ascii"))
+    _replace(review, data)
+    _replace(receipt, new.encode("ascii"))
+
+
 def write_review(path):
     path, plan = _read(path)
     digest = plan_digest(plan)
@@ -101,7 +145,7 @@ code{{display:block;overflow-wrap:anywhere;background:#20242c;padding:16px;borde
 <p>PowerShell:</p><code>{powershell_command}</code>
 <p>Approval is a local workflow receipt, not an authenticated security boundary. A changed plan or source requires a new review.</p>
 </html>'''
-    (path.parent / "review.html").write_text(document, encoding="utf-8")
+    _publish_review(path.parent / "review.html", document)
     return {
         "plan": str(path),
         "review": str(path.parent / "review.html"),

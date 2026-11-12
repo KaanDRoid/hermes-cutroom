@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from cutroom.hermes_plugin import draft, render_approved
+from cutroom.hermes_plugin import draft_plan as draft
+from cutroom.hermes_plugin import render_plan as render_approved
 from cutroom.project import approve_plan, save_draft, write_review
 
 

@@ -42,7 +42,7 @@ Optional Python 3.12 model runtime / FFmpeg
 Verified artifacts + project update + review checkpoint
 ```
 
-Native dependencies stay in a dedicated runtime rather than being injected into Hermes's interpreter. Import and tool registration must not load models, execute media jobs or start network requests.
+Native dependencies stay in a dedicated runtime rather than being injected into Hermes's interpreter. That interpreter comes only from user-owned sources: `CUTROOM_PYTHON`, then the bundled `.venv`, then Hermes' own interpreter. It is never project data, so a model-writable project cannot make a later job execute an arbitrary file. Every child process (job supervisor, model worker, FFmpeg, consented integrations) starts from the allowlist in `cutroom/childenv.py` rather than the parent environment. Import and tool registration must not load models, execute media jobs or start network requests.
 
 ## Persistence and concurrency
 
