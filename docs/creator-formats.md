@@ -108,6 +108,54 @@ An independent review of F0 found the following; each is fixed with a test writt
 - Deriving no longer carries a parent's 4K setting silently and stores the stripped name; a missing source or asset is reported as such (REST 422) instead of "Project not found".
 - The Desktop overlay uses the platform recorded with the loaded render and appears only after the video metadata has loaded.
 
+## F2 — Reframing
+
+Status: implemented on `feat/f2-reframing`; not yet merged into `feat/creator-formats`.
+
+### What shipped
+
+- **Framing modes.** `settings.framing` is one of:
+  - `fit` (default, the 0.1 behaviour): the whole picture, letterboxed.
+  - `blur_fill`: the whole picture over a blurred, darkened copy of itself that fills the frame.
+  - `center_crop`: a fixed crop of the target aspect from the centre of the source.
+  - `face_track`: a crop that follows the speaker.
+- **Crop size.** `reframe.crop_size` takes the largest even-sized crop of the target aspect that fits the source (608×1080 from a 1920×1080 source for 9:16). Nothing outside the crop is scaled into it.
+- **Face samples.** Vision now records a face box and eye height for each analysed frame. The worker stores them compactly as `analysis.face_samples` (at most four faces per sample, 100,000 samples) together with `analysis.scene_cuts` from FFmpeg's `scdet` (threshold 10 % on a 160 px decode). When scene detection fails, `scene_cuts` is `null` and the render reports that only edit boundaries reset the crop.
+- **Speaker choice.** In each sample the face with the largest area wins, weighted up to three times by how much its mouth opening changed since the previous sample. This is a geometric heuristic, not speaker diarisation.
+- **Target.** The crop puts the face centre between the safe-zone side margins and the eyes one third of the way down the safe area, and keeps the face centre inside the safe area whenever the source edges allow it. The safe area is the stricter of the platform's zone and the brand's `safe_margin`.
+- **Motion.** The crop follows the target with exponential smoothing (τ 0.18 s), a dead zone of 3.5 % of the crop width, a top speed of 1.2 crop widths per second and an acceleration limit of 2.5 crop widths per second², and it brakes before the target. It snaps without motion on the first frame, on every edit cut and on every scene cut inside a kept range.
+- **Manual keyframes.** `settings.framing_keyframes` is a list of at most 100 `{time, x, y?}` pins in program time (the edited timeline), with `x`/`y` the crop centre as a fraction of the source. Between pins the crop eases (smoothstep). In `face_track` the tracked path is used before the first and after the last pin. Pins that would need more than the speed or acceleration limit are refused with "space them further apart" rather than producing a jump. A derived project for another orientation does not copy the pins.
+- **Rendering.** `reframe.prepare_path` maps every decoded source frame that survives the edit to its output frame and plans the path; the crop is applied as a piecewise-linear FFmpeg expression in the output frame index (`path_expression`, at most 0.1 source pixel from the plan). Tracked or keyframed crops need constant-rate video and are refused for variable-rate sources with a message to conform them first. `face_track` needs a completed Vision job; renders refuse it otherwise.
+- **QA.** For `center_crop` and `face_track`, Studio passes the render's crop path into QA, which adds:
+  - `framing_frames`: the planned frame count equals the decoded frame count.
+  - `framing_smoothness`: no frame-to-frame move above the speed limit, except on reset frames.
+  - `framing_face_safe_zone`: at least 95 % of frames with a face keep the selected face centre inside the safe area of the planned (even-pixel) crop.
+  - `platform_upscale` (from F0) also uses the crop, so a crop that enlarges source pixels is reported as a warning, never silently.
+- **Surfaces.** Agent tool and REST settings accept `framing` and `framing_keyframes`. The Desktop page has a framing mode selector (Fit, Blur fill, Center crop, Face track), and for a loaded preview or final a horizontal crop-centre slider with **Add framing keyframe at** the current program time and a list of pins with remove buttons.
+
+### How it was verified
+
+- RED before implementation: `artifacts/f2/red.log`. GREEN: `artifacts/f2/green.log`, `artifacts/f2/focused-green.log`.
+- `tests/test_reframe.py` (31 tests): validation limits; crop sizes; speaker choice; smoothing, dead zone, speed and acceleration limits and braking; resets on edit and scene cuts; keyframe easing and the refusal of keyframes that are too close; the FFmpeg expression against the plan; real FFmpeg renders of a moving synthetic face whose decoded crop follows the plan; and every QA check failing on a deliberately broken report.
+- `tests/test_studio_reframe.py` (9 tests): settings validation, unchanged renders without framing, framing and face analysis in the reviewed digest, Vision results with every face sample, `face_track` refused before Vision, pins kept only for the same orientation and revalidated when the edit gets shorter, and an end-to-end preview with QA.
+- `tests/desktop-check.mjs`: the framing selector and keyframe controls.
+- Local gates: `artifacts/f2/full-docs.log` 299 Python tests OK, 14 skipped in a worktree without the local models and media; Desktop checks 21/21; Ruff clean.
+- **Real footage** (`scripts/reframe_evidence.py`, `artifacts/f2/evidence-rerun/`): 15 s of the Sandra clip (1920×1080, 29.97 fps) reframed with `face_track` for Instagram Reels at 1080×1920.
+  - Vision at frame step 5: 264 samples in 14.0 s; preview render 9.0 s; QA 4.8 s.
+  - `framing_frames` 450 of 450, `framing_smoothness` largest move 8.1 source px per frame against a limit of 24.3, `framing_face_safe_zone` 415 of 415 face frames inside.
+  - Independent check on the rendered output: MediaPipe on every fifth output frame found a face in 85 of 90 and the face centre inside the safe area in 83 of 85 (97.6 %).
+  - Audio and video streams both 15.015 s from 0.
+  - `platform_upscale` warns at 1.78×: the 608-pixel-wide crop is enlarged to 1080. That is expected for a 1080p landscape source and is reported.
+  - Frames `face-track-00.png` … `face-track-14.png` and `blur-fill.png` were checked by eye (`artifacts/f2/f2-sheet.png`).
+
+### Open items
+
+- `framing_face_safe_zone` checks the planned path against the face found by Vision; it does not run face detection on the output. The real-footage run did that separately (97.6 %); a QA option for it is a candidate for F8.
+- Desktop pins only the horizontal centre; `y` is accepted by the API and tools.
+- Speaker choice is geometric. Two people of similar size who both talk can make the crop alternate; pins are the remedy for now.
+- Variable-rate sources must be conformed before tracked or keyframed crops. The refusal has no dedicated test yet.
+- Native Desktop acceptance (A28) and an independent review are still to come.
+
 ## Order and branches
 
 F0 first, because every other package builds on profiles and derived projects. Then F1, F2 and F4 in parallel, then F3, F5, F6, F7 and F8. Each package is developed on its own branch and merged into `feat/creator-formats` through a pull request after the full test suite, the Desktop checks, ruff and an independent review pass. `feat/creator-formats` merges into `main` once, as 0.2.0.

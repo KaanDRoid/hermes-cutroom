@@ -1,5 +1,12 @@
 # Implementation status
 
+## November 12 — F2 reframing (branch `feat/f2-reframing`)
+
+- Added `blur_fill`, `center_crop` and `face_track` framing with smoothed, speed- and acceleration-limited crop paths, resets on edit and scene cuts, and manual keyframes in program time (`cutroom/reframe.py`).
+- QA checks planned frames, smoothness and the face inside the safe area; crop upscaling is reported by `platform_upscale`.
+- On the Sandra clip reframed for Reels, 415 of 415 face frames are inside the safe area by plan and 83 of 85 by detection on the output.
+- Local gates: **299 Python tests OK** (14 skipped without local models and media), **21/21 Desktop tests**, Ruff clean.
+
 ## November 12 — F0 platform profiles (branch `feat/f0-platform-profiles`)
 
 - Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
