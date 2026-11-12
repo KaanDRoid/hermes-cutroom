@@ -273,9 +273,39 @@ class CaptionJobTests(unittest.TestCase):
         timing = checks["caption_timing"]
         self.assertEqual(timing["status"], "pass", timing)
         self.assertEqual(timing["detail"]["words_checked"], 5)
-        self.assertEqual(timing["detail"]["script"], "published")
+        self.assertEqual(timing["detail"]["script"], "render")
         self.assertEqual(checks["caption_bounds"]["status"], "pass")
         self.assertEqual(checks["safe_zone"]["status"], "pass")
+
+    def test_qa_of_a_final_uses_the_final_script_after_a_later_preview(self):
+        project = self.studio.create(self.source, name="Talk")
+        project = self.studio.update(
+            project["id"],
+            {
+                "settings": {
+                    "captions": True,
+                    "caption_style": "highlight",
+                    "max_width": 640,
+                },
+                "transcript": TRANSCRIPT,
+            },
+            project["revision"],
+        )
+        self.run_job(project["id"], "preview")
+        review = self.studio.review(project["id"])
+        self.studio.approve(project["id"], review["digest"])
+        final = self.run_job(project["id"], "final")
+        self.run_job(project["id"], "preview")
+        qa = self.run_job(project["id"], "qa")
+        self.assertEqual(qa["result"]["video"], "final")
+        checks = {check["name"]: check for check in qa["result"]["checks"]}
+        timing = checks["caption_timing"]
+        self.assertEqual(timing["status"], "pass", timing)
+        self.assertEqual(timing["detail"]["script"], "render")
+        self.assertEqual(timing["detail"]["script_job"], final["id"])
+        self.assertEqual(
+            checks["caption_bounds"]["status"], "pass", checks["caption_bounds"]
+        )
 
 
 if __name__ == "__main__":

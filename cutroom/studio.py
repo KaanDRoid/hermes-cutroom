@@ -1072,6 +1072,8 @@ class Studio:
             artifacts = {action: result["output"]}
             if animated and burn and cues:
                 artifacts["captions_ass"] = str(outputs / "captions.ass")
+                # QA of this render checks this exact script, by hash.
+                result["caption_script_sha256"] = file_digest(outputs / "captions.ass")
             if cues:
                 for format in ("srt", "vtt"):
                     written = write_subtitles(
@@ -1100,6 +1102,11 @@ class Studio:
             source_video = self._render_source_video(project, job["upstream"])
             if source_video is not None and "platform" in render:
                 render["source_video"] = source_video
+            script_job, script = (
+                self._render_caption_script(project, job["upstream"])
+                if animated and burn
+                else (None, None)
+            )
             report = run(
                 "qa",
                 {
@@ -1107,24 +1114,43 @@ class Studio:
                     "settings": render,
                     "captions": cues if burn else None,
                     **caption_extra,
-                    **(
-                        {
-                            "caption_script": str(
-                                self.artifact(project["id"], "captions_ass")
-                            )
-                        }
-                        if animated and burn and "captions_ass" in project["artifacts"]
-                        else {}
-                    ),
+                    **({"caption_script": str(script)} if script else {}),
                 },
                 timeout=3600,
             )
             report = {**report, "video": job["upstream"]}
+            for check in report.get("checks", []):
+                if check.get("name") == "caption_timing" and script_job:
+                    check.setdefault("detail", {})["script_job"] = script_job
             path = outputs / "quality.json"
             with path.open("x", encoding="utf-8") as stream:
                 json.dump(report, stream, indent=2, allow_nan=False)
             return {**report, "artifacts": {"quality": str(path)}}
         raise ValueError("Operation is not installed: " + action)
+
+    def _render_caption_script(self, project, kind):
+        """The caption script burned into the current ``kind`` render, if intact.
+
+        Read from the render's own job, not the latest published ``captions_ass``
+        (a later preview replaces that one), and only when its hash still matches
+        what the render recorded. Otherwise QA rebuilds the script for the video's
+        size and says so.
+        """
+        lineage = project.get("artifact_lineage", {}).get(kind) or {}
+        job_id = lineage.get("job_id")
+        try:
+            record = self.job(job_id)
+            result = record.get("result") or {}
+            value = (result.get("artifacts") or {}).get("captions_ass")
+            expected = result.get("caption_script_sha256")
+            if not value or not expected:
+                return None, None
+            path = self._owned(record, value)
+            if file_digest(path) != expected:
+                return None, None
+            return job_id, path
+        except (OSError, ValueError, TypeError, KeyError, PermissionError):
+            return None, None
 
     def _render_source_video(self, project, kind):
         """Source size the published render was made from, from its job result."""

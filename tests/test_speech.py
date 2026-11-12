@@ -50,6 +50,8 @@ class TranscriptTests(unittest.TestCase):
             transcript([word(), word(1, 0.05, 0.2)]),
             transcript([word(text="")]),
             transcript([word(text=4)]),
+            transcript([word(text="bad\ud800")]),
+            transcript([word(text="tab\there")]),
         ]
         for data in invalid:
             with self.subTest(data=data), self.assertRaises(ValueError):

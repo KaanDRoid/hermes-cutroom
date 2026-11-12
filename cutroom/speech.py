@@ -37,6 +37,10 @@ def _validate_words(words, duration=None):
             raise ValueError("Word probability must be between zero and one")
         if not isinstance(word.get("text"), str) or not word["text"].strip():
             raise ValueError("Word text must be non-empty")
+        # Control characters and lone surrogates cannot be written to subtitle
+        # files or caption scripts.
+        if any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in word["text"]):
+            raise ValueError("Word text must be printable")
         last_id, last_start = identifier, start
     return words
 

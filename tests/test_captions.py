@@ -111,6 +111,58 @@ def gray_frame(video, at, target):
     return width, height, data[offset : offset + width * height]
 
 
+def lit_frames(video):
+    """(timestamp, any bright pixel) for every decoded frame."""
+    import json
+
+    info = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "frame=best_effort_timestamp_time",
+                "-of",
+                "json",
+                str(video),
+            ],
+            capture_output=True,
+            check=True,
+            timeout=120,
+        ).stdout
+    )["frames"]
+    times = [float(frame["best_effort_timestamp_time"]) for frame in info]
+    data = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-i",
+            str(video),
+            "-vf",
+            "scale=80:45",
+            "-fps_mode",
+            "passthrough",
+            "-pix_fmt",
+            "gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+        timeout=120,
+    ).stdout
+    size = 80 * 45
+    lit = [max(data[i : i + size]) > 80 for i in range(0, len(data) - size + 1, size)]
+    assert len(lit) == len(times), (len(lit), len(times))
+    return list(zip(times, lit))
+
+
 class _CaptionCase(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(captions, "cutroom.captions must exist")
@@ -316,6 +368,42 @@ class BuildTests(_CaptionCase):
                             box["x"] + box["w"], layout["safe"]["x1"] + 1
                         )
 
+    def test_animated_captions_meet_the_bbc_reading_size(self):
+        # BBC Subtitle Guidelines: a line height of 3.9-4.5 % of the frame for
+        # 9:16 and 7-8 % for 16:9; with a 1.2 line spacing that is a font of at
+        # least 3.5 % (vertical) and 6.25 % (landscape) of the frame height.
+        for platform, minimum in (
+            ("instagram_reels", 0.035),
+            ("tiktok", 0.035),
+            ("youtube", 0.0625),
+        ):
+            for style in ("highlight", "pop"):
+                settings, width, height, layout, plan = self.build(
+                    style, platform=platform
+                )
+                sizes = [
+                    float(re.search(r"\\fs([\d.]+)", e["text"])[1])
+                    for e in plan["events"]
+                ]
+                with self.subTest(platform=platform, style=style):
+                    self.assertGreaterEqual(min(sizes), minimum * height - 0.01, sizes)
+                    for box in captions.event_boxes(
+                        captions.parse_script(plan["script"]), captions.Measurer(None)
+                    ):
+                        self.assertGreaterEqual(box["y"], layout["safe"]["y0"] - 1)
+                        self.assertLessEqual(
+                            box["y"] + box["h"], layout["safe"]["y1"] + 1
+                        )
+
+    def test_a_larger_brand_size_is_kept(self):
+        *_, height, _, plan = self.build(
+            "highlight", brand={"subtitle_size": 100, "subtitle_y": 0.6}
+        )
+        sizes = [
+            float(re.search(r"\\fs([\d.]+)", e["text"])[1]) for e in plan["events"]
+        ]
+        self.assertGreater(min(sizes), 0.035 * height + 1)
+
     def test_text_is_literal(self):
         words = [dict(start=0.2, end=0.6, text=r"{\pos(0,0)}hack\N")]
         for style in ("highlight", "pop", "one_word"):
@@ -333,6 +421,145 @@ class BuildTests(_CaptionCase):
         self.assertLess(words[0]["end"], words[1]["start"] + 1e-9)
 
 
+RATES = (
+    ("24000/1001", 24000 / 1001),
+    ("25/1", 25.0),
+    ("30000/1001", 30000 / 1001),
+    ("30/1", 30.0),
+    ("60/1", 60.0),
+)
+
+
+def sub_frame_words(count=25, seed=7):
+    import random
+
+    rng = random.Random(seed)
+    words, t = [], 0.3
+    for index in range(count):
+        start = t + rng.random() * 0.2
+        end = start + 0.12 + rng.random() * 0.3
+        words.append(dict(start=round(start, 4), end=round(end, 4), text=f"W{index}"))
+        t = end + 0.15 + rng.random() * 0.1
+    return words, t + 0.5
+
+
+class FrameGridTests(_CaptionCase):
+    """libass treats a frame whose time equals an event edge as outside it."""
+
+    def plan(self, style, words, rate, duration):
+        settings = pp._settings({"platform": "instagram_reels", "caption_style": style})
+        layout = pp.platform_layout(settings, 1080, 1920, captions=True)
+        return captions.build(
+            words, settings, 1080, 1920, layout, frame_rate=rate, duration=duration
+        )
+
+    def test_event_edges_sit_between_frames_never_on_one(self):
+        words, duration = sub_frame_words()
+        for rate, fps in RATES:
+            for style in ("highlight", "pop", "one_word"):
+                plan = self.plan(style, words, rate, duration)
+                with self.subTest(rate=rate, style=style):
+                    for event in plan["events"]:
+                        for edge in (event["start"], event["end"]):
+                            if edge == 0:
+                                continue
+                            nearest = round(edge * fps) / fps
+                            self.assertGreater(
+                                abs(edge - nearest),
+                                0.0005,
+                                (edge, nearest, event["name"]),
+                            )
+
+    def test_timing_passes_on_every_rate_with_frame_exact_visibility(self):
+        words, duration = sub_frame_words()
+        for rate, fps in RATES:
+            frames = [k / fps for k in range(int(duration * fps) + 1)]
+            for style in ("highlight", "pop", "one_word"):
+                plan = self.plan(style, words, rate, duration)
+                report = captions.timing_report(
+                    captions.parse_script(plan["script"]), words, frames
+                )
+                with self.subTest(rate=rate, style=style):
+                    self.assertEqual(report["status"], "pass", report["findings"][:3])
+                    self.assertEqual(report["words_checked"], len(words))
+
+    def test_words_starting_in_the_same_frame_share_one_state(self):
+        words = [
+            dict(start=1.0, end=1.3, text="SAME"),
+            dict(start=1.0, end=1.5, text="START"),
+            dict(start=2.55, end=2.9, text="NEAR"),
+            dict(start=2.56, end=3.2, text="BY"),
+        ]
+        frames = [k / 30 for k in range(150)]
+        for style in ("highlight", "pop", "one_word"):
+            plan = self.plan(style, words, "30/1", 5.0)
+            report = captions.timing_report(
+                captions.parse_script(plan["script"]), words, frames
+            )
+            with self.subTest(style=style):
+                self.assertEqual(report["status"], "pass", report["findings"])
+                self.assertEqual(report["words_checked"], 4)
+                if style == "one_word":
+                    shared = [e for e in plan["events"] if e["name"] == "w0_1"]
+                    self.assertEqual(
+                        len(shared), 1, [e["name"] for e in plan["events"]]
+                    )
+                    self.assertIn("SAME", shared[0]["text"])
+                    self.assertIn("START", shared[0]["text"])
+
+    def test_a_word_between_two_frames_is_shown_for_one_frame(self):
+        words = [
+            dict(start=1.01, end=1.025, text="QUICK"),
+            dict(start=1.2, end=1.5, text="NEXT"),
+        ]
+        frames = [k / 30 for k in range(90)]
+        for style in ("highlight", "pop", "one_word"):
+            plan = self.plan(style, words, "30/1", 3.0)
+            report = captions.timing_report(
+                captions.parse_script(plan["script"]), words, frames
+            )
+            with self.subTest(style=style):
+                self.assertEqual(report["status"], "pass", report["findings"])
+                event = next(e for e in plan["events"] if e["name"] == "w0")
+                self.assertIn("QUICK", event["text"])
+
+    def test_caption_groups_never_draw_at_the_same_time(self):
+        words = [dict(start=i * 0.1, end=i * 0.1 + 0.1, text="w") for i in range(6)]
+        words += [
+            dict(start=0.55, end=2.0, text="late"),
+            dict(start=0.7, end=0.9, text="x"),
+        ]
+        for style in ("highlight", "pop", "one_word"):
+            plan = self.plan(style, words, "30/1", 3.0)
+            spans = sorted((e["start"], e["end"]) for e in plan["events"])
+            with self.subTest(style=style):
+                for (a0, a1), (b0, _) in zip(spans, spans[1:]):
+                    self.assertLessEqual(a1, b0 + 1e-9, spans)
+
+    def test_unknown_frame_rate_falls_back_to_thirty(self):
+        plan = self.plan("highlight", WORDS, "0/0", 3.0)
+        self.assertEqual(
+            plan["script"], self.plan("highlight", WORDS, "30/1", 3.0)["script"]
+        )
+
+    def test_lone_surrogates_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Word text"):
+            self.plan("highlight", [dict(start=1, end=2, text="\ud800")], "30/1", 3.0)
+
+    def test_words_after_the_last_frame_are_not_expected(self):
+        words = [
+            dict(start=1.0, end=1.5, text="IN"),
+            dict(start=2.99, end=3.5, text="OUT"),
+        ]
+        frames = [k / 30 for k in range(90)]  # last frame at 2.9667 s
+        plan = self.plan("one_word", words, "30/1", 3.0)
+        report = captions.timing_report(
+            captions.parse_script(plan["script"]), words, frames
+        )
+        self.assertEqual(report["status"], "pass", report["findings"])
+        self.assertEqual(report["words_checked"], 1)
+
+
 class TimingReportTests(_CaptionCase):
     def test_zero_duration_words_do_not_shift_timing_ids(self):
         words = [dict(start=0.1, end=0.1, text="zero"), *WORDS]
@@ -345,11 +572,22 @@ class TimingReportTests(_CaptionCase):
 
     def test_shifted_word_end_is_reported(self):
         *_, plan = self.build("one_word")
-        shifted = plan["script"].replace("0:00:00.90,Word", "0:00:01.10,Word", 1)
+        shifted = plan["script"].replace("0:00:00.89,Word", "0:00:01.10,Word", 1)
         self.assertNotEqual(shifted, plan["script"])
         report = captions.timing_report(
             captions.parse_script(shifted), WORDS, [i / 30 for i in range(90)]
         )
+        self.assertEqual(report["status"], "fail", report)
+
+    def test_event_starting_on_a_frame_time_counts_from_the_next_frame(self):
+        # At 25 fps an event starting at exactly 1.00 s is first shown at 1.04 s.
+        words = [dict(start=0.995, end=1.5, text="LATE")]
+        script = (
+            "[Script Info]\nPlayResX: 1080\nPlayResY: 1920\n[Events]\n"
+            "Dialogue: 0,0:00:01.00,0:00:01.49,Word,w0,0,0,0,,{\\an5\\pos(540,1500)}LATE\n"
+        )
+        frames = [k / 25 for k in range(75)]
+        report = captions.timing_report(captions.parse_script(script), words, frames)
         self.assertEqual(report["status"], "fail", report)
 
     def test_timing_report_passes_and_detects_a_shifted_event(self):
@@ -361,7 +599,7 @@ class TimingReportTests(_CaptionCase):
         self.assertEqual(report["status"], "pass", report)
         self.assertLessEqual(report["max_abs_error_seconds"], 1 / 30)
         shifted = plan["script"].replace(
-            "Dialogue: 0,0:00:01.00,", "Dialogue: 0,0:00:01.10,", 1
+            "Dialogue: 0,0:00:00.99,", "Dialogue: 0,0:00:01.10,", 1
         )
         self.assertNotEqual(shifted, plan["script"])
         report = captions.timing_report(captions.parse_script(shifted), WORDS, frames)
@@ -427,6 +665,52 @@ class RenderTests(_CaptionCase):
         self.assertGreater(three_mean, two_mean)
         self.assertEqual(counts[44][0], 0, "No highlight in the pause before THREE")
         self.assertGreater(counts[45][1], two_mean + 1)
+
+    def test_decoded_frames_match_word_times_at_25_and_60_fps(self):
+        for rate, fps in (("25", 25.0), ("60", 60.0)):
+            words, duration = sub_frame_words(12, seed=11)
+            source = self.root / f"black-{rate}.mp4"
+            ffmpeg(
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s=320x180:r={rate}:d={duration:.3f}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                str(source),
+            )
+            output = self.root / f"word-{rate}.mp4"
+            cues = [dict(start=w["start"], end=w["end"], text=w["text"]) for w in words]
+            pp.export_video(
+                source,
+                [{"start": 0, "end": duration - 0.1}],
+                output,
+                {"caption_style": "one_word", "normalize_audio": False},
+                captions=cues,
+                caption_words=words,
+            )
+            frames = lit_frames(output)
+            interval = 1 / fps
+            with self.subTest(rate=rate):
+                for word in words:
+                    shown = [
+                        t
+                        for t, lit in frames
+                        if lit and word["start"] - 0.1 <= t < word["end"] + 0.1
+                    ]
+                    self.assertTrue(shown, word)
+                    first, last = shown[0], shown[-1]
+                    self.assertGreaterEqual(first, word["start"] - 1e-6, (word, first))
+                    self.assertLessEqual(
+                        first - word["start"], interval + 1e-6, (word, first)
+                    )
+                    self.assertLessEqual(
+                        last + interval - word["end"], interval + 1e-6, (word, last)
+                    )
 
     def test_caption_only_render_keeps_every_style_inside_the_safe_zone(self):
         words = [
@@ -513,7 +797,7 @@ class QualityTests(_CaptionCase):
         tampered = root / "tampered.ass"
         tampered.write_text(
             script.read_text(encoding="utf-8-sig").replace(
-                "Dialogue: 0,0:00:01.00,", "Dialogue: 0,0:00:01.20,", 1
+                "Dialogue: 0,0:00:00.99,", "Dialogue: 0,0:00:01.20,", 1
             ),
             encoding="utf-8",
         )
@@ -526,6 +810,43 @@ class QualityTests(_CaptionCase):
         )
         checks = {check["name"]: check for check in report["checks"]}
         self.assertEqual(checks["caption_timing"]["status"], "fail")
+
+    def test_a_script_made_for_another_frame_size_fails_qa(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        source = root / "black.mp4"
+        black_source(source)
+        settings = {"caption_style": "highlight"}
+        cue = [{"start": 0.5, "end": 2.4, "text": "ONE TWO THREE"}]
+        output, script = root / "small.mp4", root / "small.ass"
+        pp.export_video(
+            source,
+            [{"start": 0, "end": 3}],
+            output,
+            settings,
+            captions=cue,
+            caption_words=WORDS,
+            caption_script=script,
+        )
+        other = root / "other.ass"
+        other.write_text(
+            script.read_text(encoding="utf-8-sig")
+            .replace("PlayResX: ", "PlayResX: 3")
+            .replace("PlayResY: ", "PlayResY: 2"),
+            encoding="utf-8",
+        )
+        report = pp.quality_report(
+            output, settings, captions=cue, caption_words=WORDS, caption_script=other
+        )
+        checks = {check["name"]: check for check in report["checks"]}
+        self.assertEqual(
+            checks["caption_timing"]["status"], "fail", checks["caption_timing"]
+        )
+        self.assertEqual(
+            checks["caption_bounds"]["status"], "fail", checks["caption_bounds"]
+        )
+        self.assertIn("frame size", str(checks["caption_bounds"]["detail"]))
 
     def test_classic_reports_have_no_animated_checks(self):
         temporary = tempfile.TemporaryDirectory()

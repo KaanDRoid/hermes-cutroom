@@ -11,6 +11,11 @@ DEFAULT_HIGHLIGHT = "#FFCC00"
 # One-word captions sit in the lower part of the safe area, below a talking
 # head's face (0 = top of the safe area, 1 = bottom).
 DEFAULT_WORD_Y = 0.8
+# Smallest font for animated captions, as a share of the frame height. The BBC
+# Subtitle Guidelines set a line height of 3.9-4.5 % of the frame for 9:16 video
+# and 7-8 % for 16:9 and 1:1; at a 1.2 line spacing that is a font of 3.5 % and
+# 6.25 %. A larger brand subtitle size is kept.
+READABLE_FONT = {"portrait": 0.035, "landscape": 0.0625}
 # Optional fields where an explicit null in an update means "use the default".
 RESETTABLE = ("caption_highlight_color", "caption_word_y")
 
@@ -97,6 +102,33 @@ def words_from_cues(cues):
     return result
 
 
+def frame_rate_value(frame_rate):
+    """Frames per second from an FFprobe rate; unknown rates ('0/0') mean 30."""
+    try:
+        fps = float(Fraction(str(frame_rate))) if frame_rate else 30.0
+    except (ValueError, ZeroDivisionError):
+        return 30.0
+    return fps if math.isfinite(fps) and fps > 0 else 30.0
+
+
+def frame_edge(frame, fps):
+    """ASS time (centiseconds) at which an event must start to show from ``frame``.
+
+    libass treats a frame whose time equals an event edge as outside the event
+    (millisecond truncation), and at 25, 30 and 60 fps many frames fall exactly
+    on a centisecond. The edge is therefore the last centisecond at least 1 ms
+    before the frame and still after the previous frame. Above about 90 fps no
+    such centisecond may exist, and the frame time itself is used.
+    """
+    if frame <= 0:
+        return 0.0
+    target = frame / fps
+    value = math.floor((target - 0.001) * 100 + 1e-9) / 100
+    if value <= (frame - 1) / fps + 1e-9:
+        value = math.floor(target * 100 + 1e-9) / 100
+    return value
+
+
 def _words(words, duration):
     """Validate words; keep renderable ones with their original index.
 
@@ -120,8 +152,11 @@ def _words(words, duration):
             not isinstance(word["text"], str)
             or not word["text"].strip()
             or len(word["text"]) > 1000
+            or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in word["text"])
         ):
-            raise ValueError("Word text must be non-empty and under 1000 characters")
+            raise ValueError(
+                "Word text must be printable, non-empty and under 1000 characters"
+            )
         previous = start
         if end > start and start < duration:
             result.append(
@@ -200,109 +235,125 @@ def build(
         )
     else:
         safe, band = layout["safe"], layout["boxes"]["captions"]
-    base_size = band["size"] * (2 if style == "one_word" else 1)
+    readable = READABLE_FONT["portrait" if height > width else "landscape"] * height
+    base_size = max(band["size"], readable) * (2 if style == "one_word" else 1)
     # Padding covers libass border, shadow and metric differences.
     available = band["w"] - 16
     base_size = min(base_size, (safe["y1"] - safe["y0"] - 16) / 2.5)
-    fps = float(Fraction(frame_rate or "30/1"))
-    if not math.isfinite(fps) or fps <= 0:
-        raise ValueError("Invalid frame rate")
+    fps = frame_rate_value(frame_rate)
+    # Frames 0 .. last_frame - 1 exist; a word starting after them cannot show.
+    last_frame = math.ceil(duration * fps - 1e-6) if math.isfinite(duration) else None
 
-    def snap(t):
-        # The centisecond begins after the preceding frame, never after the
-        # desired first frame. First decoded appearance is ceil(t * fps).
-        frame = math.ceil(t * fps - 1e-8)
-        return math.floor(frame / fps * 100 + 1e-8) / 100
+    def first_frame(t):
+        return math.ceil(t * fps - 1e-6)
+
+    # Units: words whose first frame is the same share one caption state, and a
+    # word shorter than a frame still gets one frame.
+    units = []
+    for index, word in enumerate(words):
+        start_frame = first_frame(word["start"])
+        if last_frame is not None and start_frame >= last_frame:
+            continue
+        end_frame = max(first_frame(word["end"]), start_frame + 1)
+        if last_frame is not None:
+            end_frame = min(end_frame, last_frame)
+        if units and units[-1]["start"] == start_frame:
+            units[-1]["words"].append(index)
+            units[-1]["end"] = max(units[-1]["end"], end_frame)
+        else:
+            units.append(dict(start=start_frame, end=end_frame, words=[index]))
 
     groups, group, lines = [], [], [""]
-    for index, word in enumerate(words):
-        text = word["text"]
-        trial = (lines[-1] + " " + text).strip()
+    for unit in units:
+        tokens = [words[i]["text"] for i in unit["words"]]
+        trial = (lines[-1] + " " + " ".join(tokens)).strip()
         new_line = measure(trial, base_size) > available
         if group and (
             style == "one_word"
-            or len(group) >= 6
-            or word["start"] - words[group[0]]["start"] > 3
+            or sum(len(u["words"]) for u in group) >= 6
+            or (unit["start"] - group[0]["start"]) / fps > 3
             or (new_line and len(lines) == 2)
         ):
             groups.append((group, lines))
             group, lines, new_line = [], [""], False
-        if new_line and group:
-            lines.append(text)
-        else:
-            lines[-1] = (lines[-1] + " " + text).strip()
-        group.append(index)
+        for token in tokens:
+            if new_line and group and lines[-1]:
+                lines.append(token)
+                new_line = False
+            else:
+                lines[-1] = (lines[-1] + " " + token).strip()
+        group.append(unit)
     if group:
         groups.append((group, lines))
+    # A group ends no later than the next group starts, so two groups never
+    # draw at the same time.
+    for (group, _), (following, _) in zip(groups, groups[1:]):
+        for unit in group:
+            unit["end"] = min(unit["end"], following[0]["start"])
     events = []
-    for indices, lines in groups:
+    for group, lines in groups:
         size = min(
             base_size, available / max(1, max(measure(line, 1) for line in lines))
         )
         x = (safe["x0"] + safe["x1"]) / 2
+        # The block (lines x 1.25 line height, plus border padding) stays in the
+        # safe area even when the readable size is larger than the brand band.
+        half = (len(lines) * size * 1.25 + 8) / 2
         y = band["y"] + band["h"] / 2
+        y = min(max(y, safe["y0"] + half), safe["y1"] - half)
         if style == "one_word":
-            span = safe["y1"] - safe["y0"] - 2.5 * size - 16
+            # caption_word_y places the block within the room left by its height.
+            span = safe["y1"] - safe["y0"] - 2 * half
             y = (
                 safe["y0"]
-                + 1.25 * size
-                + 8
+                + half
                 + span * settings.get("caption_word_y", DEFAULT_WORD_Y)
             )
-        first, last = words[indices[0]]["start"], max(words[i]["end"] for i in indices)
-        boundaries = sorted(
-            {
-                first,
-                last,
-                *(words[i]["start"] for i in indices),
-                *(words[i]["end"] for i in indices),
-            }
-        )
+        boundaries = sorted({f for unit in group for f in (unit["start"], unit["end"])})
         for start, end in zip(boundaries, boundaries[1:]):
-            if end <= start:
-                continue
             active = next(
-                (
-                    i
-                    for i in reversed(indices)
-                    if words[i]["start"] <= start < words[i]["end"]
-                ),
-                None,
+                (u for u in reversed(group) if u["start"] <= start < u["end"]), None
             )
-            newly = next((i for i in indices if words[i]["start"] == start), None)
-            name = f"w{words[newly]['index']}" if newly is not None else "gap"
+            newly = next((u for u in group if u["start"] == start), None)
+            name = (
+                "w" + "_".join(str(words[i]["index"]) for i in newly["words"])
+                if newly is not None
+                else "gap"
+            )
             if style == "one_word" and active is None:
                 continue
             rendered, line_index, used = [], 0, ""
-            for i in indices:
-                token = words[i]["text"]
-                if (
-                    used
-                    and measure(used + " " + token, base_size) > available
-                    and line_index < len(lines) - 1
-                ):
-                    rendered.append(r"\N")
-                    line_index += 1
-                    used = ""
-                elif used:
-                    rendered.append(" ")
-                used = (used + " " + token).strip()
-                tags = r"\alpha&H00&\fscy100\1c" + color(brand["subtitle_color"])
-                if style == "highlight" and i == active:
-                    tags += r"\1c" + color(
-                        settings.get("caption_highlight_color", DEFAULT_HIGHLIGHT)
-                    )
-                if style == "pop":
-                    if words[i]["start"] > start:
-                        tags += r"\alpha&HFF&"
-                    elif i == newly:
-                        ms = min(90, max(1, round((end - start) * 1000)))
-                        tags += rf"\fscy82\t(0,{ms},\fscy100)"
-                if style != "one_word" or i == active:
+            for unit in group:
+                if style == "one_word" and unit is not active:
+                    continue
+                for i in unit["words"]:
+                    token = words[i]["text"]
+                    if (
+                        used
+                        and measure(used + " " + token, base_size) > available
+                        and line_index < len(lines) - 1
+                    ):
+                        rendered.append(r"\N")
+                        line_index += 1
+                        used = ""
+                    elif used:
+                        rendered.append(" ")
+                    used = (used + " " + token).strip()
+                    tags = r"\alpha&H00&\fscy100\1c" + color(brand["subtitle_color"])
+                    if style == "highlight" and unit is active:
+                        tags += r"\1c" + color(
+                            settings.get("caption_highlight_color", DEFAULT_HIGHLIGHT)
+                        )
+                    if style == "pop":
+                        if unit["start"] > start:
+                            tags += r"\alpha&HFF&"
+                        elif unit is newly:
+                            ms = min(90, max(1, round((end - start) / fps * 1000)))
+                            tags += rf"\fscy82\t(0,{ms},\fscy100)"
                     rendered.append("{" + tags + "}" + token)
-            a, b = snap(start), snap(end)
+            a, b = frame_edge(start, fps), frame_edge(end, fps)
             if b <= a:
-                # A fragment shorter than a frame has no renderable interval.
+                # Above about 100 fps two frames can share a centisecond.
                 continue
             text = rf"{{\an5\pos({x:.3f},{y:.3f})\fs{size:.3f}\q2}}" + "".join(rendered)
             events.append(dict(start=a, end=b, name=name, text=text))
@@ -324,8 +375,14 @@ def parse_script(script):
         h, m, s = map(float, t.split(":"))
         return h * 3600 + m * 60 + s
 
-    styles, events = {}, []
+    styles, events, play = {}, [], {}
     for line in script.splitlines():
+        if line.startswith(("PlayResX:", "PlayResY:")):
+            key, _, value = line.partition(":")
+            try:
+                play[key] = int(value.strip())
+            except ValueError:
+                pass
         if line.startswith("Style: "):
             fields = line[7:].split(",")
             styles[fields[0]] = dict(
@@ -344,7 +401,11 @@ def parse_script(script):
                     text=fields[9],
                 )
             )
-    return dict(styles=styles, events=events)
+    return dict(
+        styles=styles,
+        events=events,
+        play_res=(play.get("PlayResX"), play.get("PlayResY")),
+    )
 
 
 def event_boxes(parsed, measure):
@@ -365,22 +426,38 @@ def event_boxes(parsed, measure):
 
 
 def timing_report(parsed, words, frames):
-    events = {
-        int(e["name"][1:]): e
-        for e in parsed["events"]
-        if re.fullmatch(r"w\d+", e["name"])
-    }
+    """Compare every word with the frames on which its caption state is shown.
+
+    A frame is counted as showing an event only when it comes more than half a
+    millisecond after the event start, and as clear of it only when it comes
+    more than half a millisecond after the event end, because libass truncates
+    frame times to milliseconds. Words merged into one state (same first frame)
+    are checked against that state. A word shorter than one frame passes when
+    it is shown for exactly one frame. Words that start after the last frame
+    cannot be shown and are not counted.
+    """
+    margin = 0.0005
+    events = {}
+    for event in parsed["events"]:
+        match = re.fullmatch(r"w(\d+(?:_\d+)*)", event["name"])
+        if match:
+            members = [int(i) for i in match[1].split("_")]
+            for index in members:
+                events.setdefault(index, (event, members))
     typical = sorted(b - a for a, b in zip(frames, frames[1:]) if b > a)
     tolerance = typical[len(typical) // 2] if typical else 1 / 30
     errors, findings = [], []
     for index, word in enumerate(words):
         if word["end"] <= word["start"]:
             continue
-        event = events.get(index)
-        if event is None:
+        if frames and word["start"] > frames[-1] + 1e-6:
+            continue
+        found = events.get(index)
+        if found is None:
             findings.append(dict(word=index, reason="No rendered word event"))
             continue
-        at = bisect.bisect_left(frames, event["start"] - 1e-8)
+        event, members = found
+        at = bisect.bisect_right(frames, event["start"] + margin)
         if at >= len(frames):
             findings.append(dict(word=index, reason="No decoded frame in event"))
             continue
@@ -388,13 +465,15 @@ def timing_report(parsed, words, frames):
         errors.append(error)
         if abs(error) > tolerance + 1e-6 or error < -1e-6:
             findings.append(dict(word=index, error_seconds=error))
-        # The word's state must also end on time: the first frame without this
-        # event may come at most one frame after the word ends. Ending earlier is
-        # expected when the next word starts before this one finishes.
-        after = bisect.bisect_left(frames, event["end"] - 1e-8)
+        # The first frame without this state may come at most one frame after
+        # the (latest) word in it ends. Ending earlier is expected when the next
+        # word starts before this one finishes.
+        after = bisect.bisect_right(frames, event["end"] + margin)
         stop = frames[after] if after < len(frames) else event["end"]
-        late = stop - word["end"]
-        if late > tolerance + 1e-6:
+        end = max(words[i]["end"] for i in members if i < len(words))
+        late = stop - end
+        single_frame = stop - frames[at] <= tolerance + 1e-6
+        if late > tolerance + 1e-6 and not single_frame:
             findings.append(dict(word=index, end_late_seconds=late))
     return dict(
         status="fail" if findings else "pass",

@@ -1815,11 +1815,20 @@ def quality_report(
                 duration=info["duration"],
             )["script"]
         parsed = animated_captions.parse_script(script)
+        # A script made for another frame size (a preview's script checked
+        # against a final) cannot vouch for this video's timing or placement.
+        size_error = (
+            None
+            if parsed["play_res"] == (info["width"], info["height"])
+            else "Caption script was made for frame size {}x{}, not this video's "
+            "{}x{}".format(*parsed["play_res"], info["width"], info["height"])
+        )
         timing = animated_captions.timing_report(parsed, words, points)
         status = timing.pop("status")
-        timing["script"] = (
-            "published" if caption_script is not None else "reconstructed"
-        )
+        if size_error:
+            status = "fail"
+            timing["error"] = size_error
+        timing["script"] = "render" if caption_script is not None else "reconstructed"
         add("caption_timing", status, timing)
         measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
         boxes = animated_captions.event_boxes(parsed, measure)
@@ -1837,6 +1846,8 @@ def quality_report(
             info["width"],
             info["height"],
         )
+        if size_error:
+            findings = [dict(error=size_error)]
         add(
             "caption_bounds",
             "fail" if findings else "pass",

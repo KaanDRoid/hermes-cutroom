@@ -249,7 +249,8 @@ def definitions():
                         "minimum": 0,
                         "maximum": 1,
                         "description": "One-word vertical position in the safe "
-                        "area; null restores the centre",
+                        "area (0 top, 1 bottom); null restores the default 0.8, below "
+                        "a talking head's face",
                     },
                 },
             },
