@@ -25,10 +25,18 @@ Two recordings were provided for local acceptance:
 
 | Local filename | Properties | Valid coverage |
 |---|---|---|
-| `12511-239934660.mp4` | 3840×2160, approximately 22.37 s, no audio | Metadata, generic edits, graphics, covers and export |
+| `1416529-uhd_3840_2160_30fps.mp4` | 3840×2160, 12.23 s, 30 fps, no audio, aerial coastline without people | Metadata, generic edits, graphics, covers, export and the no-face check |
 | `4439224-uhd_2160_3840_25fps.mp4` | 2160×3840, 10.56 s, 264 frames, visible woman, no audio | Face/mouth metrics, person segmentation and portrait export |
 
 They belong in ignored `raw_vids/` and are not distributed through GitHub. Permission for local testing is not permission to publish footage.
+
+The landscape clip replaces an earlier local river clip that is no longer available. It is "Seawater" by Vincenzo Malagoli (https://www.pexels.com/@zenzazione/), Pexels video 1416529, under the Pexels License:
+
+```bash
+curl -fL https://videos.pexels.com/video-files/1416529/1416529-uhd_3840_2160_30fps.mp4 -o raw_vids/1416529-uhd_3840_2160_30fps.mp4
+```
+
+- Observed SHA-256: `30513f61352bba3dde774b2da791a2ab3db76e721c795164709899ee61e781eb`.
 
 ## Model assets
 

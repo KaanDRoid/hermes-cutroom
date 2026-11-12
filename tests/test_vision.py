@@ -288,16 +288,16 @@ class RealFaceAcceptanceTests(unittest.TestCase):
             },
         )
 
-    def test_local_river_clip_no_face_is_not_removed(self):
+    def test_local_aerial_clip_no_face_is_not_removed(self):
         root = Path(__file__).resolve().parents[1]
-        source = root / "raw_vids/12511-239934660.mp4"
+        source = root / "raw_vids/1416529-uhd_3840_2160_30fps.mp4"
         model = root / "models/face_landmarker.task"
         if (
             not source.is_file()
             or not model.is_file()
             or not importlib.util.find_spec("mediapipe")
         ):
-            self.skipTest("Local river clip, model or native dependencies are absent")
+            self.skipTest("Local aerial clip, model or native dependencies are absent")
         result = importlib.import_module("cutroom.vision").analyze_faces(
             source, model, max_frames=12
         )

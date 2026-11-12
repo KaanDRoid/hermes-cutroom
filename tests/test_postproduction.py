@@ -895,7 +895,7 @@ class RenderTests(unittest.TestCase):
     def test_consented_user_videos_preview_cover_and_full_frame_qa(self):
         raw = MODULE.parents[1] / "raw_vids"
         fixtures = [
-            ("12511-239934660.mp4", (1920, 1080)),
+            ("1416529-uhd_3840_2160_30fps.mp4", (1920, 1080)),
             ("4439224-uhd_2160_3840_25fps.mp4", (1080, 1920)),
         ]
         evidence = []
