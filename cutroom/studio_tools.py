@@ -159,6 +159,10 @@ def project_handler(args, **kwargs):
                 raise ValueError(
                     "Unsupported project changes: " + ", ".join(sorted(unsupported))
                 )
+            if "settings" in changes:
+                from .captions import validate_settings
+
+                validate_settings(changes["settings"], allow_reset=True)
             revision = args["revision"]
             if (
                 isinstance(revision, bool)
@@ -227,7 +231,29 @@ def definitions():
         "description": "Editable project fields only (update). Approval, "
         "artifacts, source, revision and status cannot be changed here.",
         "properties": {
-            "settings": {"type": "object", "description": "Render/model settings"},
+            "settings": {
+                "type": "object",
+                "description": "Render/model settings",
+                "properties": {
+                    "caption_style": {
+                        "type": "string",
+                        "enum": ["classic", "highlight", "pop", "one_word"],
+                    },
+                    "caption_highlight_color": {
+                        "type": ["string", "null"],
+                        "pattern": "^#[0-9A-Fa-f]{6}$",
+                        "description": "Highlight colour; null restores the default",
+                    },
+                    "caption_word_y": {
+                        "type": ["number", "null"],
+                        "minimum": 0,
+                        "maximum": 1,
+                        "description": "One-word vertical position in the safe "
+                        "area (0 top, 1 bottom); null restores the default 0.8, below "
+                        "a talking head's face",
+                    },
+                },
+            },
             "brief": {"type": "string", "description": "Editorial brief"},
             "voice": {"type": "string", "description": "Narrative voice"},
             "excluded_word_ids": {

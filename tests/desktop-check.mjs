@@ -533,6 +533,79 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
 });
 
+test('chooses animated caption styles and saves accent colour and one-word position', async () => {
+  jobRows = [];
+  const ui = await studio(async (_path, options) => { if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 }; return selectedProject; }, { settings: { aspect: 'source', brand: {} } });
+  let tree = ui.draw();
+  const group = nodes(tree).find(n => n.props?.['aria-label'] === 'Caption style');
+  assert.ok(group, 'Caption style group exists');
+  assert.equal(nodes(group).filter(n => n.type === 'Button').length, 4);
+  for (const label of ['Classic captions', 'Highlight words', 'Pop words', 'One word']) assert.ok(button(group, label), label);
+  assert.equal(button(group, 'Classic captions').props.variant, 'secondary');
+  assert.match(source, /`caption-style:\$\{value\}`/, 'Style keys are namespaced');
+  button(group, 'Highlight words').props.onClick();
+  tree = ui.draw();
+  const field = name => nodes(tree).find(n => n.type === 'Input' && n.props.name === name);
+  field('caption_highlight_color').props.onChange({ target: { value: '#00FF88' } });
+  field('caption_word_y').props.onChange({ target: { value: '0.4' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const saved = ui.calls.find(c => c.options?.method === 'PATCH').options.body.changes.settings;
+  assert.equal(saved.caption_style, 'highlight');
+  assert.equal(saved.caption_highlight_color, '#00FF88');
+  assert.equal(saved.caption_word_y, 0.4);
+});
+
+test('rejects invalid caption colours and positions before saving settings', async () => {
+  jobRows = [];
+  const ui = await studio(async () => selectedProject, { settings: { caption_style: 'one_word', brand: {} } });
+  let tree = ui.draw();
+  const field = name => nodes(tree).find(n => n.type === 'Input' && n.props.name === name);
+  assert.ok(field('caption_highlight_color'));
+  field('caption_highlight_color').props.onChange({ target: { value: 'yellow' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  assert.equal(ui.calls.filter(c => c.options?.method === 'PATCH').length, 0);
+  tree = ui.draw();
+  assert.match(text(tree), /six-digit hex/i);
+  field('caption_highlight_color').props.onChange({ target: { value: '#00FF88' } });
+  field('caption_word_y').props.onChange({ target: { value: '2' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  assert.equal(ui.calls.filter(c => c.options?.method === 'PATCH').length, 0);
+  assert.match(text(ui.draw()), /caption_word_y must be between 0 and 1/i);
+});
+
+test('blank caption colour and position fall back to the defaults instead of failing or moving text', async () => {
+  jobRows = [];
+  const ui = await studio(async (_path, options) => { if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 }; return selectedProject; }, { settings: { caption_style: 'one_word', caption_highlight_color: '#00FF88', caption_word_y: 0.3, brand: {} } });
+  const tree = ui.draw();
+  const field = name => nodes(tree).find(n => n.type === 'Input' && n.props.name === name);
+  field('caption_highlight_color').props.onChange({ target: { value: '' } });
+  field('caption_word_y').props.onChange({ target: { value: '' } });
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const patches = ui.calls.filter(c => c.options?.method === 'PATCH');
+  assert.equal(patches.length, 1, 'A blank optional field must not block saving');
+  const saved = patches[0].options.body.changes.settings;
+  assert.equal(saved.caption_highlight_color, null, 'Blank colour is sent as null so the backend restores the default accent');
+  assert.equal(saved.caption_word_y, null, 'Blank position is sent as null (default 0.8), not 0 (top edge)');
+});
+
+test('choosing YouTube unticks burned captions in the form; the person can tick it again', async () => {
+  jobRows = [];
+  const ui = await studio(async (_path, options) => { if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 }; return selectedProject; }, { settings: { platform: 'instagram_reels', captions: true, brand: {} } });
+  let tree = ui.draw();
+  const tick = () => nodes(ui.draw()).find(n => n.type === 'label' && text(n).includes('Burn timed captions'));
+  assert.equal(nodes(tick()).find(n => n.props && 'checked' in n.props).props.checked, true);
+  const group = nodes(tree).find(n => n.props?.['aria-label'] === 'Platform profile');
+  // Exact label: 'YouTube Shorts' also contains 'YouTube'.
+  nodes(group).find(n => n.type === 'Button' && text(n) === 'YouTube').props.onClick();
+  const box = nodes(tick()).find(n => n.props && 'checked' in n.props);
+  assert.equal(box.props.checked, false, 'YouTube delivers sidecar captions; burn-in becomes opt-in');
+  box.props.onCheckedChange(true);
+  await button(ui.draw(), 'Save settings').props.onClick();
+  const saved = ui.calls.find(c => c.options?.method === 'PATCH').options.body.changes.settings;
+  assert.equal(saved.platform, 'youtube');
+  assert.equal(saved.captions, true, 'An explicit re-tick is kept');
+});
+
 test('uses only public SDK/React imports and no renderer or polling bypasses', async () => {
   await load();
   assert.ok(imports.length > 0);

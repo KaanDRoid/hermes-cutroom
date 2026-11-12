@@ -18,7 +18,7 @@ See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md
 2. `silence` → trims pauses while preserving manual cuts.
 3. `storyboard` → three hook options quoted from the transcript; choose one, run again for scenes.
 4. `vision` (MediaPipe face landmarks) → review-only gaze/mouth intervals. `segment` → person layer to place graphics or a background behind the subject.
-5. `preview` → a fast render with word-timed captions and SRT/VTT sidecars.
+5. `preview` → a fast render with word-timed captions (classic, highlighted word, pop-in words or one large word at a time) and SRT/VTT sidecars.
 6. Human review and approval of the exact digest in the Desktop Studio page.
 7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, upscaling, loudness and safe zone for platform projects).
 
@@ -35,7 +35,7 @@ A project renders for one platform profile, or for `custom` (the original behavi
 | `tiktok` | 1080×1920; 2160×3840 | ≤ 60 min | 13 / 35 / 12 / 28 % |
 | `youtube` | 1920×1080; 3840×2160 | no limit | 5 % each side |
 
-Every profile targets −14 LUFS and −1 dBTP. The frame sizes are Cutroom's choice within each platform's published rule. Titles, lower thirds and burned captions (at most two lines per event) are placed inside the safe zone, and QA adds frame, length, frame-rate, upscaling, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
+Every profile targets −14 LUFS and −1 dBTP. The frame sizes are Cutroom's choice within each platform's published rule. Titles, lower thirds and burned captions (at most two lines per event) are placed inside the safe zone, and QA adds frame, length, frame-rate, upscaling, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Burned captions can be classic, highlight the spoken word, pop words in or show one large word at a time; each word starts and ends within one frame of its timestamp, which QA checks. YouTube versions get SRT/VTT sidecars, and burning captions in is opt-in. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
 
 ## Models
 

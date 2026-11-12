@@ -1,6 +1,14 @@
 # Implementation status
 
-## November 12 — F0 platform profiles (branch `feat/f0-platform-profiles`)
+## November 12 — F1 animated captions (branch `feat/f1-animated-captions`)
+
+- Added `caption_style` (`classic`, `highlight`, `pop`, `one_word`), `caption_highlight_color` and `caption_word_y`, with per-word ASS events timed in whole frames and a glyph-measured two-line layout inside the safe zone at no less than the BBC reading size. Studio publishes the burned script as the `captions_ass` artifact, QA adds `caption_timing` and `caption_bounds`, Desktop gets style controls, and YouTube delivery uses SRT/VTT sidecars first. Details: [creator formats F1](creator-formats.md#f1--animated-word-captions).
+- A second review found words one frame late at 25, 30 and 60 fps, QA checking a final against a later preview's script, and lost same-frame words. All are fixed; a decoded-pixel probe finds 0 mismatches at 23.976, 25, 29.97, 30 and 60 fps and on variable-rate video.
+- On real speech (Sandra clip, 1080×1920 Reels preview, 24 words) every word starts within one frame and stays inside the safe zone.
+- Local gates: **307 Python tests OK** (14 skipped without local models and media), **24/24 Desktop tests**, Ruff clean.
+- Not yet done: a native Desktop check of the caption controls, and reframing (F2) so landscape sources fill vertical frames.
+
+## November 12 — F0 platform profiles (merged, pull request #12)
 
 - Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
 - Review fixes on the same branch: captions and lower thirds clamped into the safe zone for every brand-valid position, burned cues split into two-line events, NTSC frame rates accepted and variable-rate video checked by its slowest frame interval, a `platform_upscale` QA check with rotation-aware source sizes, corrected and current source links, cover data as stated by the platforms, frames marked as Cutroom's choice, `derive` resetting the final resolution (optional `final_resolution`) and stripping names, missing files reported as REST 422, and a Desktop overlay that follows the render's recorded platform after its metadata loads. Details: [creator formats, review fixes](creator-formats.md#review-fixes).

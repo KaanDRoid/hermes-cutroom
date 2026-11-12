@@ -250,6 +250,9 @@ class Studio:
                     "title",
                     "brand",
                     "captions",
+                    "caption_style",
+                    "caption_highlight_color",
+                    "caption_word_y",
                     "normalize_audio",
                     "graphic",
                     "background",
@@ -265,6 +268,20 @@ class Studio:
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
                 merged = updated["settings"] | settings
+                from .captions import RESETTABLE, validate_settings
+
+                # null resets an optional caption field to its default.
+                for key in RESETTABLE:
+                    if key in settings and settings[key] is None:
+                        merged.pop(key)
+                validate_settings(merged)
+                if (
+                    settings.get("platform") == "youtube"
+                    and updated["settings"].get("platform") != "youtube"
+                    and "captions" not in settings
+                ):
+                    # Long-form YouTube gets sidecar SRT/VTT; burn-in is opt-in.
+                    merged["captions"] = False
                 # Interpreter paths are no longer project data; drop legacy values.
                 merged.pop("runtime_python", None)
                 from .platforms import FINAL_RESOLUTIONS, profile
@@ -396,6 +413,8 @@ class Studio:
         # The person layer is an artifact of the parent; the sibling must rebuild it.
         settings.pop("use_segmented", None)
         settings["platform"] = platform
+        if platform == "youtube":
+            settings["captions"] = False
         if entry["orientation"]:
             settings["aspect"] = entry["orientation"]
         # A 4K choice belongs to the parent's target; never carry it silently.
@@ -873,6 +892,25 @@ class Studio:
                 previous = end
         return cues
 
+    def _caption_words(self, project):
+        """Map kept word fragments once, merging fragments of the same word."""
+        from .speech import remap_words
+
+        excluded = set(project.get("excluded_word_ids", []))
+        words = [
+            w
+            for w in (project.get("transcript") or {}).get("words", [])
+            if w["id"] not in excluded
+        ]
+        result, sources = [], []
+        for word in remap_words(words, project["segments"]):
+            if sources and sources[-1] == word["source_id"]:
+                result[-1]["end"] = word["end"]
+            else:
+                result.append({key: word[key] for key in ("start", "end", "text")})
+                sources.append(word["source_id"])
+        return result
+
     def _render_settings(self, project, preset):
         settings = project["settings"]
         brand = {
@@ -922,6 +960,10 @@ class Studio:
             )
             result["loudness_lufs"] = entry["loudness"]["integrated_lufs"]
             result["true_peak_db"] = entry["loudness"]["true_peak_db"]
+        if settings.get("caption_style", "classic") != "classic":
+            for key in ("caption_style", "caption_highlight_color", "caption_word_y"):
+                if key in settings:
+                    result[key] = settings[key]
         return result
 
     def _quality_settings(self, project, preset):
@@ -999,6 +1041,11 @@ class Studio:
                 timeout=7200,
             )
         cues = self._cues(project)
+        animated = settings.get("caption_style", "classic") != "classic"
+        burn = settings.get("captions") is True
+        caption_extra = (
+            {"caption_words": self._caption_words(project)} if animated and burn else {}
+        )
         if action in {"preview", "final"}:
             from .speech import write_subtitles
 
@@ -1012,11 +1059,21 @@ class Studio:
                     "segments": project["segments"],
                     "output": str(outputs / (action + ".mp4")),
                     "settings": self._render_settings(project, action),
-                    "captions": cues if settings.get("captions") is True else None,
+                    "captions": cues if burn else None,
+                    **caption_extra,
+                    **(
+                        {"caption_script": str(outputs / "captions.ass")}
+                        if animated and burn and cues
+                        else {}
+                    ),
                 },
                 timeout=7200 if action == "final" else 3600,
             )
             artifacts = {action: result["output"]}
+            if animated and burn and cues:
+                artifacts["captions_ass"] = str(outputs / "captions.ass")
+                # QA of this render checks this exact script, by hash.
+                result["caption_script_sha256"] = file_digest(outputs / "captions.ass")
             if cues:
                 for format in ("srt", "vtt"):
                     written = write_subtitles(
@@ -1045,21 +1102,55 @@ class Studio:
             source_video = self._render_source_video(project, job["upstream"])
             if source_video is not None and "platform" in render:
                 render["source_video"] = source_video
+            script_job, script = (
+                self._render_caption_script(project, job["upstream"])
+                if animated and burn
+                else (None, None)
+            )
             report = run(
                 "qa",
                 {
                     "video": video,
                     "settings": render,
-                    "captions": cues or None,
+                    "captions": cues if burn else None,
+                    **caption_extra,
+                    **({"caption_script": str(script)} if script else {}),
                 },
                 timeout=3600,
             )
             report = {**report, "video": job["upstream"]}
+            for check in report.get("checks", []):
+                if check.get("name") == "caption_timing" and script_job:
+                    check.setdefault("detail", {})["script_job"] = script_job
             path = outputs / "quality.json"
             with path.open("x", encoding="utf-8") as stream:
                 json.dump(report, stream, indent=2, allow_nan=False)
             return {**report, "artifacts": {"quality": str(path)}}
         raise ValueError("Operation is not installed: " + action)
+
+    def _render_caption_script(self, project, kind):
+        """The caption script burned into the current ``kind`` render, if intact.
+
+        Read from the render's own job, not the latest published ``captions_ass``
+        (a later preview replaces that one), and only when its hash still matches
+        what the render recorded. Otherwise QA rebuilds the script for the video's
+        size and says so.
+        """
+        lineage = project.get("artifact_lineage", {}).get(kind) or {}
+        job_id = lineage.get("job_id")
+        try:
+            record = self.job(job_id)
+            result = record.get("result") or {}
+            value = (result.get("artifacts") or {}).get("captions_ass")
+            expected = result.get("caption_script_sha256")
+            if not value or not expected:
+                return None, None
+            path = self._owned(record, value)
+            if file_digest(path) != expected:
+                return None, None
+            return job_id, path
+        except (OSError, ValueError, TypeError, KeyError, PermissionError):
+            return None, None
 
     def _render_source_video(self, project, kind):
         """Source size the published render was made from, from its job result."""
