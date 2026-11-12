@@ -23,6 +23,23 @@ A capability is complete only after its input, implementation, output and observ
 | A17 | Recovery and portability | Job errors/cancellation, dependency diagnostics, tests, package and plugin validation |
 | A18 | Demo and submission | Truthful under-90-second demo; catalog PR/form/publication require separate authorization |
 
+### Creator formats (0.2.0)
+
+Work packages and design decisions are in [docs/creator-formats.md](docs/creator-formats.md).
+
+| ID | Capability | Acceptance |
+|---|---|---|
+| A19 | Platform profiles | Reels, Shorts, TikTok and YouTube profiles with sourced, dated specifications; per-profile QA for frame, frame rate, length limit, loudness and safe-zone placement |
+| A20 | Derived projects | Sibling projects per platform or source range that copy edits but keep their own settings, digest and human approval |
+| A21 | Animated captions | Word-timed highlight, pop and one-word styles inside the safe zone; sidecar subtitles for long-form |
+| A22 | Reframing | Blurred fill, centre crop and smoothed face-tracked crop with manual keyframes; no silent upscaling |
+| A23 | Pacing | Punch-ins on jump cuts, maximum pause and simple transitions |
+| A24 | Music and voice | Person-supplied music with ducking under speech; voice clean-up presets; platform loudness |
+| A25 | Clip finder | Sentence-bounded candidates with explained scores; picked clips become derived projects |
+| A26 | Long-form YouTube | Valid chapters, 1280×720 thumbnail, SRT, end-screen space |
+| A27 | Delivery packages | Per-platform folder with video, cover and text within platform limits plus a checksum manifest; nothing is posted |
+| A28 | Creator acceptance | Native Desktop run per platform on consented real footage, clean install and FFmpeg 7.1 check |
+
 ## Consented acceptance source
 
 `raw_vids/12511-239934660.mp4`: 3840×2160, approximately 22.37 s, no audio stream, landscape/river aerial footage. This source cannot validate speech recognition, human gaze or person segmentation.
