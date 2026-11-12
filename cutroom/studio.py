@@ -250,6 +250,9 @@ class Studio:
                     "title",
                     "brand",
                     "captions",
+                    "caption_style",
+                    "caption_highlight_color",
+                    "caption_word_y",
                     "normalize_audio",
                     "graphic",
                     "background",
@@ -265,6 +268,20 @@ class Studio:
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
                 merged = updated["settings"] | settings
+                from .captions import RESETTABLE, validate_settings
+
+                # null resets an optional caption field to its default.
+                for key in RESETTABLE:
+                    if key in settings and settings[key] is None:
+                        merged.pop(key)
+                validate_settings(merged)
+                if (
+                    settings.get("platform") == "youtube"
+                    and updated["settings"].get("platform") != "youtube"
+                    and "captions" not in settings
+                ):
+                    # Long-form YouTube gets sidecar SRT/VTT; burn-in is opt-in.
+                    merged["captions"] = False
                 # Interpreter paths are no longer project data; drop legacy values.
                 merged.pop("runtime_python", None)
                 from .platforms import FINAL_RESOLUTIONS, profile
@@ -396,6 +413,8 @@ class Studio:
         # The person layer is an artifact of the parent; the sibling must rebuild it.
         settings.pop("use_segmented", None)
         settings["platform"] = platform
+        if platform == "youtube":
+            settings["captions"] = False
         if entry["orientation"]:
             settings["aspect"] = entry["orientation"]
         # A 4K choice belongs to the parent's target; never carry it silently.
@@ -873,6 +892,25 @@ class Studio:
                 previous = end
         return cues
 
+    def _caption_words(self, project):
+        """Map kept word fragments once, merging fragments of the same word."""
+        from .speech import remap_words
+
+        excluded = set(project.get("excluded_word_ids", []))
+        words = [
+            w
+            for w in (project.get("transcript") or {}).get("words", [])
+            if w["id"] not in excluded
+        ]
+        result, sources = [], []
+        for word in remap_words(words, project["segments"]):
+            if sources and sources[-1] == word["source_id"]:
+                result[-1]["end"] = word["end"]
+            else:
+                result.append({key: word[key] for key in ("start", "end", "text")})
+                sources.append(word["source_id"])
+        return result
+
     def _render_settings(self, project, preset):
         settings = project["settings"]
         brand = {
@@ -922,6 +960,10 @@ class Studio:
             )
             result["loudness_lufs"] = entry["loudness"]["integrated_lufs"]
             result["true_peak_db"] = entry["loudness"]["true_peak_db"]
+        if settings.get("caption_style", "classic") != "classic":
+            for key in ("caption_style", "caption_highlight_color", "caption_word_y"):
+                if key in settings:
+                    result[key] = settings[key]
         return result
 
     def _quality_settings(self, project, preset):
@@ -999,6 +1041,11 @@ class Studio:
                 timeout=7200,
             )
         cues = self._cues(project)
+        animated = settings.get("caption_style", "classic") != "classic"
+        burn = settings.get("captions") is True
+        caption_extra = (
+            {"caption_words": self._caption_words(project)} if animated and burn else {}
+        )
         if action in {"preview", "final"}:
             from .speech import write_subtitles
 
@@ -1012,11 +1059,19 @@ class Studio:
                     "segments": project["segments"],
                     "output": str(outputs / (action + ".mp4")),
                     "settings": self._render_settings(project, action),
-                    "captions": cues if settings.get("captions") is True else None,
+                    "captions": cues if burn else None,
+                    **caption_extra,
+                    **(
+                        {"caption_script": str(outputs / "captions.ass")}
+                        if animated and burn and cues
+                        else {}
+                    ),
                 },
                 timeout=7200 if action == "final" else 3600,
             )
             artifacts = {action: result["output"]}
+            if animated and burn and cues:
+                artifacts["captions_ass"] = str(outputs / "captions.ass")
             if cues:
                 for format in ("srt", "vtt"):
                     written = write_subtitles(
@@ -1050,7 +1105,17 @@ class Studio:
                 {
                     "video": video,
                     "settings": render,
-                    "captions": cues or None,
+                    "captions": cues if burn else None,
+                    **caption_extra,
+                    **(
+                        {
+                            "caption_script": str(
+                                self.artifact(project["id"], "captions_ass")
+                            )
+                        }
+                        if animated and burn and "captions_ass" in project["artifacts"]
+                        else {}
+                    ),
                 },
                 timeout=3600,
             )

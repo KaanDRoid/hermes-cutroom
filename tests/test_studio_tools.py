@@ -113,12 +113,14 @@ class ProjectToolTests(_ToolCase):
                 args = {
                     "action": "update",
                     "project_id": "p",
-                    "changes": {key: "value"},
+                    "changes": {key: {} if key == "settings" else "value"},
                     "revision": 3,
                 }
                 self.assertTrue(self.invoke(args)["ok"])
                 self.studio.update.assert_called_once_with(
-                    project_id="p", changes={key: "value"}, revision=3
+                    project_id="p",
+                    changes={key: {} if key == "settings" else "value"},
+                    revision=3,
                 )
 
     def test_list_is_compact(self):

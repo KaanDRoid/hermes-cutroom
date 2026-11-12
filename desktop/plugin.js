@@ -427,17 +427,26 @@ function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
   const change = (key, value) => { dirty(); setSettings(old => ({ ...old, [key]: value })); };
   const brand = (key, value) => { dirty(); setSettings(old => ({ ...old, brand: { ...old.brand, [key]: value } })); };
   const save = () => {
-    const value = settingsRef.current;
+    // Blank optional caption fields mean "use the default", never "" or 0.
+    const value = { ...settingsRef.current };
+    if (value.caption_highlight_color === '') value.caption_highlight_color = null;
+    if (value.caption_word_y === '') value.caption_word_y = null;
     const bounds = { title_size: [12, 120], subtitle_size: [12, 120], safe_margin: [0.02, 0.25] };
     for (const [key, [min, max]] of Object.entries(bounds)) if (value.brand[key] != null && (!Number.isFinite(value.brand[key]) || value.brand[key] < min || value.brand[key] > max)) { setError(new Error(`${key} must be between ${min} and ${max}`)); return; }
     for (const key of ['title_color', 'subtitle_color', 'graphic_color']) if (value.brand[key] && !/^#[0-9a-f]{6}$/i.test(value.brand[key])) { setError(new Error('Brand colors must be six-digit hex values')); return; }
+    if (value.caption_highlight_color && !/^#[0-9a-f]{6}$/i.test(value.caption_highlight_color)) { setError(new Error('Caption colour must be a six-digit hex value')); return; }
+    if (value.caption_word_y != null && (!Number.isFinite(value.caption_word_y) || value.caption_word_y < 0 || value.caption_word_y > 1)) { setError(new Error('caption_word_y must be between 0 and 1')); return; }
     for (const key of ['frame_step', 'max_width']) if (value[key] != null && (!Number.isInteger(value[key]) || value[key] < 1)) { setError(new Error(`${key} must be a positive integer`)); return; }
     setError(null); return patch({ settings: value });
   };
-  const field = (label, key, type = 'text') => jsx(Field, { label, name: key, type, value: settings[key], onChange: value => change(key, type === 'number' ? Number(value) : value) }, key);
+  const field = (label, key, type = 'text') => jsx(Field, { label, name: key, type, value: settings[key], onChange: value => change(key, type === 'number' && value !== '' ? Number(value) : value) }, key);
   const selected = platforms.find(item => item.name === (settings.platform || 'custom')) || null;
   const platformFixed = Boolean(selected?.frame);
-  const choosePlatform = item => { change('platform', item.name); if (item.orientation) { change('aspect', item.orientation); brand('aspect', item.orientation); } };
+  const choosePlatform = item => {
+    // Long-form YouTube delivers sidecar SRT/VTT; burn-in stays available as an explicit tick.
+    if (item.name === 'youtube' && settingsRef.current.platform !== 'youtube') change('captions', false);
+    change('platform', item.name); if (item.orientation) { change('aspect', item.orientation); brand('aspect', item.orientation); }
+  };
   const resolution = settings.final_resolution || selected?.frame?.default_final || '1080';
   const summary = () => {
     if (!platformFixed) return 'Custom: frame follows the aspect below (1080 preview, 2160 final), loudness −16 LUFS. No platform limits are checked.';
@@ -449,6 +458,9 @@ function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
   return jsx(Section, { title: 'Brand, assets & local models', children: [
     jsx('p', { style: muted, children: 'Save settings before starting jobs. Paths are local to the backend machine. No model is downloaded automatically. A saved revision or completed analysis refreshes this form.' }),
     field('Video title', 'title'),
+    jsx('div', { role: 'group', 'aria-label': 'Caption style', style: row, children: [['classic', 'Classic captions'], ['highlight', 'Highlight words'], ['pop', 'Pop words'], ['one_word', 'One word']].map(([value, label]) => jsx(Button, { variant: (settings.caption_style || 'classic') === value ? 'secondary' : 'ghost', onClick: () => change('caption_style', value), children: label }, `caption-style:${value}`)) }),
+    field('Caption highlight colour (hex; blank uses the default accent)', 'caption_highlight_color'),
+    field('One-word vertical position in safe area (0 top – 1 bottom; blank = 0.8, below the face)', 'caption_word_y', 'number'),
     jsx('div', { role: 'group', 'aria-label': 'Platform profile', style: row, children: platforms.map(item => jsx(Button, { variant: (settings.platform || 'custom') === item.name ? 'secondary' : 'ghost', onClick: () => choosePlatform(item), children: item.label }, `platform:${item.name}`)) }),
     jsx('div', { role: 'group', 'aria-label': 'Final resolution', style: row, children: [['1080', 'HD final (1080)'], ['2160', '4K final (2160)']].map(([value, label]) => jsx(Button, { variant: platformFixed && resolution === value ? 'secondary' : 'ghost', disabled: !platformFixed, onClick: () => change('final_resolution', value), children: label }, `resolution:${value}`)) }),
     jsx('p', { role: 'status', style: muted, children: summary() }),

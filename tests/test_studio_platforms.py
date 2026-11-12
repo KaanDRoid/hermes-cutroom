@@ -494,7 +494,8 @@ class PlatformJobsTests(unittest.TestCase):
                 self.assertEqual(lineage["preview"]["platform"], platform)
                 self.assertEqual(checks["safe_zone"]["detail"]["findings"], [])
                 self.assertEqual(
-                    set(checks["safe_zone"]["detail"]["boxes"]), {"title", "captions"}
+                    set(checks["safe_zone"]["detail"]["boxes"]),
+                    {"title"} if platform == "youtube" else {"title", "captions"},
                 )
         reloaded = self.studio.get(parent["id"])
         self.assertEqual(reloaded["revision"], parent["revision"])

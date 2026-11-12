@@ -113,6 +113,8 @@ class UpdateProject(RequestModel):
         for key in ("settings", "transcript"):
             if key in value and not isinstance(value[key], dict):
                 raise ValueError(f"{key} must be an object")
+        if "settings" in value:
+            _module("captions").validate_settings(value["settings"], allow_reset=True)
         for key in ("segments", "gaze_exclusions", "excluded_word_ids"):
             if key in value and (
                 not isinstance(value[key], list) or len(value[key]) > 100_000

@@ -276,11 +276,17 @@ def _settings(settings):
         "platform",
         "final_resolution",
         "source_video",
+        "caption_style",
+        "caption_highlight_color",
+        "caption_word_y",
     }
     if settings is None:
         settings = {}
     if not isinstance(settings, dict) or set(settings) - allowed:
         raise ValueError("Unknown settings fields")
+    from cutroom.captions import DEFAULT_HIGHLIGHT, validate_settings
+
+    validate_settings(settings)
     brand = validate_brand(settings.get("brand", {}))
     result = dict(
         preset=brand["preset"],
@@ -302,6 +308,9 @@ def _settings(settings):
         platform="custom",
         final_resolution=None,
         source_video=None,
+        caption_style="classic",
+        caption_highlight_color=DEFAULT_HIGHLIGHT,
+        caption_word_y=0.8,
     )
     entry = platforms.profile(settings.get("platform", "custom"))
     if entry["loudness"] is not None:
@@ -512,7 +521,7 @@ def platform_layout(settings, width, height, *, title=None, captions=False):
     )
 
 
-def platform_caption_cues(captions, layout):
+def platform_caption_cues(captions, layout, *, measure=None):
     """Split cues so every burned event fits the two-line caption band.
 
     Words are wrapped at the band's characters per line (longer words are
@@ -534,6 +543,10 @@ def platform_caption_cues(captions, layout):
                 paragraph, width, break_long_words=True, break_on_hyphens=False
             )
         ] or [item["text"].strip()]
+        if measure is not None:
+            from cutroom.captions import wrap_lines
+
+            lines = wrap_lines(item["text"], band["w"] - 16, band["size"], measure)
         events = [
             "\n".join(lines[index : index + 2]) for index in range(0, len(lines), 2)
         ]
@@ -797,7 +810,15 @@ def _frame_aligned(ranges, rate, source_duration, start_time=None):
     return aligned
 
 
-def export_video(source, segments, output, settings=None, captions=None):
+def export_video(
+    source,
+    segments,
+    output,
+    settings=None,
+    captions=None,
+    caption_words=None,
+    caption_script=None,
+):
     """Render ordered source intervals. Approval is the caller's responsibility.
 
     Explicit aspects fit/pad, never crop. Source aspect fits its long-side target.
@@ -805,6 +826,9 @@ def export_video(source, segments, output, settings=None, captions=None):
     """
     source = _path(source)
     output = _output_path(output, {".mp4", ".mkv", ".mov"})
+    script_output = (
+        _output_path(caption_script, {".ass"}) if caption_script is not None else None
+    )
     settings = _settings(settings)
     info = _probe(source, settings["timeout"])
     if not isinstance(segments, list) or not segments:
@@ -863,7 +887,27 @@ def export_video(source, segments, output, settings=None, captions=None):
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
     layout = platform_layout(settings, width, height, captions=bool(captions))
-    events = platform_caption_cues(captions, layout) if layout else captions
+    from cutroom import captions as animated_captions
+
+    measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
+    events = (
+        platform_caption_cues(captions, layout, measure=measure) if layout else captions
+    )
+    animated = settings["caption_style"] != "classic"
+    caption_plan = None
+    if animated and captions:
+        caption_plan = animated_captions.build(
+            caption_words
+            if caption_words is not None
+            else animated_captions.words_from_cues(captions),
+            settings,
+            width,
+            height,
+            layout,
+            frame_rate=rate or "30/1",
+            duration=duration,
+        )
+        events = caption_plan["events"]
     effects = []
     lower_y = None
     with tempfile.TemporaryDirectory(
@@ -954,7 +998,12 @@ def export_video(source, segments, output, settings=None, captions=None):
                 )
             )
             effects.append("lower_third")
-        if captions:
+        if caption_plan is not None:
+            (directory / "captions.ass").write_text(
+                caption_plan["script"], encoding="utf-8-sig"
+            )
+            filters.append("ass=filename=captions.ass:fontsdir=.")
+        elif captions:
             filters.append(_ass(directory, events, brand, width, height, layout))
         normalization_method = "no audio"
         if info["has_audio"] and settings["normalize_audio"]:
@@ -1037,6 +1086,8 @@ def export_video(source, segments, output, settings=None, captions=None):
         result = _probe(temporary, settings["timeout"])
         result.pop("streams")
         os.link(temporary, output)
+        if script_output is not None and captions:
+            os.link(directory / "captions.ass", script_output)
     extra = {}
     if layout is not None:
         extra = {
@@ -1060,6 +1111,14 @@ def export_video(source, segments, output, settings=None, captions=None):
         "source_video": source_video,
         "captions_burned": len(captions),
         "caption_events": len(events),
+        **(
+            {
+                "caption_style": settings["caption_style"],
+                "caption_measurement": measure.method,
+            }
+            if animated
+            else {}
+        ),
         "effects": effects,
         "lower_third_y": lower_y,
         "expected_duration": duration,
@@ -1323,7 +1382,9 @@ def _platform_fps(add, entry, info, settings, deltas):
     )
 
 
-def quality_report(video, settings=None, captions=None):
+def quality_report(
+    video, settings=None, captions=None, caption_words=None, caption_script=None
+):
     """Decode all frames; findings are heuristics, never editorial certification."""
     from statistics import median
 
@@ -1396,6 +1457,7 @@ def quality_report(video, settings=None, captions=None):
     if entry is not None:
         _platform_checks(add, entry, info, settings, actual_resolution)
     deltas = None
+    points = []
     with tempfile.TemporaryDirectory(
         prefix=".postproduction-qa-", dir=os.environ.get("TMPDIR")
     ) as temp:
@@ -1732,6 +1794,59 @@ def quality_report(video, settings=None, captions=None):
             )
         except ValueError as error:
             add("safe_zone", "fail", {"error": str(error)})
+    if settings["caption_style"] != "classic" and captions:
+        from cutroom import captions as animated_captions
+
+        words = (
+            caption_words
+            if caption_words is not None
+            else animated_captions.words_from_cues(captions)
+        )
+        if caption_script is not None:
+            script = _path(caption_script).read_text(encoding="utf-8-sig")
+        else:
+            script = animated_captions.build(
+                words,
+                settings,
+                info["width"],
+                info["height"],
+                layout,
+                frame_rate=str(_frame_rate(info) or 30),
+                duration=info["duration"],
+            )["script"]
+        parsed = animated_captions.parse_script(script)
+        timing = animated_captions.timing_report(parsed, words, points)
+        status = timing.pop("status")
+        timing["script"] = (
+            "published" if caption_script is not None else "reconstructed"
+        )
+        add("caption_timing", status, timing)
+        measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
+        boxes = animated_captions.event_boxes(parsed, measure)
+        zone = (
+            entry["safe_zone"]
+            if entry
+            else {
+                side: settings["brand"]["safe_margin"]
+                for side in ("top", "bottom", "left", "right")
+            }
+        )
+        findings = safe_zone_findings(
+            {str(i): box for i, box in enumerate(boxes)},
+            zone,
+            info["width"],
+            info["height"],
+        )
+        add(
+            "caption_bounds",
+            "fail" if findings else "pass",
+            dict(
+                boxes=boxes,
+                findings=findings,
+                measurement=measure.method,
+                method="ASS event positions and measured glyph bounds, not decoded pixels",
+            ),
+        )
     return dict(
         checks=checks,
         passed=all(c["status"] in ("pass", "skip") for c in checks),
