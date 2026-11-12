@@ -1,5 +1,12 @@
 # Implementation status
 
+## November 12 — F0 platform profiles (branch `feat/f0-platform-profiles`)
+
+- Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
+- Review fixes on the same branch: captions and lower thirds clamped into the safe zone for every brand-valid position, burned cues split into two-line events, NTSC frame rates accepted and variable-rate video checked by its slowest frame interval, a `platform_upscale` QA check with rotation-aware source sizes, corrected and current source links, cover data as stated by the platforms, frames marked as Cutroom's choice, `derive` resetting the final resolution (optional `final_resolution`) and stripping names, missing files reported as REST 422, and a Desktop overlay that follows the render's recorded platform after its metadata loads. Details: [creator formats, review fixes](creator-formats.md#review-fixes).
+- Local gates without inherited `PYTHONPATH`, FFmpeg 9: **259 Python tests OK** — 14 skipped on a checkout without the local models and consented media, 5 skipped with them (`models/` and `raw_vids/` present); **20/20 Desktop tests**; Ruff check and format clean. The skip count depends on the environment. Before the review fixes the suite had 242 tests (14 or 5 skipped likewise). Logs: `artifacts/f0/red.log`, `artifacts/f0/green.log`, `artifacts/f0/fix-red.log`, `artifacts/f0/fix-green.log`, reviewer probes `artifacts/f0/fix-probes.log`.
+- Not yet done: native Desktop acceptance of the new controls, source-range derivation (F5) and the YouTube thumbnail (F6).
+
 ## November 11 native Desktop acceptance — import through approved final
 
 - Opened the packaged Hermes Desktop application in a separate user-data instance and exercised the `cutroom-test` backend profile. This is real Electron/React, not the SDK fake. The test profile uses a local source clone and the existing development virtual environment; this is **not a clean dependency-install acceptance**. Hermes inventories the Desktop half at app level, while project/job data remain in the test profile.

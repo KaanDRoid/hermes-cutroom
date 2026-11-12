@@ -15,11 +15,52 @@ The same jobs are reachable from three surfaces: the Python facade, the plugin R
 | `segment` | none | `settings.segmentation_model`; optional `background` (file or `#RRGGBB`), `graphic`, `max_width` | `segmented` artifact and `segmentation` summary | +1, approval removed |
 | `storyboard` | none | a transcript with words | `story` (three hooks; scenes once a hook is selected), `storyboard` and `caption` JSON artifacts | +1, approval removed |
 | `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain | unchanged |
-| `final` | none | current human approval; selected hook and current storyboard if a story exists | `final` MP4 plus caption sidecars | unchanged |
+| `final` | none | current human approval; selected hook and current storyboard if a story exists; an edit no longer than the platform's hard limit | `final` MP4 plus caption sidecars | unchanged |
 | `cover` | `time` | a current `final` (preferred) or `preview` | `cover` PNG | unchanged |
-| `qa` | none | a current `final` (preferred) or `preview` | `quality` JSON report | unchanged |
+| `qa` | none | a current `final` (preferred) or `preview` | `quality` JSON report, with platform checks for platform projects | unchanged |
 
 Unknown options are rejected before a job is created. Source, model and asset paths always come from the saved project settings, never from job options.
+
+## Platform settings
+
+Two project settings select a delivery profile from `cutroom/platforms.py`:
+
+| Setting | Values | Effect |
+|---|---|---|
+| `platform` | `custom` (default), `instagram_reels`, `youtube_shorts`, `tiktok`, `youtube` | Non-custom profiles fix the frame, aspect (saved back into `settings.aspect`), loudness (−14 LUFS, −1 dBTP), safe zone and length limit |
+| `final_resolution` | `"1080"` (default), `"2160"` | Final frame for platform projects: 1080×1920 or 2160×3840 vertical, 1920×1080 or 3840×2160 for `youtube`. Ignored for `custom` |
+
+```python
+project = studio.update(project["id"], {"settings": {
+    "platform": "youtube_shorts",
+    "final_resolution": "1080",
+}}, project["revision"])
+```
+
+Like every edit, this bumps the revision and removes approval. Projects saved before these settings existed have neither key and load as `custom`; their render settings, digest and approval are unchanged.
+
+For platform projects:
+
+- `preview` renders at the profile's preview frame (1080×1920, or 1920×1080 for `youtube`) and `final` at the chosen resolution. The source is fitted and padded, never cropped.
+- The title, an optional lower third and the burned caption band are placed inside the profile's safe zone. Each margin is the larger of the profile margin and the brand's `safe_margin`; a title that does not fit is moved and then shrunk, and the caption band and lower third are clamped into the safe area whatever `subtitle_y` says. Burned cues are split into events of at most two lines (no text is dropped); the export result reports `captions_burned` (cues) and `caption_events` (burned events). The geometry is recorded in the export result as `safe_zone_layout`.
+- Every export result records `source_video` (the source's pixel grid in display orientation), `content_size` (the fitted picture), `upscale_factor` and `upscaled`. The render's lineage records the `platform` it was made for, which the Desktop overlay uses.
+- `final` is refused before a job is created when the kept ranges run longer than the profile's hard limit (Shorts 180 s, Reels 1,200 s, TikTok 3,600 s). `preview` still runs so the edit can be reviewed and trimmed.
+- `qa` adds `platform_frame`, `platform_duration`, `platform_fps`, `platform_upscale`, `platform_loudness` and `safe_zone`. A warning (for example a Reels edit over three minutes, a 25 fps Reels render or a 320×180 source enlarged to 1080×1920) makes `passed` false, as for other checks. `platform_fps` accepts NTSC 30000/1001 as 30 fps and, for variable-rate video, also checks the slowest frame interval (`min_instantaneous_fps`). `platform_upscale` compares the fitted picture with the source size of the render, which Studio passes as `source_video` in the QA settings; it is skipped when that is unknown. The `safe_zone` check recomputes the text boxes from the render geometry; it does not inspect glyph pixels.
+
+## Platform versions (derived projects)
+
+`Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling project for another platform:
+
+```python
+reels = studio.derive(project["id"], "instagram_reels")
+shorts = studio.derive(project["id"], "youtube_shorts", name="Talk – Shorts")
+```
+
+| Copied | Not copied |
+|---|---|
+| Source path, fingerprint and probe; transcript; `base_segments`, `segments`, `excluded_word_ids`, `gaze_exclusions`; `story` and `selected_hook`; `brief`, `voice`; settings (brand, title, captions, normalisation, graphic, background, model paths, frame step, width) | Artifacts and lineage, approval, job history, vision `analysis`, `use_segmented` (rebuild the person layer for the sibling) |
+
+The sibling gets `settings.platform`, the profile's aspect, the profile's default `final_resolution` (`"1080"`; pass `final_resolution="2160"` to ask for 4K, a parent's 4K choice is not carried over; `custom` siblings get none), the stripped name, revision 1, status `draft` and `derived_from: {project_id, revision, digest}` naming the parent revision it was copied from. The source fingerprint is checked first. The parent is not modified. The sibling has its own digest, so the parent's approval never covers it. The same action is available as `cutroom_project` `derive(project_id, platform, name?, final_resolution?)`, as `POST /projects/{id}/derive` with `{"platform": ..., "name": ..., "final_resolution": ...}` (a missing source or asset file answers 422 naming the file), and as **Create version for …** buttons in Desktop. None of them approves anything. `GET /platforms` returns the profile data used by the Desktop selector and safe-zone overlay.
 
 ## Hook and storyboard flow
 

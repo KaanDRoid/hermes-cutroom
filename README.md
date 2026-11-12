@@ -6,7 +6,7 @@ Cutroom turns a local recording into a reviewable edit: word-timed transcript cu
 
 It ships three surfaces:
 
-- **Hermes Desktop Studio page** — import, edit words, captions and ranges, pick a hook, run jobs, play previews, review the exact digest and approve the final export.
+- **Hermes Desktop Studio page** — import, edit words, captions and ranges, pick a hook, choose a platform profile, create platform versions, run jobs, play previews with an optional safe-zone overlay, review the exact digest and approve the final export.
 - **Agent tools** — `cutroom_project` and `cutroom_job` let Hermes create projects, edit settings and run allowlisted background jobs. There is no approval tool: only a person can approve a final export.
 - **CLI** — `cutroom doctor`, `cutroom setup-models` and the plan-file commands below.
 
@@ -20,9 +20,22 @@ See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md
 4. `vision` (MediaPipe face landmarks) → review-only gaze/mouth intervals. `segment` → person layer to place graphics or a background behind the subject.
 5. `preview` → a fast render with word-timed captions and SRT/VTT sidecars.
 6. Human review and approval of the exact digest in the Desktop Studio page.
-7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area).
+7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, upscaling, loudness and safe zone for platform projects).
 
 Every job is bound to the project revision and its input files. Edits revoke approval and unlink stale renders; published files carry SHA-256 lineage.
+
+## Platform formats
+
+A project renders for one platform profile, or for `custom` (the original behaviour: frame from the aspect setting, −16 LUFS, no platform checks). Choose the profile in the Studio settings (`settings.platform`, plus `settings.final_resolution` `"1080"` or `"2160"`). To deliver the same edit elsewhere, create a **version**: a sibling project that copies the transcript, cuts, story and brand but has its own settings, review digest and human approval.
+
+| Profile | Frame (default final; 4K opt-in) | Length | Safe zone top / bottom / left / right |
+|---|---|---|---|
+| `instagram_reels` | 1080×1920; 2160×3840 | ≤ 20 min, warning above 3 min | 14 / 35 / 6 / 6 % |
+| `youtube_shorts` | 1080×1920; 2160×3840 | ≤ 3 min | 15 / 35 / 5 / 18 % |
+| `tiktok` | 1080×1920; 2160×3840 | ≤ 60 min | 13 / 35 / 12 / 28 % |
+| `youtube` | 1920×1080; 3840×2160 | no limit | 5 % each side |
+
+Every profile targets −14 LUFS and −1 dBTP. The frame sizes are Cutroom's choice within each platform's published rule. Titles, lower thirds and burned captions (at most two lines per event) are placed inside the safe zone, and QA adds frame, length, frame-rate, upscaling, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
 
 ## Models
 
@@ -87,7 +100,7 @@ For local development, link this directory as `<active-HERMES_HOME>/plugins/cutr
 | `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review in a new directory inside the Cutroom workspace |
 | `cutroom_review` | Regenerate review and digest after plan edits; refuses plans outside the workspace and any `review.html` Cutroom did not write |
 | `cutroom_render` | Render an approved plan inside the workspace; reject stale approval and existing output |
-| `cutroom_project` | Create, list, read, update and review Studio projects (no approval) |
+| `cutroom_project` | Create, list, read, update, review and derive platform versions of Studio projects (no approval) |
 | `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs |
 
 Agent tools write only inside the Cutroom workspace (`CUTROOM_WORKSPACE`, otherwise Hermes' plugin data directory for `cutroom`); the legacy plan tools use its `plans/` subdirectory. The user-run `python -m cutroom` CLI keeps writing where you point it.

@@ -45,6 +45,8 @@ function StudioScope({ ctx, profile, connection }) {
   const jobs = useQuery({ queryKey: [...scope, 'jobs', selected], queryFn: () => ctx.rest(`/jobs?project_id=${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500, refetchIntervalInBackground: working.current });
   working.current = Array.isArray(jobs.data) && jobs.data.some(job => ['queued', 'running'].includes(job.status));
   const project = useQuery({ queryKey: [...scope, 'project', selected], queryFn: () => ctx.rest(`/projects/${encodeURIComponent(selected)}`), enabled: Boolean(selected), refetchInterval: 2500, refetchIntervalInBackground: working.current });
+  // Sourced platform profiles drive the selector, derive buttons and safe-zone overlay.
+  const platforms = useQuery({ queryKey: [...scope, 'platforms'], queryFn: () => ctx.rest('/platforms'), staleTime: 300000 });
   const choose = id => { select(id); ctx.storage.set(`lastProject:${connection}:${profile}`, id); setError(null); };
   const create = useMutation({ mutationFn: path => ctx.rest('/projects', { method: 'POST', body: { source: path }, timeoutMs: 120000 }), onSuccess: result => { choose(result.id); setSource(''); client.invalidateQueries({ queryKey: scope }); } });
   const importVideo = async () => {
@@ -65,7 +67,7 @@ function StudioScope({ ctx, profile, connection }) {
     ] }),
     jsx(Notice, { error: projects.error || project.error || jobs.error }),
     projects.isPending ? jsx(GlyphSpinner, {}) : null,
-    project.data ? jsx(ProjectEditor, { ctx, scope, project: project.data, jobs: jobs.data || [] }, project.data.id) : jsx('p', { style: muted, children: 'Import a local video or select a project to begin.' }),
+    project.data ? jsx(ProjectEditor, { ctx, scope, project: project.data, jobs: jobs.data || [], platforms: Array.isArray(platforms.data) ? platforms.data : [], open: choose }, project.data.id) : jsx('p', { style: muted, children: 'Import a local video or select a project to begin.' }),
   ] });
 }
 
@@ -79,7 +81,34 @@ function Field({ label, name, value, onChange, type = 'text', placeholder = '' }
   return jsx('label', { style: { ...stack, gap: 5, fontSize: 12 }, children: [label, jsx(Input, { name, value: value ?? '', type, placeholder, onChange: event => onChange(event.target.value) })] });
 }
 
-function ProjectEditor({ ctx, scope, project, jobs }) {
+const platformOf = (platforms, project) => platforms.find(item => item.name === (project.settings?.platform || 'custom')) || null;
+const percent = value => `${+(value * 100).toFixed(2)}%`;
+
+function PlatformVersions({ ctx, scope, project, platforms, open }) {
+  const client = useQueryClient();
+  const lock = useRef(false);
+  const [error, setError] = useState(null);
+  const derive = useMutation({ mutationFn: platform => ctx.rest(`/projects/${encodeURIComponent(project.id)}/derive`, { method: 'POST', body: { platform } }) });
+  const create = async platform => {
+    if (lock.current) return;
+    lock.current = true; setError(null);
+    try {
+      const result = await derive.mutateAsync(platform);
+      client.invalidateQueries({ queryKey: scope });
+      open(result.id);
+    } catch (failure) { setError(failure); }
+    finally { lock.current = false; }
+  };
+  const targets = platforms.filter(item => item.name !== 'custom');
+  return jsx(Section, { title: 'Platform versions', children: [
+    jsx('p', { style: muted, children: 'A version is a separate project from the same source. It copies the transcript, cuts, story and brand, then gets its own settings, review and approval. Nothing is approved by creating it.' }),
+    project.derived_from ? jsx('p', { style: muted, children: `Derived from ${project.derived_from.project_id} at revision ${project.derived_from.revision}.` }) : null,
+    jsx('div', { style: row, children: targets.map(item => jsx(Button, { variant: 'secondary', disabled: derive.isPending, onClick: () => create(item.name), children: `Create version for ${item.short_label || item.label}` }, `derive:${item.name}`)) }),
+    jsx(Notice, { error }),
+  ] });
+}
+
+function ProjectEditor({ ctx, scope, project, jobs, platforms = [], open = () => {} }) {
   const client = useQueryClient();
   const current = useRef(project);
   current.current = project;
@@ -149,25 +178,43 @@ function ProjectEditor({ ctx, scope, project, jobs }) {
       jsx('p', { role: 'status', style: muted, children: canFinal() ? 'Current digest approved. Final export is enabled.' : 'Final export requires current human approval. Any edit clears confirmation.' }),
     ] }),
     jsx(JobPanel, { ctx, scope, project, jobs, approved: canFinal(), canFinal }),
-    jsx(MediaPanel, { ctx, project }),
+    jsx(MediaPanel, { ctx, project, profile: platformOf(platforms, project), platforms }),
+    jsx(PlatformVersions, { ctx, scope, project, platforms, open }),
     jsx(TranscriptEditor, { project, exclude, disabled: mutation.isPending }),
     jsx(CorrectionEditor, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `corrections:${project.revision}`),
     jsx(StoryEditor, { project, patch, disabled: mutation.isPending }),
     jsx(VisionReview, { project, patch, disabled: mutation.isPending }),
-    jsx(SettingsForm, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `settings:${project.revision}`),
+    jsx(SettingsForm, { project, platforms, patch, dirty: clearApproval, disabled: mutation.isPending }, `settings:${project.revision}`),
   ] });
 }
 
 const jobActions = ['transcribe', 'silence', 'vision', 'segment', 'storyboard', 'preview', 'final', 'cover', 'qa'];
 
-function MediaPanel({ ctx, project }) {
+function SafeZoneOverlay({ zone }) {
+  const shade = { position: 'absolute', background: 'var(--ui-stroke-secondary)', opacity: 0.6, pointerEvents: 'none' };
+  const middle = 100 - (zone.top + zone.bottom) * 100;
+  return [
+    jsx('div', { 'data-cutroom-unsafe': 'top', style: { ...shade, left: 0, right: 0, top: 0, height: percent(zone.top) } }, 'unsafe:top'),
+    jsx('div', { 'data-cutroom-unsafe': 'bottom', style: { ...shade, left: 0, right: 0, bottom: 0, height: percent(zone.bottom) } }, 'unsafe:bottom'),
+    jsx('div', { 'data-cutroom-unsafe': 'left', style: { ...shade, left: 0, top: percent(zone.top), height: `${+middle.toFixed(2)}%`, width: percent(zone.left) } }, 'unsafe:left'),
+    jsx('div', { 'data-cutroom-unsafe': 'right', style: { ...shade, right: 0, top: percent(zone.top), height: `${+middle.toFixed(2)}%`, width: percent(zone.right) } }, 'unsafe:right'),
+  ];
+}
+
+function MediaPanel({ ctx, project, profile = null, platforms = [] }) {
+  const [overlay, setOverlay] = useState(false);
+  const [ready, setReady] = useState(false);
   const [media, setMedia] = useState(null);
+  // A loaded render shows the zone of the profile it was rendered with (recorded in its lineage), not the current setting.
+  const rendered = media && media.kind !== 'source';
+  const shown = rendered ? platformOf(platforms, { settings: { platform: project.artifact_lineage?.[media.kind]?.platform || 'custom' } }) : profile;
+  const zone = shown?.safe_zone || null;
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
   const generation = useRef(0);
   const url = useRef(null);
   const lock = useRef(false);
-  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); };
+  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); setReady(false); };
   useEffect(() => {
     release();
     return () => { generation.current++; if (url.current) URL.revokeObjectURL(url.current); url.current = null; };
@@ -211,7 +258,13 @@ function MediaPanel({ ctx, project }) {
     jsx('p', { style: muted, children: 'Explicit authenticated loads only, up to 256 MiB. Codec support depends on this Desktop host. Downloads use the native save dialog, without loading the entire artifact into memory.' }),
     jsx('div', { style: row, children: ['source', 'preview', 'final'].map(kind => jsx(Button, { disabled: progress !== null || (kind !== 'source' && !project.artifacts?.[kind]), onClick: () => load(kind), children: `Load ${kind}` }, kind)) }),
     progress !== null ? jsx('progress', { 'aria-label': 'Media loading progress', max: 1, value: progress }) : null,
-    media ? jsx('video', { src: media.url, controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: { width: '100%', maxHeight: 420 }, onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }) : null,
+    jsx('label', { style: row, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true) }), zone ? `Show ${shown.label} safe zone on renders (shaded areas may be covered by the app)` : rendered ? 'Safe zone: this render was made without a platform profile' : 'Safe zone: choose a platform profile in settings'] }),
+    media ? (() => {
+      const player = jsx('video', { src: media.url, controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: overlay && zone && media.kind !== 'source' ? { display: 'block', maxWidth: '100%', maxHeight: 420 } : { width: '100%', maxHeight: 420 }, onLoadedMetadata: () => setReady(true), onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }, 'player:video');
+      if (!(overlay && zone && ready && media.kind !== 'source')) return player;
+      // Drawn once the frame size is known; the wrapper shrinks to the video box, so percentages follow the rendered frame.
+      return jsx('div', { 'aria-label': 'Safe zone overlay', style: { position: 'relative', display: 'inline-block', maxWidth: '100%', alignSelf: 'flex-start' }, children: [player, ...SafeZoneOverlay({ zone })] });
+    })() : null,
     jsx(Button, { variant: 'ghost', onClick: release, children: 'Unload media / cancel load' }),
     jsx('div', { style: row, children: [['captions_srt', 'SRT'], ['captions_vtt', 'VTT'], ['quality', 'report'], ['cover', 'cover'], ['preview', 'preview'], ['final', 'final']].map(([kind, label]) => jsx(Button, { variant: 'secondary', disabled: !project.artifacts?.[kind], onClick: () => download(kind), children: `Download ${label}` }, kind)) }),
     jsx(Notice, { error }),
@@ -368,7 +421,7 @@ function CorrectionEditor({ project, patch, dirty, disabled }) {
   ] });
 }
 
-function SettingsForm({ project, patch, dirty, disabled }) {
+function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
   const [settings, setSettings, settingsRef] = useLive({ ...project.settings, aspect: project.settings?.aspect || 'source', brand: { ...project.settings?.brand } });
   const [error, setError] = useState(null);
   const change = (key, value) => { dirty(); setSettings(old => ({ ...old, [key]: value })); };
@@ -382,11 +435,24 @@ function SettingsForm({ project, patch, dirty, disabled }) {
     setError(null); return patch({ settings: value });
   };
   const field = (label, key, type = 'text') => jsx(Field, { label, name: key, type, value: settings[key], onChange: value => change(key, type === 'number' ? Number(value) : value) }, key);
+  const selected = platforms.find(item => item.name === (settings.platform || 'custom')) || null;
+  const platformFixed = Boolean(selected?.frame);
+  const choosePlatform = item => { change('platform', item.name); if (item.orientation) { change('aspect', item.orientation); brand('aspect', item.orientation); } };
+  const resolution = settings.final_resolution || selected?.frame?.default_final || '1080';
+  const summary = () => {
+    if (!platformFixed) return 'Custom: frame follows the aspect below (1080 preview, 2160 final), loudness −16 LUFS. No platform limits are checked.';
+    const final = selected.frame.final[resolution] || [];
+    const limit = selected.max_duration_s?.value;
+    return `${selected.label}: preview ${selected.frame.preview.join(' × ')}, final ${final.join(' × ')} · ${limit ? `max ${limit} s` : 'no length limit'} · −14 LUFS, −1 dBTP · text kept inside the platform safe zone.`;
+  };
   const brandField = (label, key, type = 'text') => jsx(Field, { label, name: `brand.${key}`, type, value: settings.brand[key], onChange: value => brand(key, type === 'number' ? Number(value) : value) }, key);
   return jsx(Section, { title: 'Brand, assets & local models', children: [
     jsx('p', { style: muted, children: 'Save settings before starting jobs. Paths are local to the backend machine. No model is downloaded automatically. A saved revision or completed analysis refreshes this form.' }),
     field('Video title', 'title'),
-    jsx('div', { style: row, children: ['source', 'portrait', 'landscape', 'square'].map(aspect => jsx(Button, { variant: settings.aspect === aspect ? 'secondary' : 'ghost', onClick: () => { change('aspect', aspect); brand('aspect', aspect); }, children: aspect }, aspect)) }),
+    jsx('div', { role: 'group', 'aria-label': 'Platform profile', style: row, children: platforms.map(item => jsx(Button, { variant: (settings.platform || 'custom') === item.name ? 'secondary' : 'ghost', onClick: () => choosePlatform(item), children: item.label }, `platform:${item.name}`)) }),
+    jsx('div', { role: 'group', 'aria-label': 'Final resolution', style: row, children: [['1080', 'HD final (1080)'], ['2160', '4K final (2160)']].map(([value, label]) => jsx(Button, { variant: platformFixed && resolution === value ? 'secondary' : 'ghost', disabled: !platformFixed, onClick: () => change('final_resolution', value), children: label }, `resolution:${value}`)) }),
+    jsx('p', { role: 'status', style: muted, children: summary() }),
+    jsx('div', { role: 'group', 'aria-label': 'Aspect', style: row, children: ['source', 'portrait', 'landscape', 'square'].map(aspect => jsx(Button, { variant: settings.aspect === aspect ? 'secondary' : 'ghost', disabled: platformFixed, onClick: () => { change('aspect', aspect); brand('aspect', aspect); }, children: aspect }, `aspect:${aspect}`)) }),
     jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }, children: [
       brandField('Font family (Arial / DejaVu Sans / Liberation Sans)', 'font'), brandField('Title color (hex)', 'title_color'), brandField('Subtitle color (hex)', 'subtitle_color'), brandField('Graphic color (hex)', 'graphic_color'), brandField('Title size (12–120)', 'title_size', 'number'), brandField('Subtitle size (12–120)', 'subtitle_size', 'number'), brandField('Safe margin (fraction)', 'safe_margin', 'number'), brandField('Title Y (fraction)', 'title_y', 'number'), brandField('Subtitle Y (fraction)', 'subtitle_y', 'number'), brandField('Alignment (left / center / right)', 'alignment'),
       field('Graphic raster asset path (optional, behind person)', 'graphic'), field('Background raster path or RGB hex color (optional)', 'background'), field('Whisper model path', 'whisper_model'), field('FaceLandmarker model path', 'face_model'), field('Segmentation model path', 'segmentation_model'), field('Vision frame step', 'frame_step', 'number'), field('Render maximum width', 'max_width', 'number'),

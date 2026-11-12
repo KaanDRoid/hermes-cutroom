@@ -12,8 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
+    from . import platforms
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
+    from cutroom import platforms
     from cutroom.childenv import child_env
 
 
@@ -164,6 +166,50 @@ def _render_graph(arguments, *, cwd, timeout):
         return _run(legacy, cwd=cwd, timeout=timeout)
 
 
+def _quarter_turn(video):
+    """True when the stream's display rotation swaps width and height."""
+    rotation = next(
+        (
+            item.get("rotation", 0)
+            for item in video.get("side_data_list", [])
+            if "rotation" in item
+        ),
+        video.get("tags", {}).get("rotate", 0),
+    )
+    try:
+        return abs(float(rotation)) % 180 == 90
+    except (TypeError, ValueError):
+        return False
+
+
+def _source_video(info):
+    """Source pixel grid in display orientation, for upscaling checks."""
+    video = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    width, height = info["width"], info["height"]
+    if _quarter_turn(video):
+        width, height = height, width
+    return dict(
+        width=width, height=height, display_aspect_ratio=info["display_aspect_ratio"]
+    )
+
+
+def _content_size(ratio, width, height):
+    """Size of the fitted (padded, never cropped) picture inside a frame."""
+    return (
+        max(2, min(width, math.floor(height * ratio / 2) * 2)),
+        max(2, min(height, math.floor(width / ratio / 2) * 2)),
+    )
+
+
+def _content_upscale(source, width, height):
+    """Fitted content size and its enlargement over the source pixel grid."""
+    content = _content_size(source["display_aspect_ratio"], width, height)
+    factor = max(content[0] / source["width"], content[1] / source["height"])
+    return list(content), factor
+
+
 def _probe(source, timeout=300):
     data = json.loads(
         _run(
@@ -196,15 +242,7 @@ def _probe(source, timeout=300):
     except (ValueError, IndexError, ZeroDivisionError):
         sar = 1
     display_ratio = int(video["width"]) * sar / int(video["height"])
-    rotation = next(
-        (
-            item.get("rotation", 0)
-            for item in video.get("side_data_list", [])
-            if "rotation" in item
-        ),
-        video.get("tags", {}).get("rotate", 0),
-    )
-    if abs(float(rotation)) % 180 == 90:
+    if _quarter_turn(video):
         display_ratio = 1 / display_ratio
     return dict(
         duration=duration,
@@ -235,6 +273,9 @@ def _settings(settings):
         "silence_min_duration",
         "max_caption_chars",
         "max_caption_cps",
+        "platform",
+        "final_resolution",
+        "source_video",
     }
     if settings is None:
         settings = {}
@@ -258,9 +299,19 @@ def _settings(settings):
         silence_min_duration=0.5,
         max_caption_chars=84,
         max_caption_cps=25,
+        platform="custom",
+        final_resolution=None,
+        source_video=None,
     )
+    entry = platforms.profile(settings.get("platform", "custom"))
+    if entry["loudness"] is not None:
+        # A platform profile supplies the delivery loudness unless set explicitly.
+        result["loudness_lufs"] = entry["loudness"]["integrated_lufs"]
+        result["true_peak_db"] = entry["loudness"]["true_peak_db"]
     result.update(settings)
     result["brand"] = brand
+    if result["final_resolution"] not in (None, *platforms.FINAL_RESOLUTIONS):
+        raise ValueError("final_resolution must be '1080' or '2160'")
     validate_brand({**brand, "preset": result["preset"], "aspect": result["aspect"]})
     for key in ("title_animation", "normalize_audio"):
         if not isinstance(result[key], bool):
@@ -276,6 +327,21 @@ def _settings(settings):
     _number(result["max_caption_cps"], 1, 100)
     if result["expected_duration"] is not None:
         _number(result["expected_duration"], 0.000001)
+    source = result["source_video"]
+    if source is not None:
+        if not isinstance(source, dict) or set(source) != {
+            "width",
+            "height",
+            "display_aspect_ratio",
+        }:
+            raise ValueError(
+                "source_video needs width, height and display_aspect_ratio"
+            )
+        for key in ("width", "height"):
+            if isinstance(source[key], bool) or not isinstance(source[key], int):
+                raise ValueError("source_video width and height must be integers")
+            _number(source[key], 1, 100000)
+        _number(source["display_aspect_ratio"], 0.0001, 10000)
     return result
 
 
@@ -315,7 +381,17 @@ def _captions(captions, duration):
     return result
 
 
+def _platform_entry(settings):
+    """The settings' platform profile, or None for the 0.1 `custom` behaviour."""
+    entry = platforms.profile(settings.get("platform") or "custom")
+    return None if entry["frame"] is None else entry
+
+
 def _dimensions(info, settings):
+    if _platform_entry(settings) is not None:
+        return platforms.frame_size(
+            settings["platform"], settings["preset"], settings.get("final_resolution")
+        )
     base = 1080 if settings["preset"] == "preview" else 2160
     aspect = settings["aspect"]
     if aspect == "portrait":
@@ -333,14 +409,208 @@ def _dimensions(info, settings):
 
 
 def _fit_filter(info, width, height):
-    ratio = info["display_aspect_ratio"]
-    content_width = max(2, min(width, math.floor(height * ratio / 2) * 2))
-    content_height = max(2, min(height, math.floor(width / ratio / 2) * 2))
+    content_width, content_height = _content_size(
+        info["display_aspect_ratio"], width, height
+    )
     return [
         f"scale={content_width}:{content_height}",
         "setsar=1",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
     ]
+
+
+# Conservative line height (multiple of the font size) for layout boxes.
+_LINE = 1.25
+
+
+def platform_layout(settings, width, height, *, title=None, captions=False):
+    """Pixel boxes for title, lower third and caption band inside the safe zone.
+
+    Returns None for `custom`. The renderer draws text from these boxes and the
+    quality report recomputes them, so both use one geometry. Widths assume a
+    full em per character, which bounds real glyphs from above.
+    """
+    entry = _platform_entry(settings)
+    if entry is None:
+        return None
+    zone, brand = entry["safe_zone"], settings["brand"]
+    margin = brand["safe_margin"]
+    pad = max(2.0, 0.01 * min(width, height))
+    x0 = width * max(zone["left"], margin) + pad
+    x1 = width * (1 - max(zone["right"], margin)) - pad
+    y0 = height * max(zone["top"], margin) + pad
+    y1 = height * (1 - max(zone["bottom"], margin)) - pad
+    available = x1 - x0
+    short = min(width, height)
+    boxes = {}
+    # Captions are a two-line band; platform_caption_cues keeps events to it.
+    caption_size = min(
+        brand["subtitle_size"] * short / 1080, (y1 - y0) / (2 * _LINE), available
+    )
+    band = 2 * _LINE * caption_size
+    caption_bottom = min(
+        max(height * brand["subtitle_y"] + 2 * caption_size, y0 + band), y1
+    )
+    caption_top = max(caption_bottom - band, y0)
+    text = settings["title"] if title is None else title
+    if text:
+        lines = text.split("\n")
+        longest = max(1, max(map(len, lines)))
+        size = min(brand["title_size"] * short / 1080, available / longest)
+        y = min(max(height * brand["title_y"], y0), y1 - len(lines) * _LINE * size)
+        if y < y0:
+            y = y0
+            size = min(size, (y1 - y0) / (len(lines) * _LINE))
+        w = longest * size
+        x = {
+            "left": x0,
+            "center": x0 + (available - w) / 2,
+            "right": x1 - w,
+        }[brand["alignment"]]
+        boxes["title"] = dict(x=x, y=y, w=w, h=len(lines) * _LINE * size, size=size)
+    if settings.get("lower_third"):
+        h = 0.09 * height
+        if y1 - y0 < h + (pad + band if captions else 0) - 1e-9:
+            raise ValueError("No safe band is available for lower-third and captions")
+        if captions:
+            # The lower third sits above the captions; push both down if needed.
+            if caption_top - h - pad < y0:
+                caption_top = y0 + h + pad
+                caption_bottom = caption_top + band
+            y = caption_top - h - pad
+        else:
+            y = min(max(height * (brand["subtitle_y"] - 0.015), y0), y1 - h)
+        lines = settings["lower_third"].split("\n")
+        longest = max(1, max(map(len, lines)))
+        size = min(
+            brand["subtitle_size"] * short / 1080,
+            (available - 2 * pad) / longest,
+            (h - pad) / (len(lines) * _LINE),
+        )
+        boxes["lower_third"] = dict(
+            x=x0,
+            y=y,
+            w=available,
+            h=h,
+            size=size,
+            text_y=y + (h - len(lines) * _LINE * size) / 2,
+        )
+    if captions:
+        boxes["captions"] = dict(
+            x=x0,
+            y=caption_top,
+            w=available,
+            h=caption_bottom - caption_top,
+            size=caption_size,
+            # Full-em widths bound real glyphs, so lines this long never wrap.
+            chars_per_line=max(1, math.floor(available / caption_size)),
+        )
+    return dict(
+        platform=settings["platform"],
+        safe=dict(x0=x0, y0=y0, x1=x1, y1=y1),
+        boxes=boxes,
+    )
+
+
+def platform_caption_cues(captions, layout):
+    """Split cues so every burned event fits the two-line caption band.
+
+    Words are wrapped at the band's characters per line (longer words are
+    broken), lines are paired into events, and each event gets a share of the
+    cue's time proportional to its characters. No text is dropped.
+    """
+    band = (layout or {}).get("boxes", {}).get("captions")
+    if band is None:
+        return [dict(item) for item in captions]
+    import textwrap
+
+    width = band["chars_per_line"]
+    result = []
+    for item in captions:
+        lines = [
+            line
+            for paragraph in item["text"].split("\n")
+            for line in textwrap.wrap(
+                paragraph, width, break_long_words=True, break_on_hyphens=False
+            )
+        ] or [item["text"].strip()]
+        events = [
+            "\n".join(lines[index : index + 2]) for index in range(0, len(lines), 2)
+        ]
+        weights = [max(1, len(event.replace("\n", ""))) for event in events]
+        total, done = sum(weights), 0
+        start, span = item["start"], item["end"] - item["start"]
+        for index, (event, weight) in enumerate(zip(events, weights)):
+            done += weight
+            end = (
+                item["end"]
+                if index == len(events) - 1
+                else (item["start"] + span * done / total)
+            )
+            result.append(dict(start=start, end=end, text=event))
+            start = end
+    return result
+
+
+def safe_zone_findings(boxes, zone, width, height):
+    """List every box that reaches into the profile's unsafe margins."""
+    limits = dict(
+        left=zone["left"] * width,
+        right=(1 - zone["right"]) * width,
+        top=zone["top"] * height,
+        bottom=(1 - zone["bottom"]) * height,
+    )
+    findings = []
+    for name, box in boxes.items():
+        sides = [
+            side
+            for side, outside in (
+                ("left", box["x"] < limits["left"] - 0.5),
+                ("right", box["x"] + box["w"] > limits["right"] + 0.5),
+                ("top", box["y"] < limits["top"] - 0.5),
+                ("bottom", box["y"] + box["h"] > limits["bottom"] + 0.5),
+            )
+            if outside
+        ]
+        if sides:
+            findings.append(dict(box=name, sides=sides, bounds=box))
+    return findings
+
+
+def _platform_text(
+    directory, text, filename, color, size, box, alignment, y, *, animated=False
+):
+    """drawtext placed inside a layout box; real glyphs are narrower than the box."""
+    (directory / filename).write_text(text, encoding="utf-8")
+    left, width = box["x"], box["w"]
+    x = {
+        "left": f"{left}",
+        "center": f"{left}+({width}-text_w)/2",
+        "right": f"{left + width}-text_w",
+    }[alignment]
+    alpha = ":alpha='min(1,t/0.35)'" if animated else ""
+    return (
+        f"drawtext=fontfile=font.ttf:textfile={filename}:expansion=none:fontsize={size}"
+        f":fontcolor={color}:x={x}:y={y}:fix_bounds=1{alpha}"
+    )
+
+
+def _platform_title(directory, text, settings, layout, *, animated=False):
+    brand = settings["brand"]
+    box = layout["boxes"]["title"]
+    safe = layout["safe"]
+    span = dict(x=safe["x0"], w=safe["x1"] - safe["x0"])
+    return _platform_text(
+        directory,
+        text,
+        "title.txt",
+        brand["title_color"],
+        box["size"],
+        span,
+        brand["alignment"],
+        box["y"],
+        animated=animated,
+    )
 
 
 def _font(directory, family):
@@ -378,7 +648,7 @@ def _draw_text(
     )
 
 
-def _ass(directory, captions, brand, width, height):
+def _ass(directory, captions, brand, width, height, layout=None):
     def timestamp(value):
         ticks = round(value * 100)
         return f"{ticks // 360000}:{ticks // 6000 % 60:02}:{ticks // 100 % 60:02}.{ticks % 100:02}"
@@ -387,15 +657,25 @@ def _ass(directory, captions, brand, width, height):
     color = "&H00" + color[4:6] + color[2:4] + color[:2]
     size = brand["subtitle_size"] * min(width, height) / 1080
     margin = round(width * brand["safe_margin"])
+    margin_left = margin_right = margin
+    margin_vertical = round(height * (1 - brand["subtitle_y"]) - size * 2)
+    # Platform cues are pre-wrapped to the band; libass must not add lines.
+    wrap_style = 0 if layout is None else 2
+    if layout is not None:
+        band = layout["boxes"]["captions"]
+        size = band["size"]
+        margin_left = math.ceil(band["x"])
+        margin_right = math.ceil(width - band["x"] - band["w"])
+        margin_vertical = math.ceil(height - band["y"] - band["h"])
     alignment = {"left": 1, "center": 2, "right": 3}[brand["alignment"]]
     content = (
-        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n"
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: {wrap_style}\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{brand['font']},{size},{color},{color},&H00000000,&H80000000,"
-        f"0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin},{margin},"
-        f"{round(height * (1 - brand['subtitle_y']) - size * 2)},1\n"
+        f"0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin_left},{margin_right},"
+        f"{margin_vertical},1\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     for item in captions:
@@ -582,6 +862,8 @@ def export_video(source, segments, output, settings=None, captions=None):
         )
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
+    layout = platform_layout(settings, width, height, captions=bool(captions))
+    events = platform_caption_cues(captions, layout) if layout else captions
     effects = []
     lower_y = None
     with tempfile.TemporaryDirectory(
@@ -592,7 +874,18 @@ def export_video(source, segments, output, settings=None, captions=None):
         brand = settings["brand"]
         if settings["title"] or settings["lower_third"] or captions:
             _font(directory, brand["font"])
-        if settings["title"]:
+        if settings["title"] and layout is not None:
+            filters.append(
+                _platform_title(
+                    directory,
+                    settings["title"],
+                    settings,
+                    layout,
+                    animated=settings["title_animation"],
+                )
+            )
+            effects.append("title_fade" if settings["title_animation"] else "title")
+        elif settings["title"]:
             filters.append(
                 _draw_text(
                     directory,
@@ -605,7 +898,27 @@ def export_video(source, segments, output, settings=None, captions=None):
                 )
             )
             effects.append("title_fade" if settings["title_animation"] else "title")
-        if settings["lower_third"]:
+        if settings["lower_third"] and layout is not None:
+            box = layout["boxes"]["lower_third"]
+            lower_y = box["y"] / height
+            filters.append(
+                f"drawbox=x={box['x']}:y={box['y']}:w={box['w']}:h={box['h']}"
+                f":color={brand['graphic_color']}@0.85:t=fill"
+            )
+            filters.append(
+                _platform_text(
+                    directory,
+                    settings["lower_third"],
+                    "lower.txt",
+                    brand["subtitle_color"],
+                    box["size"],
+                    box,
+                    brand["alignment"],
+                    box["text_y"],
+                )
+            )
+            effects.append("lower_third")
+        elif settings["lower_third"]:
             margin = brand["safe_margin"]
             lower_y = max(margin, min(brand["subtitle_y"] - 0.015, 1 - margin - 0.09))
             if captions:
@@ -642,7 +955,7 @@ def export_video(source, segments, output, settings=None, captions=None):
             )
             effects.append("lower_third")
         if captions:
-            filters.append(_ass(directory, captions, brand, width, height))
+            filters.append(_ass(directory, events, brand, width, height, layout))
         normalization_method = "no audio"
         if info["has_audio"] and settings["normalize_audio"]:
             measured = _measure_loudness(source, audio_graph, directory, settings)
@@ -724,15 +1037,29 @@ def export_video(source, segments, output, settings=None, captions=None):
         result = _probe(temporary, settings["timeout"])
         result.pop("streams")
         os.link(temporary, output)
+    extra = {}
+    if layout is not None:
+        extra = {
+            "platform": settings["platform"],
+            "final_resolution": settings["final_resolution"],
+            "safe_zone_layout": layout,
+        }
+    source_video = _source_video(info)
+    content, factor = _content_upscale(source_video, width, height)
     return {
         **result,
+        **extra,
         "output": str(output),
         "preset": settings["preset"],
         "aspect": settings["aspect"],
         "fit": "pad",
-        "upscaled": min(width / info["width"], height / info["height"]) > 1.0001,
+        "upscaled": factor > 1.0001,
+        "upscale_factor": factor,
+        "content_size": content,
         "source_resolution": [info["width"], info["height"]],
+        "source_video": source_video,
         "captions_burned": len(captions),
+        "caption_events": len(events),
         "effects": effects,
         "lower_third_y": lower_y,
         "expected_duration": duration,
@@ -761,7 +1088,11 @@ def make_cover(video, output, title="", settings=None, time=0):
     ) as temp:
         directory = Path(temp)
         filters = _fit_filter(info, width, height)
-        if title:
+        layout = platform_layout(settings, width, height, title=title)
+        if title and layout is not None:
+            _font(directory, settings["brand"]["font"])
+            filters.append(_platform_title(directory, title, settings, layout))
+        elif title:
             _font(directory, settings["brand"]["font"])
             filters.append(
                 _draw_text(
@@ -884,6 +1215,114 @@ def _signal_evidence(path):
     )
 
 
+def _frame_rate(info):
+    stream = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    numerator, _, denominator = str(stream.get("avg_frame_rate") or "0/0").partition(
+        "/"
+    )
+    try:
+        rate = float(numerator) / float(denominator or 1)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return rate if math.isfinite(rate) and rate > 0 else None
+
+
+def _platform_checks(add, entry, info, settings, actual_resolution):
+    """Frame, length and frame-rate checks against the settings' profile."""
+    name = settings["platform"]
+    expected = list(_dimensions(info, settings))
+    add(
+        "platform_frame",
+        "pass" if expected == actual_resolution else "fail",
+        dict(
+            platform=name,
+            actual=actual_resolution,
+            expected=expected,
+            preset=settings["preset"],
+            final_resolution=settings["final_resolution"],
+            source=entry["frame"]["source"],
+        ),
+    )
+    limit = entry["max_duration_s"]["value"]
+    recommended = (entry["recommended_max_s"] or {}).get("value")
+    duration = info["duration"]
+    add(
+        "platform_duration",
+        "fail"
+        if limit is not None and duration > limit
+        else "warning"
+        if recommended is not None and duration > recommended
+        else "pass",
+        dict(
+            platform=name,
+            actual=duration,
+            max_seconds=limit,
+            recommended_max_seconds=recommended,
+            source=entry["max_duration_s"]["source"],
+        ),
+    )
+    source = settings["source_video"]
+    if source is None:
+        add(
+            "platform_upscale",
+            "skip",
+            dict(platform=name, reason="Source video size was not supplied"),
+        )
+    else:
+        content, factor = _content_upscale(source, *actual_resolution)
+        add(
+            "platform_upscale",
+            "warning" if factor > 1.0001 else "pass",
+            dict(
+                platform=name,
+                source=[source["width"], source["height"]],
+                content=content,
+                frame=actual_resolution,
+                factor=factor,
+                upscaled=factor > 1.0001,
+                preset=settings["preset"],
+                final_resolution=settings["final_resolution"],
+                meaning="the fitted picture is larger than the source pixel grid "
+                "(display orientation); detail is interpolated, not recorded",
+            ),
+        )
+
+
+def _platform_fps(add, entry, info, settings, deltas):
+    """Frame-rate check; NTSC 30000/1001 meets a 30 fps minimum."""
+    minimum = entry["min_fps"]["value"]
+    rate = _frame_rate(info)
+    slowest = variable = None
+    if deltas:
+        typical = sorted(deltas)[len(deltas) // 2]
+        slowest = 1 / max(deltas)
+        variable = (
+            max(deltas) > typical * 1.05 + 0.0005
+            or min(deltas) < typical * 0.95 - 0.0005
+        )
+    threshold = None if minimum is None else minimum * 1000 / 1001 - 0.001
+    low = threshold is not None and (
+        rate is None or rate < threshold or bool(variable) and slowest < threshold
+    )
+    add(
+        "platform_fps",
+        "skip" if minimum is None else "warning" if low else "pass",
+        dict(
+            platform=settings["platform"],
+            actual=rate,
+            min_fps=minimum,
+            threshold_fps=threshold,
+            min_instantaneous_fps=slowest,
+            variable_frame_rate=variable,
+            method="average frame rate, and for variable-rate video the "
+            "slowest frame interval; NTSC 30000/1001 counts as 30",
+            source=entry["min_fps"]["source"],
+        ),
+    )
+
+
 def quality_report(video, settings=None, captions=None):
     """Decode all frames; findings are heuristics, never editorial certification."""
     from statistics import median
@@ -953,6 +1392,10 @@ def quality_report(video, settings=None, captions=None):
         else "pass",
         dict(actual=info["duration"], expected=expected, tolerance_seconds=0.12),
     )
+    entry = _platform_entry(settings)
+    if entry is not None:
+        _platform_checks(add, entry, info, settings, actual_resolution)
+    deltas = None
     with tempfile.TemporaryDirectory(
         prefix=".postproduction-qa-", dir=os.environ.get("TMPDIR")
     ) as temp:
@@ -1075,8 +1518,12 @@ def quality_report(video, settings=None, captions=None):
             KeyError,
         ) as error:
             add("frame_timing", "fail", {"error": str(error)})
+    if entry is not None:
+        _platform_fps(add, entry, info, settings, deltas)
     if not info["has_audio"]:
         add("audio", "skip", {"reason": "No audio stream; no silence added"})
+        if entry is not None:
+            add("platform_loudness", "skip", {"reason": "No audio stream"})
     else:
         try:
             analysis = _run(
@@ -1154,6 +1601,27 @@ def quality_report(video, settings=None, captions=None):
                     tolerance_lu=1,
                 ),
             )
+            if entry is not None:
+                target = entry["loudness"]
+                off_target = (
+                    integrated is None
+                    or abs(integrated - settings["loudness_lufs"]) > 1
+                    or peak is not None
+                    and peak > settings["true_peak_db"] + 0.3
+                )
+                add(
+                    "platform_loudness",
+                    "warning" if off_target else "pass",
+                    dict(
+                        platform=settings["platform"],
+                        integrated_lufs=integrated,
+                        target_lufs=settings["loudness_lufs"],
+                        true_peak_dbfs=peak,
+                        target_peak_db=settings["true_peak_db"],
+                        tolerance_lu=1,
+                        source=target["source"],
+                    ),
+                )
             silences = _intervals(analysis, "silence", info["duration"])
             add(
                 "audio_gaps",
@@ -1171,17 +1639,35 @@ def quality_report(video, settings=None, captions=None):
                 {"error": str(error), "stderr": getattr(error, "stderr", "")},
             )
     issues = []
+    layout = None
     try:
+        if entry is not None:
+            layout = platform_layout(
+                settings, info["width"], info["height"], captions=bool(captions)
+            )
         valid = _captions(captions, info["duration"])
         brand = settings["brand"]
         size = brand["subtitle_size"] * min(info["width"], info["height"]) / 1080
         available = info["width"] * (1 - 2 * brand["safe_margin"])
+        if entry is not None:
+            zone = entry["safe_zone"]
+            available = info["width"] * (
+                1
+                - max(zone["left"], brand["safe_margin"])
+                - max(zone["right"], brand["safe_margin"])
+            )
         for index, item in enumerate(valid):
             cps = len(item["text"]) / (item["end"] - item["start"])
             estimated_lines = sum(
                 max(1, math.ceil(len(line) * size / available))
                 for line in item["text"].split("\n")
             )
+            if layout is not None:
+                # Platform renders split long cues into two-line events.
+                estimated_lines = max(
+                    len(event["text"].split("\n"))
+                    for event in platform_caption_cues([item], layout)
+                )
             if (
                 len(item["text"]) > settings["max_caption_chars"]
                 or cps > settings["max_caption_cps"]
@@ -1220,6 +1706,32 @@ def quality_report(video, settings=None, captions=None):
             method="validated normalized positions; renderer auto-fits title; caption estimates above",
         ),
     )
+    if entry is not None:
+        try:
+            layout = platform_layout(
+                settings, info["width"], info["height"], captions=bool(captions)
+            )
+            findings = safe_zone_findings(
+                layout["boxes"], entry["safe_zone"], info["width"], info["height"]
+            )
+            add(
+                "safe_zone",
+                "fail" if findings else "pass",
+                dict(
+                    platform=settings["platform"],
+                    zone={
+                        side: entry["safe_zone"][side]
+                        for side in ("top", "bottom", "left", "right")
+                    },
+                    boxes=layout["boxes"],
+                    findings=findings,
+                    source=entry["safe_zone"]["source"],
+                    method="render geometry of title, lower third and caption band; "
+                    "glyph pixels are not inspected",
+                ),
+            )
+        except ValueError as error:
+            add("safe_zone", "fail", {"error": str(error)})
     return dict(
         checks=checks,
         passed=all(c["status"] in ("pass", "skip") for c in checks),

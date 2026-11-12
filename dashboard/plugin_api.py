@@ -21,7 +21,7 @@ router = APIRouter()
 _import_lock = threading.Lock()
 
 
-def get_studio():
+def _module(name):
     """Load our adjacent package, not a same-named package on the host path.
 
     Hermes loads this file as a standalone module with spec_from_file_location,
@@ -45,8 +45,11 @@ def get_studio():
             except Exception:
                 sys.modules.pop(key, None)
                 raise
-        studio = importlib.import_module(key + ".studio")
-    return studio.get_studio()
+        return importlib.import_module(key + "." + name)
+
+
+def get_studio():
+    return _module("studio").get_studio()
 
 
 class RequestModel(BaseModel):
@@ -64,7 +67,12 @@ ProjectId = Annotated[str, PathParam(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 def invoke(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except (KeyError, FileNotFoundError) as error:
+    except FileNotFoundError as error:
+        if isinstance(error, _module("studio").MissingAssetError):
+            # The project exists; one of its files does not.
+            raise HTTPException(422, str(error)) from error
+        raise HTTPException(404, "Project, job or artifact not found") from error
+    except KeyError as error:
         raise HTTPException(404, "Project, job or artifact not found") from error
     except PermissionError as error:
         raise HTTPException(403, str(error)) from error
@@ -143,6 +151,37 @@ def create_project(body: CreateProject, studio=Depends(get_studio)):
 @router.get("/projects")
 def list_projects(studio=Depends(get_studio)):
     return invoke(studio.list)
+
+
+PlatformName = Literal[
+    "custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube"
+]
+
+
+class DeriveProject(RequestModel):
+    platform: PlatformName
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    final_resolution: Literal["1080", "2160"] | None = None
+
+
+@router.post("/projects/{project_id}/derive", status_code=201)
+def derive_project(
+    project_id: ProjectId, body: DeriveProject, studio=Depends(get_studio)
+):
+    """A sibling for another platform; it never carries the parent's approval."""
+    return invoke(
+        studio.derive,
+        project_id,
+        body.platform,
+        name=body.name,
+        final_resolution=body.final_resolution,
+    )
+
+
+@router.get("/platforms")
+def platform_profiles():
+    """Sourced profile data for the Desktop selector and safe-zone overlay."""
+    return _module("platforms").public_profiles()
 
 
 Action = Literal[
