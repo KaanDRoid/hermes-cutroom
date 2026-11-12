@@ -11,9 +11,10 @@
 | `cutroom/speech.py` | Local transcription, word exclusions, filler suggestions, timeline remapping and subtitle files |
 | `cutroom/narrative.py` | Extractive hook/storyboard/caption drafts grounded in timed source text |
 | `cutroom/vision.py` | Face/head-facing/mouth review and person-layer compositing |
-| `cutroom/postproduction.py` | Brand validation, preview/final export, covers and quality reports |
+| `cutroom/platforms.py` | Sourced, dated platform profiles (frame, length, frame rate, safe zone, loudness, text and cover limits) |
+| `cutroom/postproduction.py` | Brand validation, preview/final export, platform safe-zone layout, covers and quality reports |
 | `cutroom/integrations.py` | Consent-gated download, OBS, rclone, local package and ICS adapters |
-| `cutroom/studio.py` | Versioned project persistence, revision checks, artifact access and job facade |
+| `cutroom/studio.py` | Versioned project persistence, revision checks, derived projects, artifact access and job facade |
 | `cutroom/job_worker.py` | Detached per-workspace job supervisor |
 | `cutroom/runtime.py`, `worker.py` | Bounded isolated engine process and allowlisted engine entry point |
 | `dashboard/plugin_api.py` | Profile-scoped REST facade and authenticated media chunks |
@@ -25,6 +26,12 @@
 The working core uses `plan.json` and `approval.json` inside a caller-selected new project directory. The evolving Studio uses version-2 `studio.json` records under a workspace's `projects/<id>/` directory, plus `jobs/<id>/` records and snapshots.
 
 Do not confuse these formats. The Studio supervisor and engine dispatcher execute every editing action (`inspect`, `silence`, `transcribe`, `vision`, `segment`, `storyboard`, `preview`, `final`, `cover`, `qa`); see [Studio jobs](studio-jobs.md) for options, prerequisites and publication rules. External adapters are not part of the Studio pipeline.
+
+## Platform profiles and derived projects
+
+Platform specifications are data, not logic: `cutroom/platforms.py` is the only place that knows frame sizes, limits, safe zones and loudness targets, and each value cites its source. Studio passes the profile name and final resolution into the render settings; `postproduction` resolves the profile and uses one geometry function (`platform_layout`) both to place text and to check it in QA, so the renderer and the report cannot disagree. `custom` bypasses all of it and keeps the 0.1 code path.
+
+A project targets exactly one profile. Other platforms are sibling projects created by `Studio.derive`: a new record in `projects/<id>/` that copies the edit, starts at revision 1 without artifacts, approval or jobs, and records `derived_from` (parent id, revision and digest). Because the sibling is an ordinary project, revision checks, artifact lineage and the human approval of an exact digest apply to it unchanged. Derivation is the planned home for clips (F5): a source range would narrow the copied cuts inside `_derived_project`.
 
 ## Planned execution path
 

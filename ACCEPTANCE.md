@@ -40,6 +40,12 @@ Work packages and design decisions are in [docs/creator-formats.md](docs/creator
 | A27 | Delivery packages | Per-platform folder with video, cover and text within platform limits plus a checksum manifest; nothing is posted |
 | A28 | Creator acceptance | Native Desktop run per platform on consented real footage, clean install and FFmpeg 7.1 check |
 
+Status (F0, 2026-11-12):
+
+- **A19 verified by automated tests on synthetic media.** Four sourced, dated profiles; a landscape test pattern renders at exactly 1080×1920 for Shorts and passes frame, length, loudness and safe-zone checks; one source produces four derived projects whose preview QA passes their own platform checks; a 185-second Shorts edit fails QA and a 190-second Shorts final is refused. Evidence: `tests/test_platforms.py`, `tests/test_studio_platforms.py`, [creator formats F0](docs/creator-formats.md#f0--platform-profiles-and-derived-projects). Native Desktop runs per platform belong to A28.
+- **A20 pending.** Platform siblings with their own settings, digest and approval are implemented and tested; siblings limited to a source range arrive with F5.
+- A21–A28 pending.
+
 ## Consented acceptance source
 
 `raw_vids/12511-239934660.mp4`: 3840×2160, approximately 22.37 s, no audio stream, landscape/river aerial footage. This source cannot validate speech recognition, human gaze or person segmentation.

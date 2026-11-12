@@ -1,5 +1,11 @@
 # Implementation status
 
+## November 12 — F0 platform profiles (branch `feat/f0-platform-profiles`)
+
+- Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
+- Local gates without inherited `PYTHONPATH`, FFmpeg 9: **242 Python tests, 228 passed, 14 skipped** (missing local models and consented media); **20/20 Desktop tests**; Ruff check and format clean. Logs: `artifacts/f0/red.log`, `artifacts/f0/green.log`.
+- Not yet done: native Desktop acceptance of the new controls, source-range derivation (F5), an upscaling flag in QA and the YouTube thumbnail (F6).
+
 ## November 11 native Desktop acceptance — import through approved final
 
 - Opened the packaged Hermes Desktop application in a separate user-data instance and exercised the `cutroom-test` backend profile. This is real Electron/React, not the SDK fake. The test profile uses a local source clone and the existing development virtual environment; this is **not a clean dependency-install acceptance**. Hermes inventories the Desktop half at app level, while project/job data remain in the test profile.
