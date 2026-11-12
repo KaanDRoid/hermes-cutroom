@@ -178,7 +178,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], open = () =>
       jsx('p', { role: 'status', style: muted, children: canFinal() ? 'Current digest approved. Final export is enabled.' : 'Final export requires current human approval. Any edit clears confirmation.' }),
     ] }),
     jsx(JobPanel, { ctx, scope, project, jobs, approved: canFinal(), canFinal }),
-    jsx(MediaPanel, { ctx, project, profile: platformOf(platforms, project), platforms }),
+    jsx(MediaPanel, { ctx, project, patch, disabled: mutation.isPending, profile: platformOf(platforms, project), platforms }),
     jsx(PlatformVersions, { ctx, scope, project, platforms, open }),
     jsx(TranscriptEditor, { project, exclude, disabled: mutation.isPending }),
     jsx(CorrectionEditor, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `corrections:${project.revision}`),
@@ -201,7 +201,16 @@ function SafeZoneOverlay({ zone }) {
   ];
 }
 
-function MediaPanel({ ctx, project, profile = null, platforms = [] }) {
+function MediaPanel({ ctx, project, patch = async () => {}, disabled = false, profile = null, platforms = [] }) {
+  const [playtime, setPlaytime] = useState(null);
+  const [horizontal, setHorizontal, horizontalRef] = useLive(0.5);
+  const keys = project.settings?.framing_keyframes || [];
+  const pin = async () => {
+    if (playtime === null || !media || media.kind === 'source') return;
+    const time = Math.round(playtime * 1000) / 1000;
+    const next = [...keys.filter(key => key.time !== time), { time, x: horizontalRef.current }].sort((a, b) => a.time - b.time);
+    await patch({ settings: { framing_keyframes: next } });
+  };
   const [overlay, setOverlay] = useState(false);
   const [ready, setReady] = useState(false);
   const [media, setMedia] = useState(null);
@@ -214,7 +223,7 @@ function MediaPanel({ ctx, project, profile = null, platforms = [] }) {
   const generation = useRef(0);
   const url = useRef(null);
   const lock = useRef(false);
-  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); setReady(false); };
+  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); setReady(false); setPlaytime(null); };
   useEffect(() => {
     release();
     return () => { generation.current++; if (url.current) URL.revokeObjectURL(url.current); url.current = null; };
@@ -260,11 +269,17 @@ function MediaPanel({ ctx, project, profile = null, platforms = [] }) {
     progress !== null ? jsx('progress', { 'aria-label': 'Media loading progress', max: 1, value: progress }) : null,
     jsx('label', { style: row, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true) }), zone ? `Show ${shown.label} safe zone on renders (shaded areas may be covered by the app)` : rendered ? 'Safe zone: this render was made without a platform profile' : 'Safe zone: choose a platform profile in settings'] }),
     media ? (() => {
-      const player = jsx('video', { src: media.url, controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: overlay && zone && media.kind !== 'source' ? { display: 'block', maxWidth: '100%', maxHeight: 420 } : { width: '100%', maxHeight: 420 }, onLoadedMetadata: () => setReady(true), onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }, 'player:video');
+      const player = jsx('video', { src: media.url, onTimeUpdate: event => setPlaytime(event.currentTarget.currentTime), controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: overlay && zone && media.kind !== 'source' ? { display: 'block', maxWidth: '100%', maxHeight: 420 } : { width: '100%', maxHeight: 420 }, onLoadedMetadata: () => setReady(true), onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }, 'player:video');
       if (!(overlay && zone && ready && media.kind !== 'source')) return player;
       // Drawn once the frame size is known; the wrapper shrinks to the video box, so percentages follow the rendered frame.
       return jsx('div', { 'aria-label': 'Safe zone overlay', style: { position: 'relative', display: 'inline-block', maxWidth: '100%', alignSelf: 'flex-start' }, children: [player, ...SafeZoneOverlay({ zone })] });
     })() : null,
+    jsx('div', { style: stack, children: [
+      jsx('p', { style: muted, children: 'Framing keys use program time (the edited preview/final). Load a render, seek, choose the horizontal source centre and add a pin. Close pins that exceed pan speed are refused at render; crop modes only.' }),
+      jsx('label', { style: row, children: ['Horizontal crop centre', jsx('input', { name: 'framing.x', 'aria-label': 'Horizontal crop centre', type: 'range', min: 0, max: 1, step: 0.01, value: horizontal, onChange: event => setHorizontal(Number(event.target.value)) })] }),
+      jsx(Button, { disabled: disabled || playtime === null || !media || media.kind === 'source' || keys.length >= 100, onClick: pin, children: `Add framing keyframe at ${seconds(playtime)}` }),
+      ...keys.map(key => jsx('div', { style: row, children: [jsx('span', { children: `${seconds(key.time)} program time · x ${key.x}` }), jsx(Button, { disabled, onClick: () => patch({ settings: { framing_keyframes: keys.filter(item => item.time !== key.time) } }), children: 'Remove framing keyframe' })] }, `framing-key:${key.time}`)),
+    ] }),
     jsx(Button, { variant: 'ghost', onClick: release, children: 'Unload media / cancel load' }),
     jsx('div', { style: row, children: [['captions_srt', 'SRT'], ['captions_vtt', 'VTT'], ['quality', 'report'], ['cover', 'cover'], ['preview', 'preview'], ['final', 'final']].map(([kind, label]) => jsx(Button, { variant: 'secondary', disabled: !project.artifacts?.[kind], onClick: () => download(kind), children: `Download ${label}` }, kind)) }),
     jsx(Notice, { error }),
@@ -466,6 +481,8 @@ function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
     jsx('div', { role: 'group', 'aria-label': 'Caption style', style: row, children: [['classic', 'Classic captions'], ['highlight', 'Highlight words'], ['pop', 'Pop words'], ['one_word', 'One word']].map(([value, label]) => jsx(Button, { variant: (settings.caption_style || 'classic') === value ? 'secondary' : 'ghost', onClick: () => change('caption_style', value), children: label }, `caption-style:${value}`)) }),
     field('Caption highlight colour (hex; blank uses the default accent)', 'caption_highlight_color'),
     field('One-word vertical position in safe area (0 top – 1 bottom; blank = 0.8, below the face)', 'caption_word_y', 'number'),
+    jsx('div', { role: 'group', 'aria-label': 'Framing mode', style: row, children: [['fit', 'Fit (letterbox)'], ['blur_fill', 'Blur fill'], ['center_crop', 'Center crop'], ['face_track', 'Face track']].map(([value, label]) => jsx(Button, { variant: (settings.framing || 'fit') === value ? 'secondary' : 'ghost', onClick: () => change('framing', value), children: label }, `framing-mode:${value}`)) }),
+    jsx('p', { style: muted, children: 'Face track requires a completed Vision job (frame step 5 is faster). Crops can enlarge source detail; check the upscale warning and framing QA.' }),
     jsx('div', { role: 'group', 'aria-label': 'Platform profile', style: row, children: platforms.map(item => jsx(Button, { variant: (settings.platform || 'custom') === item.name ? 'secondary' : 'ghost', onClick: () => choosePlatform(item), children: item.label }, `platform:${item.name}`)) }),
     jsx('div', { role: 'group', 'aria-label': 'Final resolution', style: row, children: [['1080', 'HD final (1080)'], ['2160', '4K final (2160)']].map(([value, label]) => jsx(Button, { variant: platformFixed && resolution === value ? 'secondary' : 'ghost', disabled: !platformFixed, onClick: () => change('final_resolution', value), children: label }, `resolution:${value}`)) }),
     jsx('p', { role: 'status', style: muted, children: summary() }),

@@ -269,6 +269,8 @@ class Studio:
                     "music",
                     "cut_sfx",
                     "voice_cleanup",
+                    "framing",
+                    "framing_keyframes",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
@@ -350,6 +352,16 @@ class Studio:
                         merged.pop("voice_cleanup", None)
                     else:
                         merged["voice_cleanup"] = value
+                from .reframe import validate_framing, validate_keyframes
+
+                validate_framing(merged.get("framing", "fit"))
+                if "framing_keyframes" in merged:
+                    merged["framing_keyframes"] = validate_keyframes(
+                        merged["framing_keyframes"],
+                        duration=sum(
+                            s["end"] - s["start"] for s in updated["segments"]
+                        ),
+                    )
                 updated["settings"] = merged
             if "transcript" in changes:
                 self._set_transcript(updated, changes["transcript"])
@@ -389,6 +401,13 @@ class Studio:
                 )
             ):
                 self._rebuild_segments(updated)
+            if "framing_keyframes" in updated["settings"]:
+                from .reframe import validate_keyframes
+
+                validate_keyframes(
+                    updated["settings"]["framing_keyframes"],
+                    duration=sum(s["end"] - s["start"] for s in updated["segments"]),
+                )
             updated["revision"] += 1
             updated["status"] = "draft"
             updated.pop("approval", None)
@@ -439,6 +458,9 @@ class Studio:
         settings.pop("runtime_python", None)
         # The person layer is an artifact of the parent; the sibling must rebuild it.
         settings.pop("use_segmented", None)
+        # Framing pins are target geometry; retain only for the same orientation.
+        if parent["settings"].get("aspect", "source") != entry["orientation"]:
+            settings.pop("framing_keyframes", None)
         settings["platform"] = platform
         if platform == "youtube":
             settings["captions"] = False
@@ -879,6 +901,22 @@ class Studio:
                 raise ValueError(
                     "Run segment for the current settings before rendering the person layer"
                 )
+        if action in {"preview", "final"} and settings.get("framing") == "face_track":
+            analysis = project.get("analysis")
+            if analysis is None:
+                raise ValueError("Run Vision before rendering face_track framing")
+            if "face_samples" not in analysis:
+                raise ValueError(
+                    "Run Vision again to record face boxes for face_track framing"
+                )
+            from .reframe import validate_analysis
+
+            validate_analysis(
+                {
+                    "faces": analysis["face_samples"],
+                    "scene_cuts": analysis.get("scene_cuts"),
+                }
+            )
         if action == "final":
             problem = self._platform_problem(project)
             if problem:
@@ -1012,11 +1050,24 @@ class Studio:
             or audio.get("voice_cleanup", "off") != "off"
         ):
             result["audio"] = audio
+        mode = settings.get("framing", "fit")
+        if mode != "fit":
+            result["framing"] = mode
+        if mode in {"center_crop", "face_track"} and settings.get("framing_keyframes"):
+            result["framing_keyframes"] = settings["framing_keyframes"]
+        if mode == "face_track":
+            analysis = project.get("analysis") or {}
+            result["framing_analysis"] = {
+                "faces": analysis.get("face_samples", []),
+                "scene_cuts": analysis.get("scene_cuts"),
+            }
         return result
 
     def _quality_settings(self, project, preset):
         """QA settings; platform checks need the title to rebuild text geometry."""
         render = self._render_settings(project, preset)
+        render.pop("framing_analysis", None)
+        render.pop("framing_keyframes", None)
         if "platform" not in render:
             render.pop("title")
         render["expected_duration"] = sum(
@@ -1152,6 +1203,9 @@ class Studio:
             mix_report = (render_job.get("result") or {}).get("audio_mix")
             if mix_report is not None:
                 render["audio_mix"] = mix_report
+            framing = self._render_framing(project, job["upstream"])
+            if framing and framing.get("mode") in {"center_crop", "face_track"}:
+                render["framing_report"] = framing
             source_video = self._render_source_video(project, job["upstream"])
             if source_video is not None and "platform" in render:
                 render["source_video"] = source_video
@@ -1204,6 +1258,13 @@ class Studio:
             return job_id, path
         except (OSError, ValueError, TypeError, KeyError, PermissionError):
             return None, None
+
+    def _render_framing(self, project, kind):
+        lineage = project.get("artifact_lineage", {}).get(kind) or {}
+        try:
+            return (self.job(lineage.get("job_id")).get("result") or {}).get("framing")
+        except (OSError, ValueError, TypeError):
+            return None
 
     def _render_source_video(self, project, kind):
         """Source size the published render was made from, from its job result."""

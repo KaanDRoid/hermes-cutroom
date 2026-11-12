@@ -24,9 +24,15 @@ def execute(operation, arguments):
 
         return transcribe(**arguments)
     if operation == "vision":
+        from .reframe import face_samples, scene_cuts
         from .vision import analyze_faces
 
-        return analyze_faces(**arguments)
+        result = analyze_faces(**arguments)
+        return {
+            **result,
+            "face_samples": face_samples(result["frames"]),
+            "scene_cuts": scene_cuts(arguments["source"]),
+        }
     if operation == "segment":
         from .vision import segment_person
 

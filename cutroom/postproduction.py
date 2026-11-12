@@ -12,10 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
-    from . import audio, platforms
+    from . import audio, platforms, reframe
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
-    from cutroom import audio, platforms
+    from cutroom import audio, platforms, reframe
     from cutroom.childenv import child_env
 
 
@@ -281,6 +281,10 @@ def _settings(settings):
         "caption_word_y",
         "audio",
         "audio_mix",
+        "framing",
+        "framing_keyframes",
+        "framing_analysis",
+        "framing_report",
     }
     if settings is None:
         settings = {}
@@ -356,6 +360,13 @@ def _settings(settings):
                 raise ValueError("source_video width and height must be integers")
             _number(source[key], 1, 100000)
         _number(source["display_aspect_ratio"], 0.0001, 10000)
+    reframe.validate_framing(result.get("framing", "fit"))
+    if "framing_keyframes" in result:
+        reframe.validate_keyframes(result["framing_keyframes"])
+    if "framing_analysis" in result:
+        reframe.validate_analysis(result["framing_analysis"])
+    if "framing_report" in result:
+        reframe.validate_report(result["framing_report"])
     return result
 
 
@@ -1010,6 +1021,42 @@ def export_video(
     ) as temp:
         directory = Path(temp)
         filters = _fit_filter(info, width, height)
+        # Reframing changes only the picture, never the trim/concat audio timeline.
+        framing_report = None
+        mode = settings.get("framing", "fit")
+        if mode == "blur_fill":
+            cw, ch = _content_size(info["display_aspect_ratio"], width, height)
+            background_w = (
+                math.ceil(max(width, height * info["display_aspect_ratio"]) / 2) * 2
+            )
+            background_h = (
+                math.ceil(max(height, width / info["display_aspect_ratio"]) / 2) * 2
+            )
+            graph.append(
+                "[joined]split=2[blur_src][fit_src];"
+                f"[blur_src]scale={background_w}:{background_h},setsar=1,"
+                f"crop={width}:{height},gblur=sigma=35[blur_bg];"
+                f"[fit_src]scale={cw}:{ch},setsar=1[blur_fg];"
+                "[blur_bg][blur_fg]overlay=(W-w)/2:(H-h)/2[framed]"
+            )
+            filters = ["null"]
+        elif mode in {"center_crop", "face_track"}:
+            framing_report = reframe.prepare_path(
+                source, info, ranges, settings, width, height
+            )
+            xexpr, xp = reframe.path_expression(
+                framing_report["x"], framing_report["resets"]
+            )
+            yexpr, yp = reframe.path_expression(
+                framing_report["y"], framing_report["resets"]
+            )
+            framing_report["expression_pieces"] = [xp, yp]
+            crop_w, crop_h = framing_report["crop"]
+            filters = [
+                f"crop={crop_w}:{crop_h}:x='{xexpr}':y='{yexpr}'",
+                f"scale={width}:{height}",
+                "setsar=1",
+            ]
         brand = settings["brand"]
         if settings["title"] or settings["lower_third"] or captions:
             _font(directory, brand["font"])
@@ -1196,7 +1243,11 @@ def export_video(
             )
         elif has_audio:
             normalization_method = "disabled"
-        graph.append("[joined]" + ",".join(filters) + "[video]")
+        graph.append(
+            ("[framed]" if mode == "blur_fill" else "[joined]")
+            + ",".join(filters)
+            + "[video]"
+        )
         (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
         temporary = directory / ("render" + output.suffix)
         args = [
@@ -1268,14 +1319,31 @@ def export_video(
             }
         )
     source_video = _source_video(info)
-    content, factor = _content_upscale(source_video, width, height)
+    content, factor = reframe.content_upscale(source_video, width, height, mode)
+    if framing_report is not None:
+        if factor > 1.0001:
+            framing_report["warnings"].append(
+                f"Crop upscale factor {factor:.4f}; detail is interpolated, not recorded"
+            )
+        extra["framing"] = framing_report
+    elif mode == "blur_fill":
+        extra["framing"] = {
+            "mode": mode,
+            "background_upscale_factor": max(
+                width / source_video["width"], height / source_video["height"]
+            ),
+        }
     return {
         **result,
         **extra,
         "output": str(output),
         "preset": settings["preset"],
         "aspect": settings["aspect"],
-        "fit": "pad",
+        "fit": "pad"
+        if mode == "fit"
+        else "blur_fill"
+        if mode == "blur_fill"
+        else "crop",
         "upscaled": factor > 1.0001,
         "upscale_factor": factor,
         "content_size": content,
@@ -1502,7 +1570,9 @@ def _platform_checks(add, entry, info, settings, actual_resolution):
             dict(platform=name, reason="Source video size was not supplied"),
         )
     else:
-        content, factor = _content_upscale(source, *actual_resolution)
+        content, factor = reframe.content_upscale(
+            source, *actual_resolution, settings.get("framing", "fit")
+        )
         add(
             "platform_upscale",
             "warning" if factor > 1.0001 else "pass",
@@ -1510,6 +1580,11 @@ def _platform_checks(add, entry, info, settings, actual_resolution):
                 platform=name,
                 source=[source["width"], source["height"]],
                 content=content,
+                **(
+                    {"crop": settings["framing_report"]["crop"]}
+                    if settings.get("framing_report")
+                    else {}
+                ),
                 frame=actual_resolution,
                 factor=factor,
                 upscaled=factor > 1.0001,
@@ -1752,6 +1827,12 @@ def quality_report(
             KeyError,
         ) as error:
             add("frame_timing", "fail", {"error": str(error)})
+    if settings.get("framing") == "face_track" or settings.get("framing_report"):
+        reframe.quality_checks(
+            add,
+            settings.get("framing_report"),
+            len(points) if deltas is not None else None,
+        )
     if entry is not None:
         _platform_fps(add, entry, info, settings, deltas)
     if not info["has_audio"]:
