@@ -437,8 +437,13 @@ function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
     if (value.caption_highlight_color && !/^#[0-9a-f]{6}$/i.test(value.caption_highlight_color)) { setError(new Error('Caption colour must be a six-digit hex value')); return; }
     if (value.caption_word_y != null && (!Number.isFinite(value.caption_word_y) || value.caption_word_y < 0 || value.caption_word_y > 1)) { setError(new Error('caption_word_y must be between 0 and 1')); return; }
     for (const key of ['frame_step', 'max_width']) if (value[key] != null && (!Number.isInteger(value[key]) || value[key] < 1)) { setError(new Error(`${key} must be a positive integer`)); return; }
-    setError(null); return patch({ settings: value });
+    const sound = audioSettings(value, project.settings);
+    if (sound instanceof Error) { setError(sound); return; }
+    setError(null); return patch({ settings: sound });
   };
+  const sound = (group, key, value) => { dirty(); setSettings(old => ({ ...old, [group]: { ...(old[group] || {}), [key]: value } })); };
+  const soundField = (label, group, key, type = 'text') => jsx(Field, { label, name: `${group}.${key}`, type, value: settings[group]?.[key], onChange: value => sound(group, key, type === 'number' && value !== '' ? Number(value) : value) }, `${group}.${key}`);
+  const cleanup = settings.voice_cleanup || 'off';
   const field = (label, key, type = 'text') => jsx(Field, { label, name: key, type, value: settings[key], onChange: value => change(key, type === 'number' && value !== '' ? Number(value) : value) }, key);
   const selected = platforms.find(item => item.name === (settings.platform || 'custom')) || null;
   const platformFixed = Boolean(selected?.frame);
@@ -470,8 +475,41 @@ function SettingsForm({ project, platforms = [], patch, dirty, disabled }) {
       field('Graphic raster asset path (optional, behind person)', 'graphic'), field('Background raster path or RGB hex color (optional)', 'background'), field('Whisper model path', 'whisper_model'), field('FaceLandmarker model path', 'face_model'), field('Segmentation model path', 'segmentation_model'), field('Vision frame step', 'frame_step', 'number'), field('Render maximum width', 'max_width', 'number'),
     ] }),
     jsx('div', { style: row, children: ['captions', 'normalize_audio', 'use_segmented'].map(key => jsx('label', { style: row, children: [jsx(Tick, { checked: settings[key] === true, onCheckedChange: checked => change(key, checked === true) }), key === 'captions' ? 'Burn timed captions' : key === 'normalize_audio' ? 'Normalize source audio' : 'Use segmented background output'] }, key)) }),
+    jsx('h3', { style: { margin: 0, fontSize: 14 }, children: 'Music, cut sounds & voice' }, 'audio:title'),
+    jsx('p', { style: muted, children: 'Optional. Use only local audio you own or are licensed to use, and note where it came from. Each file is hashed into the review digest, so replacing it revokes approval. Leave a path blank to remove that sound.' }, 'audio:note'),
+    jsx('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }, children: [
+      soundField('Music file path (WAV, MP3, M4A, FLAC, OGG)', 'music', 'path'), soundField('Music volume dB (−60 to 0; blank = −18)', 'music', 'volume_db', 'number'), soundField('Duck under speech by dB (12–36; blank = 12)', 'music', 'duck_db', 'number'), soundField('Music fade in s (0–30; blank = 0.5)', 'music', 'fade_in', 'number'), soundField('Music fade out s (0–30; blank = 0.5)', 'music', 'fade_out', 'number'), soundField('Music start offset s (blank = 0)', 'music', 'start_offset', 'number'), soundField('Music source / licence note', 'music', 'source_note'),
+      soundField('Cut sound file path (up to 5 s)', 'cut_sfx', 'path'), soundField('Cut sound volume dB (−60 to 0; blank = −12)', 'cut_sfx', 'volume_db', 'number'),
+    ] }, 'audio:fields'),
+    jsx('div', { style: row, children: [['loop', 'Loop music'], ['duck', 'Duck music during speech']].map(([key, label]) => jsx('label', { style: row, children: [jsx(Tick, { 'aria-label': label, checked: settings.music?.[key] !== false, onCheckedChange: checked => sound('music', key, checked === true) }), label] }, `music-tick:${key}`)) }, 'audio:ticks'),
+    jsx('div', { role: 'group', 'aria-label': 'Voice cleanup', style: row, children: ['off', 'light', 'strong'].map(level => jsx(Button, { variant: cleanup === level ? 'secondary' : 'ghost', onClick: () => change('voice_cleanup', level), children: `Voice cleanup: ${level}` }, `cleanup:${level}`)) }, 'audio:cleanup'),
     jsx(Button, { disabled, onClick: save, children: 'Save settings' }), jsx(Notice, { error }),
   ] });
+}
+
+const SOUND_BOUNDS = { music: { volume_db: [-60, 0], duck_db: [12, 36], fade_in: [0, 30], fade_out: [0, 30], start_offset: [0, 86400] }, cut_sfx: { volume_db: [-60, 0] } };
+
+// Blank numbers fall back to backend defaults; computed fields (hash, duration) are recomputed on save.
+function audioSettings(value, saved = {}) {
+  const result = { ...value };
+  for (const group of ['music', 'cut_sfx']) {
+    const item = value[group] || {};
+    const path = typeof item.path === 'string' ? item.path.trim() : '';
+    if (!path) { if (saved?.[group]) result[group] = null; else delete result[group]; continue; }
+    const clean = { path };
+    for (const [key, [min, max]] of Object.entries(SOUND_BOUNDS[group])) {
+      if (item[key] === '' || item[key] == null) continue;
+      if (!Number.isFinite(item[key]) || item[key] < min || item[key] > max) return new Error(`${group}.${key} must be between ${min} and ${max}`);
+      clean[key] = item[key];
+    }
+    if (group === 'music') {
+      if (item.source_note) clean.source_note = String(item.source_note);
+      clean.loop = item.loop !== false; clean.duck = item.duck !== false;
+    }
+    result[group] = clean;
+  }
+  if (!value.voice_cleanup && !saved?.voice_cleanup) delete result.voice_cleanup;
+  return result;
 }
 
 export default {

@@ -170,6 +170,8 @@ class Studio:
         candidates = [
             settings.get("graphic"),
             settings.get("background"),
+            (settings.get("music") or {}).get("path"),
+            (settings.get("cut_sfx") or {}).get("path"),
             settings.get("brand", {}).get("font_path"),
             project["artifacts"].get("segmented")
             if settings.get("use_segmented")
@@ -264,6 +266,9 @@ class Studio:
                     "use_segmented",
                     "platform",
                     "final_resolution",
+                    "music",
+                    "cut_sfx",
+                    "voice_cleanup",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
@@ -323,6 +328,28 @@ class Studio:
                         or merged[key] < 1
                     ):
                         raise ValueError(key + " must be a positive integer")
+                from .audio import (
+                    normalize_cut_sfx,
+                    normalize_music,
+                    validate_voice_cleanup,
+                )
+
+                for key, normalize in (
+                    ("music", normalize_music),
+                    ("cut_sfx", normalize_cut_sfx),
+                ):
+                    if key in settings:
+                        value = normalize(settings[key])
+                        if value is None:
+                            merged.pop(key, None)
+                        else:
+                            merged[key] = value
+                if "voice_cleanup" in settings:
+                    value = validate_voice_cleanup(settings["voice_cleanup"])
+                    if value == "off":
+                        merged.pop("voice_cleanup", None)
+                    else:
+                        merged["voice_cleanup"] = value
                 updated["settings"] = merged
             if "transcript" in changes:
                 self._set_transcript(updated, changes["transcript"])
@@ -820,6 +847,16 @@ class Studio:
     def _preflight(self, project, action):
         """Reject actions whose prerequisites are missing before a job exists."""
         settings = project["settings"]
+        if action in {"preview", "final"}:
+            from .audio import validate_settings
+
+            validate_settings(
+                {
+                    key: settings[key]
+                    for key in ("music", "cut_sfx", "voice_cleanup")
+                    if key in settings
+                }
+            )
         if action == "storyboard":
             transcript = project.get("transcript") or {}
             if not transcript.get("words"):
@@ -964,6 +1001,17 @@ class Studio:
             for key in ("caption_style", "caption_highlight_color", "caption_word_y"):
                 if key in settings:
                     result[key] = settings[key]
+        audio = {
+            key: copy.deepcopy(settings[key])
+            for key in ("music", "cut_sfx", "voice_cleanup")
+            if key in settings
+        }
+        if audio and (
+            audio.get("music")
+            or audio.get("cut_sfx")
+            or audio.get("voice_cleanup", "off") != "off"
+        ):
+            result["audio"] = audio
         return result
 
     def _quality_settings(self, project, preset):
@@ -1099,6 +1147,11 @@ class Studio:
         if action == "qa":
             preset = "final" if job["upstream"] == "final" else "preview"
             render = self._quality_settings(project, preset)
+            lineage = project.get("artifact_lineage", {}).get(job["upstream"], {})
+            render_job = self.job(lineage["job_id"]) if lineage.get("job_id") else {}
+            mix_report = (render_job.get("result") or {}).get("audio_mix")
+            if mix_report is not None:
+                render["audio_mix"] = mix_report
             source_video = self._render_source_video(project, job["upstream"])
             if source_video is not None and "platform" in render:
                 render["source_video"] = source_video

@@ -233,7 +233,7 @@ def definitions():
         "properties": {
             "settings": {
                 "type": "object",
-                "description": "Render/model settings",
+                "description": "Render/model settings; settings.music is an optional local audio object (path, volume_db, fade_in, fade_out, duck, duck_db, loop, start_offset, source_note); settings.cut_sfx takes path and volume_db; assets are hashed into approval. settings.voice_cleanup is off/light/strong.",
                 "properties": {
                     "caption_style": {
                         "type": "string",
