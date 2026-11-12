@@ -294,6 +294,91 @@ class DeriveTests(_StudioCase):
         child = self.studio.derive(stored["id"], "youtube")
         self.assertNotIn("use_segmented", child["settings"])
 
+    def test_derive_stores_the_stripped_name(self):
+        child = self.studio.derive(self.project["id"], "tiktok", name="  Clip B \t")
+        self.assertEqual(child["name"], "Clip B")
+        self.assertEqual(self.studio.get(child["id"])["name"], "Clip B")
+
+    def test_derive_resets_final_resolution_unless_requested(self):
+        parent = self.settings({"platform": "tiktok", "final_resolution": "2160"})
+        for target in ("instagram_reels", "youtube"):
+            with self.subTest(target=target):
+                child = self.studio.derive(parent["id"], target)
+                self.assertEqual(child["settings"]["final_resolution"], "1080")
+        explicit = self.studio.derive(
+            parent["id"], "youtube_shorts", final_resolution="2160"
+        )
+        self.assertEqual(explicit["settings"]["final_resolution"], "2160")
+        custom = self.studio.derive(parent["id"], "custom")
+        self.assertNotIn("final_resolution", custom["settings"])
+        count = len(self.studio.list())
+        for platform, value in (
+            ("tiktok", "720"),
+            ("tiktok", 2160),
+            ("custom", "2160"),
+        ):
+            with self.subTest(platform=platform, value=value):
+                with self.assertRaises(ValueError):
+                    self.studio.derive(parent["id"], platform, final_resolution=value)
+        self.assertEqual(len(self.studio.list()), count)
+
+    def test_missing_assets_are_reported_as_missing_assets(self):
+        from cutroom.studio import MissingAssetError
+
+        graphic = self.root / "logo.png"
+        graphic.write_bytes(b"logo")
+        parent = self.settings({"graphic": str(graphic)})
+        graphic.unlink()
+        with self.assertRaises(MissingAssetError) as caught:
+            self.studio.derive(parent["id"], "tiktok")
+        self.assertIsInstance(caught.exception, FileNotFoundError)
+        self.assertIn("logo.png", str(caught.exception))
+        self.assertIn("missing", str(caught.exception).lower())
+        with self.assertRaises(MissingAssetError):
+            self.studio.review(parent["id"])
+        self.source.unlink()
+        with self.assertRaisesRegex(MissingAssetError, "[Ss]ource"):
+            self.studio.derive(parent["id"], "tiktok")
+
+
+class LegacyApprovalTests(_StudioCase):
+    def test_a_legacy_approved_project_keeps_its_approval_after_loading(self):
+        import hashlib
+
+        from cutroom.project import file_digest
+
+        project = self.studio.get(self.project["id"])
+        project["settings"] = {
+            "aspect": "portrait",
+            "title": "Legacy title",
+            "brand": {"title_color": "#FFFFFF"},
+            "captions": True,
+        }
+        project["revision"] = 3
+        project["brief"] = "Legacy brief"
+        payload = {
+            key: value
+            for key, value in project.items()
+            if key not in {"artifacts", "artifact_lineage", "approval", "status"}
+        }
+        payload["asset_digests"] = {}
+        # The 0.1 digest formula, written out so later changes cannot hide.
+        legacy = hashlib.sha256(
+            json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode()
+        ).hexdigest()
+        project["approval"] = {"digest": legacy, "revision": 3}
+        project["status"] = "approved"
+        self.studio._write(project)
+        self.assertEqual(file_digest(self.source), project["source_sha256"])
+        loaded = self.studio.get(project["id"])
+        self.assertNotIn("platform", loaded["settings"])
+        self.assertNotIn("final_resolution", loaded["settings"])
+        self.assertEqual(loaded["approval"]["digest"], self.studio._digest(loaded))
+        self.assertEqual(self.studio.review(project["id"])["digest"], legacy)
+        self.assertEqual(self.studio.platform(loaded), "custom")
+
 
 class PlatformJobsTests(unittest.TestCase):
     """One landscape source, four derived versions, each checked by its own QA."""
@@ -401,6 +486,12 @@ class PlatformJobsTests(unittest.TestCase):
                 ):
                     self.assertEqual(checks[name]["status"], "pass", checks[name])
                 self.assertIn(checks["platform_fps"]["status"], {"pass", "skip"})
+                # The 320x180 source is enlarged; QA says so instead of hiding it.
+                upscale = checks["platform_upscale"]
+                self.assertEqual(upscale["status"], "warning", upscale)
+                self.assertEqual(upscale["detail"]["source"], [320, 180])
+                lineage = self.studio.get(child["id"])["artifact_lineage"]
+                self.assertEqual(lineage["preview"]["platform"], platform)
                 self.assertEqual(checks["safe_zone"]["detail"]["findings"], [])
                 self.assertEqual(
                     set(checks["safe_zone"]["detail"]["boxes"]), {"title", "captions"}

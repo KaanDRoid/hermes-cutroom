@@ -492,28 +492,41 @@ test('creates platform versions from the current project and opens the new one',
   assert.match(text(tree), /Derived from p1 at revision 3/);
 });
 
-test('overlays the platform unsafe areas on a loaded render and not for custom projects', async () => {
+test('overlays the unsafe areas of the platform the loaded render was made with, once its metadata is known', async () => {
   const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
   URL.createObjectURL = () => 'blob:zone'; URL.revokeObjectURL = () => {};
   try {
     jobRows = [];
     const media = async path => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : selectedProject;
-    let ui = await studio(media, { settings: { platform: 'instagram_reels', aspect: 'portrait' }, artifacts: { preview: 'preview.mp4' } });
+    // The project now targets TikTok, but the loaded preview was rendered for Reels.
+    let ui = await studio(media, { settings: { platform: 'tiktok', aspect: 'portrait' }, artifacts: { preview: 'preview.mp4' }, artifact_lineage: { preview: { job_id: 'j'.repeat(32), platform: 'instagram_reels' } } });
     let toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
     assert.ok(toggle, 'Safe-zone toggle is rendered');
     assert.notEqual(toggle.props.disabled, true);
     await button(ui.draw(), 'Load preview').props.onClick();
     toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
     toggle.props.onCheckedChange(true);
-    const tree = ui.draw();
+    let tree = ui.draw();
+    assert.deepEqual(nodes(tree).filter(n => n.props?.['data-cutroom-unsafe']), [], 'No overlay before the video size is known');
+    const video = nodes(tree).find(n => n.type === 'video');
+    assert.equal(typeof video.props.onLoadedMetadata, 'function');
+    video.props.onLoadedMetadata();
+    tree = ui.draw();
     const boxes = nodes(tree).filter(n => n.props?.['data-cutroom-unsafe']);
     assert.deepEqual(boxes.map(n => n.props['data-cutroom-unsafe']).sort(), ['bottom', 'left', 'right', 'top']);
     const top = boxes.find(n => n.props['data-cutroom-unsafe'] === 'top');
-    assert.equal(top.props.style.height, '14%');
+    assert.equal(top.props.style.height, '14%', 'Reels zone of the render, not the TikTok setting');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'bottom').props.style.height, '35%');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'left').props.style.width, '6%');
     assert.match(String(top.props.style.background), /^var\(--ui-/);
+    assert.match(text(tree), /Instagram Reels safe zone/);
     assert.ok(nodes(tree).find(n => n.type === 'video'), 'The player stays visible under the overlay');
+    // A render without a recorded platform was made by the custom profile.
+    ui = await studio(media, { settings: { platform: 'tiktok', aspect: 'portrait' }, artifacts: { preview: 'preview.mp4' }, artifact_lineage: { preview: { job_id: 'j'.repeat(32) } } });
+    await button(ui.draw(), 'Load preview').props.onClick();
+    nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone').props.onCheckedChange(true);
+    nodes(ui.draw()).find(n => n.type === 'video').props.onLoadedMetadata();
+    assert.deepEqual(nodes(ui.draw()).filter(n => n.props?.['data-cutroom-unsafe']), [], 'Custom renders get no platform overlay');
     ui = await studio(media, { settings: { aspect: 'source' }, artifacts: { preview: 'preview.mp4' } });
     toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
     assert.equal(toggle.props.disabled, true, 'Custom projects have no platform safe zone');

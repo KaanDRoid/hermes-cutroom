@@ -45,7 +45,10 @@ PROJECT_ACTIONS = {
         {"project_id", "changes", "revision"},
     ),
     "review": ({"project_id"}, {"project_id"}),
-    "derive": ({"project_id", "platform", "name"}, {"project_id", "platform"}),
+    "derive": (
+        {"project_id", "platform", "name", "final_resolution"},
+        {"project_id", "platform"},
+    ),
 }
 # Mirrors cutroom.platforms.PLATFORMS; kept literal so registering tools stays cheap.
 PLATFORMS = ("custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube")
@@ -142,6 +145,11 @@ def project_handler(args, **kwargs):
             raise ValueError(
                 "Unsupported platform; expected one of: " + ", ".join(PLATFORMS)
             )
+        if action == "derive" and args.get("final_resolution", "1080") not in (
+            "1080",
+            "2160",
+        ):
+            raise ValueError("final_resolution must be '1080' or '2160'")
         if action == "update":
             changes = args["changes"]
             if not isinstance(changes, dict) or not changes:
@@ -255,9 +263,11 @@ def definitions():
             "optimistic revision checking (settings.platform selects a delivery "
             "profile, settings.final_resolution is '1080' or '2160'); "
             "review(project_id) returns the exact plan digest and notice for the "
-            "human; derive(project_id, platform, name?) creates a sibling project "
-            "for another platform that copies the edit but starts unapproved at "
-            "revision 1 with its own digest. " + APPROVAL_NOTICE
+            "human; derive(project_id, platform, name?, final_resolution?) creates a "
+            "sibling project for another platform that copies the edit but starts "
+            "unapproved at revision 1 with its own digest and the target "
+            "profile's default final resolution unless final_resolution is given. "
+            + APPROVAL_NOTICE
         ),
         "parameters": {
             "type": "object",
@@ -276,6 +286,12 @@ def definitions():
                     "type": "string",
                     "enum": list(PLATFORMS),
                     "description": "Delivery profile of the new sibling (derive)",
+                },
+                "final_resolution": {
+                    "type": "string",
+                    "enum": ["1080", "2160"],
+                    "description": "Final resolution of the new sibling; defaults "
+                    "to the target profile's default (derive)",
                 },
                 "changes": changes,
                 "revision": {

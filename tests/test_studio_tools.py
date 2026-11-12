@@ -72,6 +72,16 @@ class ProjectToolTests(_ToolCase):
                 "derive",
                 {"project_id": "p", "platform": "youtube", "name": "Long form"},
             ),
+            (
+                {
+                    "action": "derive",
+                    "project_id": "p",
+                    "platform": "tiktok",
+                    "final_resolution": "2160",
+                },
+                "derive",
+                {"project_id": "p", "platform": "tiktok", "final_resolution": "2160"},
+            ),
         ]
         for args, method, expected in cases:
             with self.subTest(args=args):
@@ -206,6 +216,18 @@ class ProjectToolTests(_ToolCase):
             {"action": "derive", "project_id": "p", "platform": "vine"},
             {"action": "derive", "project_id": "p", "platform": 3},
             {"action": "derive", "project_id": "p", "platform": "tiktok", "name": ""},
+            {
+                "action": "derive",
+                "project_id": "p",
+                "platform": "tiktok",
+                "final_resolution": "720",
+            },
+            {
+                "action": "derive",
+                "project_id": "p",
+                "platform": "tiktok",
+                "final_resolution": 2160,
+            },
             {
                 "action": "derive",
                 "project_id": "p",
@@ -412,6 +434,7 @@ class SchemaTests(unittest.TestCase):
                 "changes",
                 "revision",
                 "platform",
+                "final_resolution",
             },
         )
         self.assertEqual(

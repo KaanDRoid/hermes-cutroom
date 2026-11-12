@@ -14,42 +14,53 @@ CHECKED = "2026-11-12"
 FINAL_RESOLUTIONS = ("1080", "2160")
 
 _INSTAGRAM_REELS_HELP = "https://help.instagram.com/1038071743007909/"
-_INSTAGRAM_REELS_LENGTH = "https://about.instagram.com/features/reels"
+# Rendered with JavaScript; the static HTML still carries an older
+# "up to 3 minutes" description. The rendered article states the values used.
+_INSTAGRAM_REELS_LENGTH = "https://help.instagram.com/2720958398006062"
 _META_REELS_ADS = (
     "https://www.facebook.com/business/ads-guide/update/video/instagram-reels"
 )
 _INSTAGRAM_MEDIA_API = (
-    "https://developers.facebook.com/docs/instagram-platform/"
+    "https://developers.facebook.com/documentation/instagram-platform/"
     "instagram-graph-api/reference/ig-user/media"
 )
 _SHORTS_LENGTH = "https://support.google.com/youtube/answer/15424877"
 _SHORTS_UPLOAD = "https://support.google.com/youtube/answer/12779649"
 _GOOGLE_VERTICAL_ADS = "https://support.google.com/google-ads/answer/9128498"
 _YOUTUBE_ENCODING = "https://support.google.com/youtube/answer/1722171"
-_YOUTUBE_VIDEOS_API = "https://developers.google.com/youtube/v3/docs/videos"
+_YOUTUBE_VIDEOS_API = (
+    "https://developers.google.com/youtube/data/reference/rest/v3/videos"
+)
 _YOUTUBE_THUMBNAIL = "https://support.google.com/youtube/answer/72431"
 _YOUTUBE_END_SCREEN = "https://support.google.com/youtube/answer/6388789"
-_TIKTOK_LENGTH = (
-    "https://support.tiktok.com/en/using-tiktok/creating-videos/camera-tools"
+# The former support.tiktok.com "camera tools" address redirects here.
+_TIKTOK_LENGTH = "https://www.tiktok.com/support/faq_detail?id=7581821547946580492"
+_TIKTOK_IN_FEED_ADS = (
+    "https://ads.tiktok.com/resources/help/article/tiktok-auction-in-feed-ads"
 )
-_TIKTOK_IN_FEED_ADS = "https://ads.tiktok.com/help/article/tiktok-auction-in-feed-ads"
 _TIKTOK_POST_API = (
-    "https://developers.tiktok.com/doc/content-posting-api-reference-direct-post"
+    "https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post"
 )
-_AES_TD1008 = "https://www.aes.org/wp-content/uploads/2024/01/20210924_TD1008_v3.13.pdf"
-_EBU_R95 = "https://tech.ebu.ch/publications/r095"
+# The AES landing page for the document is
+# https://aes.org/community/technical-council/technical-document-aestd1008/
+_AES_TD1008 = "https://aes.org/wp-content/uploads/2026/10/20210924_TD1008_v3.13.pdf"
+_EBU_R95 = "https://tech.ebu.ch/docs/r/r095.pdf"
 
 
 def _spec(source, **values):
     return {**values, "source": source, "checked": CHECKED}
 
 
-def _vertical_frame(source):
+def _vertical_frame(source, rule):
     return _spec(
         source,
         preview=[1080, 1920],
         final={"1080": [1080, 1920], "2160": [2160, 3840]},
         default_final="1080",
+        chosen_by="cutroom",
+        platform_rule=rule,
+        note="1080x1920 (and the opt-in 2160x3840) is Cutroom's choice within "
+        "the platform rule; the cited page does not prescribe this exact frame.",
     )
 
 
@@ -82,8 +93,16 @@ PROFILES = {
         "label": "Instagram Reels",
         "short_label": "Reels",
         "orientation": "portrait",
-        "frame": _vertical_frame(_INSTAGRAM_REELS_HELP),
-        "min_fps": _spec(_INSTAGRAM_REELS_HELP, value=30),
+        "frame": _vertical_frame(
+            _INSTAGRAM_REELS_HELP,
+            "Aspect ratio between 1.91:1 and 9:16, minimum resolution 720 pixels. "
+            "Meta's Reels ads guide recommends 1440x2560.",
+        ),
+        "min_fps": _spec(
+            _INSTAGRAM_REELS_HELP,
+            value=30,
+            note="Cutroom treats the NTSC rate 30000/1001 (29.97) as meeting 30.",
+        ),
         "max_duration_s": _spec(_INSTAGRAM_REELS_LENGTH, value=1200),
         "recommended_max_s": _spec(
             _INSTAGRAM_REELS_LENGTH,
@@ -103,17 +122,20 @@ PROFILES = {
         "text": _spec(_INSTAGRAM_MEDIA_API, caption_chars=2200, hashtags=30),
         "cover": _spec(
             _INSTAGRAM_REELS_HELP,
-            width=1080,
-            height=1920,
-            grid_ratio="1:1.55",
-            note="The profile grid shows the centre 1:1.55 area of the cover.",
+            width=420,
+            height=654,
+            ratio="1:1.55",
+            note="Recommended cover photo size; it cannot be edited after upload.",
         ),
     },
     "youtube_shorts": {
         "label": "YouTube Shorts",
         "short_label": "Shorts",
         "orientation": "portrait",
-        "frame": _vertical_frame(_SHORTS_UPLOAD),
+        "frame": _vertical_frame(
+            _SHORTS_UPLOAD,
+            "Square or vertical aspect ratio, up to 3 minutes.",
+        ),
         "min_fps": _spec(_YOUTUBE_ENCODING, value=None, note="Source frame rate."),
         "max_duration_s": _spec(
             _SHORTS_LENGTH,
@@ -135,17 +157,24 @@ PROFILES = {
         "loudness": _LOUDNESS,
         "text": _spec(_YOUTUBE_VIDEOS_API, title_chars=100, description_bytes=5000),
         "cover": _spec(
-            _SHORTS_UPLOAD,
-            width=1080,
-            height=1920,
-            note="Shorts use a frame chosen from the video as the cover.",
+            _YOUTUBE_THUMBNAIL,
+            width=2160,
+            height=3840,
+            min_height=640,
+            ratio="9:16",
+            note="Recommended custom Shorts thumbnail. Custom Shorts thumbnails "
+            "are uploaded in YouTube Studio on a computer by verified accounts; "
+            "otherwise a frame from the video is used.",
         ),
     },
     "tiktok": {
         "label": "TikTok",
         "short_label": "TikTok",
         "orientation": "portrait",
-        "frame": _vertical_frame(_TIKTOK_IN_FEED_ADS),
+        "frame": _vertical_frame(
+            _TIKTOK_IN_FEED_ADS,
+            "Vertical 9:16 recommended, at least 540x960 pixels.",
+        ),
         "min_fps": _spec(_TIKTOK_IN_FEED_ADS, value=None, note="Source frame rate."),
         "max_duration_s": _spec(
             _TIKTOK_LENGTH,
@@ -174,9 +203,8 @@ PROFILES = {
         ),
         "cover": _spec(
             _TIKTOK_POST_API,
-            width=1080,
-            height=1920,
-            note="TikTok uses a frame chosen from the video as the cover.",
+            note="TikTok uses a frame chosen from the video as the cover "
+            "(video_cover_timestamp_ms in the Content Posting API).",
         ),
     },
     "youtube": {
@@ -188,6 +216,11 @@ PROFILES = {
             preview=[1920, 1080],
             final={"1080": [1920, 1080], "2160": [3840, 2160]},
             default_final="1080",
+            chosen_by="cutroom",
+            platform_rule="16:9 is the standard aspect ratio on a computer; "
+            "the recommended bitrates cover uploads up to 2160p.",
+            note="1920x1080 (and the opt-in 3840x2160) is Cutroom's choice of "
+            "16:9 frame.",
         ),
         "min_fps": _spec(_YOUTUBE_ENCODING, value=None, note="Source frame rate."),
         "max_duration_s": _spec(
@@ -212,7 +245,14 @@ PROFILES = {
         ),
         "loudness": _LOUDNESS,
         "text": _spec(_YOUTUBE_VIDEOS_API, title_chars=100, description_bytes=5000),
-        "cover": _spec(_YOUTUBE_THUMBNAIL, width=1280, height=720),
+        "cover": _spec(
+            _YOUTUBE_THUMBNAIL,
+            width=3840,
+            height=2160,
+            min_width=640,
+            ratio="16:9",
+            note="Recommended custom video thumbnail; make it as large as possible.",
+        ),
     },
 }
 PLATFORMS = tuple(PROFILES)

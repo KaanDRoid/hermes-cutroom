@@ -67,7 +67,12 @@ ProjectId = Annotated[str, PathParam(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 def invoke(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except (KeyError, FileNotFoundError) as error:
+    except FileNotFoundError as error:
+        if isinstance(error, _module("studio").MissingAssetError):
+            # The project exists; one of its files does not.
+            raise HTTPException(422, str(error)) from error
+        raise HTTPException(404, "Project, job or artifact not found") from error
+    except KeyError as error:
         raise HTTPException(404, "Project, job or artifact not found") from error
     except PermissionError as error:
         raise HTTPException(403, str(error)) from error
@@ -156,6 +161,7 @@ PlatformName = Literal[
 class DeriveProject(RequestModel):
     platform: PlatformName
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    final_resolution: Literal["1080", "2160"] | None = None
 
 
 @router.post("/projects/{project_id}/derive", status_code=201)
@@ -163,7 +169,13 @@ def derive_project(
     project_id: ProjectId, body: DeriveProject, studio=Depends(get_studio)
 ):
     """A sibling for another platform; it never carries the parent's approval."""
-    return invoke(studio.derive, project_id, body.platform, name=body.name)
+    return invoke(
+        studio.derive,
+        project_id,
+        body.platform,
+        name=body.name,
+        final_resolution=body.final_resolution,
+    )
 
 
 @router.get("/platforms")

@@ -178,7 +178,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], open = () =>
       jsx('p', { role: 'status', style: muted, children: canFinal() ? 'Current digest approved. Final export is enabled.' : 'Final export requires current human approval. Any edit clears confirmation.' }),
     ] }),
     jsx(JobPanel, { ctx, scope, project, jobs, approved: canFinal(), canFinal }),
-    jsx(MediaPanel, { ctx, project, profile: platformOf(platforms, project) }),
+    jsx(MediaPanel, { ctx, project, profile: platformOf(platforms, project), platforms }),
     jsx(PlatformVersions, { ctx, scope, project, platforms, open }),
     jsx(TranscriptEditor, { project, exclude, disabled: mutation.isPending }),
     jsx(CorrectionEditor, { project, patch, dirty: clearApproval, disabled: mutation.isPending }, `corrections:${project.revision}`),
@@ -201,16 +201,20 @@ function SafeZoneOverlay({ zone }) {
   ];
 }
 
-function MediaPanel({ ctx, project, profile = null }) {
+function MediaPanel({ ctx, project, profile = null, platforms = [] }) {
   const [overlay, setOverlay] = useState(false);
-  const zone = profile?.safe_zone || null;
+  const [ready, setReady] = useState(false);
   const [media, setMedia] = useState(null);
+  // A loaded render shows the zone of the profile it was rendered with (recorded in its lineage), not the current setting.
+  const rendered = media && media.kind !== 'source';
+  const shown = rendered ? platformOf(platforms, { settings: { platform: project.artifact_lineage?.[media.kind]?.platform || 'custom' } }) : profile;
+  const zone = shown?.safe_zone || null;
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
   const generation = useRef(0);
   const url = useRef(null);
   const lock = useRef(false);
-  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); };
+  const release = () => { generation.current++; lock.current = false; if (url.current) URL.revokeObjectURL(url.current); url.current = null; setMedia(null); setProgress(null); setReady(false); };
   useEffect(() => {
     release();
     return () => { generation.current++; if (url.current) URL.revokeObjectURL(url.current); url.current = null; };
@@ -254,11 +258,11 @@ function MediaPanel({ ctx, project, profile = null }) {
     jsx('p', { style: muted, children: 'Explicit authenticated loads only, up to 256 MiB. Codec support depends on this Desktop host. Downloads use the native save dialog, without loading the entire artifact into memory.' }),
     jsx('div', { style: row, children: ['source', 'preview', 'final'].map(kind => jsx(Button, { disabled: progress !== null || (kind !== 'source' && !project.artifacts?.[kind]), onClick: () => load(kind), children: `Load ${kind}` }, kind)) }),
     progress !== null ? jsx('progress', { 'aria-label': 'Media loading progress', max: 1, value: progress }) : null,
-    jsx('label', { style: row, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true) }), zone ? `Show ${profile.label} safe zone on renders (shaded areas may be covered by the app)` : 'Safe zone: choose a platform profile in settings'] }),
+    jsx('label', { style: row, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true) }), zone ? `Show ${shown.label} safe zone on renders (shaded areas may be covered by the app)` : rendered ? 'Safe zone: this render was made without a platform profile' : 'Safe zone: choose a platform profile in settings'] }),
     media ? (() => {
-      const player = jsx('video', { src: media.url, controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: overlay && zone && media.kind !== 'source' ? { display: 'block', maxWidth: '100%', maxHeight: 420 } : { width: '100%', maxHeight: 420 }, onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }, 'player:video');
-      if (!(overlay && zone && media.kind !== 'source')) return player;
-      // The wrapper shrinks to the video box, so percentages follow the rendered frame.
+      const player = jsx('video', { src: media.url, controls: true, preload: 'metadata', 'aria-label': `${media.kind} player`, style: overlay && zone && media.kind !== 'source' ? { display: 'block', maxWidth: '100%', maxHeight: 420 } : { width: '100%', maxHeight: 420 }, onLoadedMetadata: () => setReady(true), onError: () => { setError(new Error('This host cannot decode this media. Download it or render a compatible MP4 preview.')); release(); } }, 'player:video');
+      if (!(overlay && zone && ready && media.kind !== 'source')) return player;
+      // Drawn once the frame size is known; the wrapper shrinks to the video box, so percentages follow the rendered frame.
       return jsx('div', { 'aria-label': 'Safe zone overlay', style: { position: 'relative', display: 'inline-block', maxWidth: '100%', alignSelf: 'flex-start' }, children: [player, ...SafeZoneOverlay({ zone })] });
     })() : null,
     jsx(Button, { variant: 'ghost', onClick: release, children: 'Unload media / cancel load' }),

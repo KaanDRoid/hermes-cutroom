@@ -16,6 +16,10 @@ from .project import file_digest
 _CHILD_PROCESSES = {}
 
 
+class MissingAssetError(FileNotFoundError):
+    """A project's source or reviewed asset file is no longer on disk."""
+
+
 def _load_json(path):
     deadline = time.monotonic() + 1.0
     while True:
@@ -145,7 +149,14 @@ class Studio:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
     def _check_source(self, project):
-        if file_digest(project["source"]) != project["source_sha256"]:
+        try:
+            digest = file_digest(project["source"])
+        except FileNotFoundError as error:
+            raise MissingAssetError(
+                f"Source file is missing: {project['source']}; restore it or "
+                "import a new project"
+            ) from error
+        if digest != project["source_sha256"]:
             raise PermissionError("Source changed; import a new project")
 
     def _digest(self, project):
@@ -170,8 +181,14 @@ class Studio:
                 and isinstance(candidate, str)
                 and not candidate.startswith("#")
             ):
-                asset = _local_path(candidate)
-                assets[str(asset)] = file_digest(asset)
+                try:
+                    asset = _local_path(candidate)
+                    assets[str(asset)] = file_digest(asset)
+                except FileNotFoundError as error:
+                    raise MissingAssetError(
+                        f"Project asset is missing: {candidate}; restore the file "
+                        "or change the project settings"
+                    ) from error
         payload["asset_digests"] = assets
         return hashlib.sha256(
             json.dumps(
@@ -340,30 +357,39 @@ class Studio:
         """Platform name of a project; projects without the setting are custom."""
         return (project.get("settings") or {}).get("platform") or "custom"
 
-    def derive(self, project_id, platform, name=None):
+    def derive(self, project_id, platform, name=None, final_resolution=None):
         """Create a sibling project for another platform from the same source.
 
         The sibling copies the reviewed edit (transcript, cuts, story, brief,
         voice, brand and model settings) but starts at revision 1 with no
         artifacts, approval or jobs; a person reviews and approves it
         separately. `derived_from` records the parent's revision and digest.
+        The final resolution starts at the target profile's default unless
+        `final_resolution` asks for another one.
         """
-        from .platforms import profile
+        from .platforms import FINAL_RESOLUTIONS, profile
 
         entry = profile(platform)
-        if name is not None and (
-            not isinstance(name, str) or not 1 <= len(name.strip()) <= 200
-        ):
-            raise ValueError("Name must contain 1 to 200 characters")
+        if name is not None:
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200:
+                raise ValueError("Name must contain 1 to 200 characters")
+            name = name.strip()
+        if final_resolution is not None:
+            if final_resolution not in FINAL_RESOLUTIONS:
+                raise ValueError("final_resolution must be '1080' or '2160'")
+            if entry["frame"] is None:
+                raise ValueError("final_resolution applies only to platform profiles")
         with self._lock():
             parent = self.get(project_id)
             self._check_source(parent)
-            child = self._derived_project(parent, platform, entry, name)
+            child = self._derived_project(
+                parent, platform, entry, name, final_resolution
+            )
             self._directory(child["id"]).mkdir(parents=True, exist_ok=False)
             self._write(child)
             return child
 
-    def _derived_project(self, parent, platform, entry, name):
+    def _derived_project(self, parent, platform, entry, name, final_resolution=None):
         """Build a sibling record; a later source range would narrow its cuts here."""
         settings = copy.deepcopy(parent["settings"])
         settings.pop("runtime_python", None)
@@ -372,6 +398,12 @@ class Studio:
         settings["platform"] = platform
         if entry["orientation"]:
             settings["aspect"] = entry["orientation"]
+        # A 4K choice belongs to the parent's target; never carry it silently.
+        settings.pop("final_resolution", None)
+        if entry["frame"] is not None:
+            settings["final_resolution"] = (
+                final_resolution or entry["frame"]["default_final"]
+            )
         child = {
             "version": 2,
             "id": uuid.uuid4().hex,
@@ -1010,6 +1042,9 @@ class Studio:
         if action == "qa":
             preset = "final" if job["upstream"] == "final" else "preview"
             render = self._quality_settings(project, preset)
+            source_video = self._render_source_video(project, job["upstream"])
+            if source_video is not None and "platform" in render:
+                render["source_video"] = source_video
             report = run(
                 "qa",
                 {
@@ -1025,6 +1060,17 @@ class Studio:
                 json.dump(report, stream, indent=2, allow_nan=False)
             return {**report, "artifacts": {"quality": str(path)}}
         raise ValueError("Operation is not installed: " + action)
+
+    def _render_source_video(self, project, kind):
+        """Source size the published render was made from, from its job result."""
+        lineage = project.get("artifact_lineage", {}).get(kind) or {}
+        job_id = lineage.get("job_id")
+        try:
+            result = self.job(job_id).get("result") or {}
+        except (OSError, ValueError, TypeError):
+            return None
+        source = result.get("source_video")
+        return source if isinstance(source, dict) else None
 
     def _storyboard(self, project, outputs):
         """Deterministic, source-quoted hooks and storyboard; no invented text."""
@@ -1162,6 +1208,9 @@ class Studio:
                     if job.get("upstream")
                     else {}
                 )
+                if action in {"preview", "final"}:
+                    # Players draw the safe zone of the profile the render used.
+                    extra["platform"] = result.get("platform") or "custom"
                 self._publish(updated, job, result["artifacts"], **extra)
                 self._prune_artifacts(updated)
                 self._write(updated)

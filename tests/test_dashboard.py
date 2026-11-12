@@ -75,8 +75,10 @@ class FakeStudio:
     def list(self):
         return list(self.projects.values())
 
-    def derive(self, project_id, platform, name=None):
+    def derive(self, project_id, platform, name=None, final_resolution=None):
         parent = self.get(project_id)
+        if parent.get("missing_asset"):
+            raise self.missing_asset(parent["missing_asset"])
         if platform == "custom-error":
             raise ValueError("Unsupported platform")
         child = {
@@ -88,7 +90,7 @@ class FakeStudio:
             "artifacts": {},
             "derived_from": {"project_id": project_id},
         }
-        self.calls.append(("derive", project_id, platform, name))
+        self.calls.append(("derive", project_id, platform, name, final_resolution))
         self.projects["p2"] = child
         return child
 
@@ -500,7 +502,15 @@ class DashboardTests(unittest.TestCase):
         response = self.client.post("/projects/p1/derive", json={"platform": "tiktok"})
         self.assertEqual(response.status_code, 201, response.text)
         self.assertEqual(response.json()["id"], "p2")
-        self.assertIn(("derive", "p1", "tiktok", None), self.studio.calls)
+        self.assertIn(("derive", "p1", "tiktok", None, None), self.studio.calls)
+        response = self.client.post(
+            "/projects/p1/derive",
+            json={"platform": "youtube_shorts", "final_resolution": "2160"},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertIn(
+            ("derive", "p1", "youtube_shorts", None, "2160"), self.studio.calls
+        )
         response = self.client.post(
             "/projects/p1/derive", json={"platform": "youtube", "name": "Long form"}
         )
@@ -513,6 +523,8 @@ class DashboardTests(unittest.TestCase):
             {"platform": "tiktok", "confirmed": True},
             {"platform": "tiktok", "name": ""},
             {"platform": 3},
+            {"platform": "tiktok", "final_resolution": "720"},
+            {"platform": "tiktok", "final_resolution": 2160},
         ):
             with self.subTest(body=body):
                 self.assertEqual(
@@ -525,6 +537,15 @@ class DashboardTests(unittest.TestCase):
             ).status_code,
             404,
         )
+
+    def test_missing_project_assets_are_unprocessable_not_not_found(self):
+        self.studio.missing_asset = self.api._module("studio").MissingAssetError
+        project = self.studio.create("input.mp4")
+        project["missing_asset"] = "Project asset is missing: C:/media/logo.png"
+        response = self.client.post("/projects/p1/derive", json={"platform": "tiktok"})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("logo.png", response.json()["detail"])
+        self.assertIn("missing", response.json()["detail"])
 
     def test_platform_profiles_are_published_for_the_desktop(self):
         response = self.client.get("/platforms")

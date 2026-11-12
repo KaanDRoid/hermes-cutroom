@@ -99,8 +99,8 @@ class ProfileDataTests(unittest.TestCase):
             self.assertEqual(text["title_chars"], 100)
             self.assertEqual(text["description_bytes"], 5000)
         self.assertEqual(module.profile("tiktok")["text"]["caption_chars"], 2200)
-        self.assertEqual(module.profile("youtube")["cover"]["width"], 1280)
-        self.assertEqual(module.profile("youtube")["cover"]["height"], 720)
+        self.assertEqual(module.profile("youtube")["cover"]["width"], 3840)
+        self.assertEqual(module.profile("youtube")["cover"]["height"], 2160)
         self.assertIn("end_screen", module.profile("youtube"))
 
     def test_every_numeric_specification_has_a_source_and_check_date(self):
