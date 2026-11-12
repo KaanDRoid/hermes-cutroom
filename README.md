@@ -20,7 +20,7 @@ See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md
 4. `vision` (MediaPipe face landmarks) → review-only gaze/mouth intervals. `segment` → person layer to place graphics or a background behind the subject.
 5. `preview` → a fast render with word-timed captions and SRT/VTT sidecars.
 6. Human review and approval of the exact digest in the Desktop Studio page.
-7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, loudness and safe zone for platform projects).
+7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, upscaling, loudness and safe zone for platform projects).
 
 Every job is bound to the project revision and its input files. Edits revoke approval and unlink stale renders; published files carry SHA-256 lineage.
 
@@ -35,7 +35,7 @@ A project renders for one platform profile, or for `custom` (the original behavi
 | `tiktok` | 1080×1920; 2160×3840 | ≤ 60 min | 13 / 35 / 12 / 28 % |
 | `youtube` | 1920×1080; 3840×2160 | no limit | 5 % each side |
 
-Every profile targets −14 LUFS and −1 dBTP. Titles, lower thirds and burned captions are placed inside the safe zone, and QA adds frame, length, frame-rate, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
+Every profile targets −14 LUFS and −1 dBTP. The frame sizes are Cutroom's choice within each platform's published rule. Titles, lower thirds and burned captions (at most two lines per event) are placed inside the safe zone, and QA adds frame, length, frame-rate, upscaling, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
 
 ## Models
 
