@@ -67,8 +67,8 @@ project = studio.update(project["id"], {"settings": {
 ```
 
 - Words come from the transcript, mapped to the edited timeline. Excluded words never appear, and a word split by a cut is shown once.
-- Each caption state is its own ASS event, snapped to the frame grid. At most two lines are shown, inside the platform safe zone (or the brand margin for `custom`). Lines are measured with the brand font when Pillow is installed.
-- `preview` and `final` publish the burned script as `captions_ass`. `qa` reads it and adds two checks:
+- Each caption state is its own ASS event, timed in whole frames, with edges placed just before their frame so libass shows each word from its first frame. Words that start in the same frame share a state. At most two lines are shown, inside the platform safe zone (or the brand margin for `custom`), at no less than the BBC reading size (3.5 % of the frame height on vertical video, 6.25 % on landscape). Lines are measured with the brand font when Pillow is installed.
+- `preview` and `final` publish the burned script as `captions_ass` and record its hash. `qa` reads the script of the render it checks (not the latest published one) and adds two checks; a script made for another frame size fails both:
   - `caption_timing`: each word's first frame comes no earlier than its start and at most one frame interval later, and its last frame no more than one interval after its end.
   - `caption_bounds`: every event box stays inside the safe zone.
 - In an update, `null` resets `caption_highlight_color` or `caption_word_y` to its default.

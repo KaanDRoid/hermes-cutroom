@@ -36,7 +36,7 @@ A project targets exactly one profile. Other platforms are sibling projects crea
 
 ## Animated captions
 
-`Studio._caption_words` turns kept transcript words into program-time words. `captions.build` turns them into an ASS script with one event per caption state, snapped to the frame grid and placed with the same `platform_layout` geometry as other text. `export_video` burns that script, and Studio publishes it as `captions_ass`. `quality_report` then reads the published script rather than rebuilding it, so the check covers the exact events that were burned. Timing is compared with decoded frame timestamps, and bounds with measured glyph boxes. `classic` keeps the earlier libass cue path.
+`Studio._caption_words` turns kept transcript words into program-time words. `captions.build` turns them into an ASS script with one event per caption state, timed in whole frames (`frame_edge`) and placed with the same `platform_layout` geometry as other text. `export_video` burns that script, and Studio publishes it as `captions_ass` and stores its hash in the render job. QA reads the script from the job of the render being checked, verified by that hash, so the check covers the events burned into that video; `quality_report` also refuses a script made for another frame size. Timing is compared with decoded frame timestamps, and bounds with measured glyph boxes. `classic` keeps the earlier libass cue path.
 
 ## Planned execution path
 

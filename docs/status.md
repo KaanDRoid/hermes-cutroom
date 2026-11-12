@@ -2,9 +2,10 @@
 
 ## November 12 — F1 animated captions (branch `feat/f1-animated-captions`)
 
-- Added `caption_style` (`classic`, `highlight`, `pop`, `one_word`), `caption_highlight_color` and `caption_word_y`, with per-word ASS events snapped to the frame grid and a glyph-measured two-line layout inside the safe zone. Studio publishes the burned script as the `captions_ass` artifact, QA adds `caption_timing` and `caption_bounds`, Desktop gets style controls, and YouTube delivery uses SRT/VTT sidecars first. Details: [creator formats F1](creator-formats.md#f1--animated-word-captions).
-- On real speech (Sandra clip, 1080×1920 Reels preview, 24 words) every word starts within one frame (largest offset 0.0315 s at 29.97 fps) and stays inside the safe zone.
-- Local gates: **293 Python tests OK** (14 skipped without local models and media), **24/24 Desktop tests**, Ruff clean.
+- Added `caption_style` (`classic`, `highlight`, `pop`, `one_word`), `caption_highlight_color` and `caption_word_y`, with per-word ASS events timed in whole frames and a glyph-measured two-line layout inside the safe zone at no less than the BBC reading size. Studio publishes the burned script as the `captions_ass` artifact, QA adds `caption_timing` and `caption_bounds`, Desktop gets style controls, and YouTube delivery uses SRT/VTT sidecars first. Details: [creator formats F1](creator-formats.md#f1--animated-word-captions).
+- A second review found words one frame late at 25, 30 and 60 fps, QA checking a final against a later preview's script, and lost same-frame words. All are fixed; a decoded-pixel probe finds 0 mismatches at 23.976, 25, 29.97, 30 and 60 fps and on variable-rate video.
+- On real speech (Sandra clip, 1080×1920 Reels preview, 24 words) every word starts within one frame and stays inside the safe zone.
+- Local gates: **307 Python tests OK** (14 skipped without local models and media), **24/24 Desktop tests**, Ruff clean.
 - Not yet done: a native Desktop check of the caption controls, and reframing (F2) so landscape sources fill vertical frames.
 
 ## November 12 — F0 platform profiles (merged, pull request #12)
