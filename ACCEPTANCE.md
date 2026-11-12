@@ -40,11 +40,12 @@ Work packages and design decisions are in [docs/creator-formats.md](docs/creator
 | A27 | Delivery packages | Per-platform folder with video, cover and text within platform limits plus a checksum manifest; nothing is posted |
 | A28 | Creator acceptance | Native Desktop run per platform on consented real footage, clean install and FFmpeg 7.1 check |
 
-Status (F0, 2026-11-12):
+Status (F0 and F1, 2026-11-12):
 
 - **A19 verified by automated tests on synthetic media.** Four sourced, dated profiles; a landscape test pattern renders at exactly 1080×1920 for Shorts and passes frame, length, loudness and safe-zone checks; one source produces four derived projects whose preview QA passes their own platform checks; a 185-second Shorts edit fails QA and a 190-second Shorts final is refused. Evidence: `tests/test_platforms.py`, `tests/test_studio_platforms.py`, [creator formats F0](docs/creator-formats.md#f0--platform-profiles-and-derived-projects). Native Desktop runs per platform belong to A28.
 - **A20 pending.** Platform siblings with their own settings, digest and approval are implemented and tested; siblings limited to a source range arrive with F5.
-- A21–A28 pending.
+- **A21 verified by automated tests and a real-footage preview.** Highlight, pop and one-word styles render from per-word ASS events inside the safe zone; every word starts and ends within one frame of its timestamp in the published script, checked against decoded frame times; long-form YouTube defaults to SRT/VTT sidecars. Evidence: `tests/test_captions.py`, `tests/test_studio_captions.py`, a 1080×1920 Reels preview of real speech in [creator formats F1](docs/creator-formats.md#f1--animated-word-captions). Native Desktop runs belong to A28.
+- A22–A28 pending.
 
 ## Consented acceptance source
 

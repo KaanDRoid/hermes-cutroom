@@ -64,7 +64,7 @@ F7 and F8 also close the two items still open from 0.1: live acceptance of the o
 
 ## F0 — Platform profiles and derived projects
 
-Status: implemented on `feat/f0-platform-profiles`; not yet merged into `feat/creator-formats`.
+Status: merged into `feat/creator-formats` (pull request #12).
 
 ### What shipped
 
@@ -92,9 +92,9 @@ Status: implemented on `feat/f0-platform-profiles`; not yet merged into `feat/cr
 - Source ranges for derived projects (F5).
 - The YouTube profile's cover is still a frame at the video size; a 16:9 custom thumbnail is F6.
 - `platform_upscale` needs the render's source size; reports for renders made before this field existed skip the check.
-- Characters per caption line assume a full em per character, so narrow text wraps earlier than necessary; F1 replaces this with measured glyph widths.
+- Characters per caption line assume a full em per character, so narrow text wraps earlier than necessary. F1 measures glyph widths when Pillow is installed.
 - The safe zone is one rectangle per profile. TikTok's action rail only covers the lower right of the frame, so the full-height 28 % right margin is conservative for titles near the top.
-- Caption placement is clamped inside the safe zone; animated caption styles and the one-frame timing target are F1.
+- Caption placement is clamped inside the safe zone. Animated caption styles and the one-frame timing check are covered in F1.
 
 ### Review fixes
 
@@ -107,6 +107,84 @@ An independent review of F0 found the following; each is fixed with a test writt
 - Source links: the Reels length now cites the Help Center article that states 20 minutes and the 3-minute recommendation; dead AES and EBU links and redirected Google, Meta and TikTok links were replaced by their current addresses. Covers now record what the pages state (Reels 420×654, YouTube 3840×2160 and Shorts 2160×3840 thumbnails), and frames are marked as Cutroom's choice within each platform's rule.
 - Deriving no longer carries a parent's 4K setting silently and stores the stripped name; a missing source or asset is reported as such (REST 422) instead of "Project not found".
 - The Desktop overlay uses the platform recorded with the loaded render and appears only after the video metadata has loaded.
+
+## F1 — Animated word captions
+
+Status: implemented on `feat/f1-animated-captions`.
+
+### What shipped
+
+- **Settings.** Three new project settings, validated in Studio, the REST model and the `cutroom_project` tool schema (enum, pattern and range):
+  - `caption_style`: `classic` (default), `highlight`, `pop` or `one_word`.
+  - `caption_highlight_color`: `#RRGGBB`, default `#FFCC00`.
+  - `caption_word_y`: one-word position in the safe area, 0 = top and 1 = bottom, default 0.8.
+
+  In an update, `null` for the colour or the position removes the key so the default applies; `null` for the style is rejected. The settings are part of the review digest, so changing them revokes approval. `classic`, and projects without these keys, keep the same render settings and digest as before.
+- **Words in program time.** `Studio._caption_words` maps kept transcript words to the edited timeline with `speech.remap_words`. Excluded words never appear, and the fragments of a word split by a cut are merged, so the word is shown once.
+- **One event per caption state.** `cutroom/captions.py` writes an ASS script in which every state of a cue is its own event: a word event starts when its word starts, and pauses get a `gap` event. Event times are snapped to the frame grid, so the first frame that shows a word is the first frame at or after its timestamp. Cutroom does not use `\k` karaoke tags. Separate events render the same way in every libass build and can be checked from the script; cumulative `\k` durations are rounded to centiseconds and drift.
+  - `highlight`: the whole cue is visible and the current word takes the highlight colour; pauses return to the base colour.
+  - `pop`: the cue's layout is fixed from its first frame (future words are transparent). Each word scales in vertically from 82 % to 100 % over at most 90 ms, so a reveal never reflows the line.
+  - `one_word`: only the current word, at twice the caption size (reduced to fit), centred horizontally in the safe area at `caption_word_y`.
+- **Layout.** Events have at most two lines and stay inside the platform safe zone from F0's `platform_layout`, or inside the brand `safe_margin` for `custom` projects.
+  - Line breaks use measured glyph advances of the brand font through Pillow, which comes with the `vision` and `dev` extras. Without Pillow, the full-em estimate from F0 applies. The measured width also wraps `classic` captions on platform projects.
+  - An event that would not fit is shrunk. A token longer than a line is split, never dropped.
+  - Backslashes and braces in transcript text are replaced with look-alike characters, so transcript text cannot inject ASS tags.
+- **Rendering.** The export burns the script with FFmpeg's `ass` filter. Studio publishes it as the `captions_ass` artifact beside the SRT/VTT sidecars, and QA reads that published script.
+- **Long-form YouTube.** YouTube receives SRT/VTT sidecars, and burned captions are opt-in:
+  - A `youtube` version created with `derive` starts with burned captions off.
+  - Switching an existing project to `youtube` also turns them off, unless the same change turns them on.
+  - In Desktop, choosing YouTube unticks **Burn timed captions**, and the person can tick it again.
+- **QA for animated styles.**
+  - `caption_timing` compares each word's event with the decoded frame timestamps. The first frame showing the word must not come before the word starts, and at most one frame interval (the median interval) after it. The first frame without the word may come at most one interval after the word ends; ending earlier is allowed when the next word starts first. Events are matched to words by the word's original index, so a zero-length word does not shift the comparison.
+  - `caption_bounds` checks the box of every event against the safe zone. The box comes from the ASS position plus measured glyph bounds, not from decoded pixels.
+  - `classic` reports gain neither check.
+- **Desktop.** Caption style buttons, plus fields for the highlight colour and the one-word position. A blank field sends `null`, which restores the default; it no longer fails validation or saves 0.
+
+### How it was verified
+
+- **RED before implementation:** `artifacts/f1/red.log`. RED logs for the fixes made during review: `blank-fields-red.log`, `null-reset-red.log`, `youtube-tick-red2.log`, `word-y-red.log` and `timing-red.log`.
+- **GREEN:**
+  - `artifacts/f1/full-green.log`: 293 Python tests OK, 14 skipped in a worktree without the local models and media.
+  - `artifacts/f1/desktop-green.log`: Desktop checks 24/24.
+  - Ruff check and format clean.
+- **`tests/test_captions.py`:**
+  - Strict settings and glyph measurement narrower than a full em, with the em fallback when the font is missing.
+  - Every word event starts within one frame of its timestamp, for each style.
+  - Highlight colours only the current word. Pop reveals words with a scale-in. One-word shows a single, larger word, below the face area by default.
+  - At most two lines inside the safe zone, and text kept literal.
+  - Timing-report cases: shifted starts, late ends and zero-length words.
+  - Decoded pixels show the highlight colour during its word and not before.
+  - A caption-only render of every style keeps its pixels inside the safe zone.
+  - QA adds `caption_timing` and `caption_bounds` for animated styles only.
+- **`tests/test_studio_captions.py`:**
+  - Validation, and `null` resets.
+  - No defaults are added on load (the digest is unchanged) and classic render settings are unchanged.
+  - Words are remapped after cuts and exclusions; a word split by a cut is shown once.
+  - YouTube burn-in rules for derive and for switching platforms.
+  - An end-to-end highlight preview publishes `captions_ass`, and QA checks it.
+- **`tests/test_caption_surfaces.py` and `tests/desktop-check.mjs`:** tool schema and REST strictness, `null` resets, the style picker, blank fields, and the YouTube untick.
+- **Real footage.** The Sandra clip (Wikitongues / Elise Lieberman, CC BY-SA 4.0) with its real transcript, kept ranges 0–6 s and 8–14 s, rendered as a 1080×1920 Reels preview of 12.012 s in `highlight` and `one_word`:
+  - All 24 words pass `caption_timing`. The largest start offset is 0.0315 s against a one-frame tolerance of 0.0334 s at 29.97 fps.
+  - `caption_bounds` and `safe_zone` pass.
+  - The test profile's project file is unchanged (hash compared before and after).
+  - Frames and measurements: `artifacts/f1/evidence/`.
+
+### Found and fixed during review
+
+Each fix below has a test written first.
+
+- A blank highlight-colour field in Desktop was sent as an empty string and rejected, and a blank position became 0 (the top edge). Blank fields now send `null`, and the backend restores the default.
+- Switching an existing project to YouTube kept burned captions on. The backend now turns them off unless asked, and Desktop unticks the box.
+- On real footage, a centred one-word caption sat on the speaker's face. The default `caption_word_y` moved from 0.5 to 0.8.
+- The timing report compared a word with its neighbour's event when a zero-length word came first, and it did not check when a word's state ended. Both are fixed.
+
+### Open items
+
+- Native Desktop check of the caption controls in the real Hermes window (F8 / A28).
+- Size. Animated styles use the brand's subtitle size: 36 px at a width of 1080 by default (the evidence renders used 56). Whether short-form profiles need a larger default is a style decision for review with real creator footage in F8.
+- `caption_bounds` checks script geometry, not pixels. Pixel-level coverage exists in the synthetic render tests.
+- When two words start at exactly the same time, only the first gets a word event, and the timing report lists the other as having none.
+- Until F2, a landscape source in a vertical profile is letterboxed, so captions are placed over the fitted picture and the bars.
 
 ## Order and branches
 

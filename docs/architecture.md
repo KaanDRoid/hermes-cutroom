@@ -11,6 +11,7 @@
 | `cutroom/speech.py` | Local transcription, word exclusions, filler suggestions, timeline remapping and subtitle files |
 | `cutroom/narrative.py` | Extractive hook/storyboard/caption drafts grounded in timed source text |
 | `cutroom/vision.py` | Face/head-facing/mouth review and person-layer compositing |
+| `cutroom/captions.py` | Word-timed ASS caption scripts (highlight, pop, one-word), glyph measurement, script-based timing and bounds checks |
 | `cutroom/platforms.py` | Sourced, dated platform profiles (frame, length, frame rate, safe zone, loudness, text and cover limits) |
 | `cutroom/postproduction.py` | Brand validation, preview/final export, platform safe-zone layout, covers and quality reports |
 | `cutroom/integrations.py` | Consent-gated download, OBS, rclone, local package and ICS adapters |
@@ -32,6 +33,10 @@ Do not confuse these formats. The Studio supervisor and engine dispatcher execut
 Platform specifications are data, not logic: `cutroom/platforms.py` is the only place that knows frame sizes, limits, safe zones and loudness targets, and each value cites its source. Studio passes the profile name and final resolution into the render settings; `postproduction` resolves the profile and uses one geometry function (`platform_layout`) both to place text and to check it in QA, so the renderer and the report cannot disagree; `platform_caption_cues` splits burned cues to the layout's two-line band. Render results record the source size in display orientation (`source_video`), and Studio passes it into the QA settings of that render so `platform_upscale` can compare it with the fitted picture. The render's lineage records its platform for the Desktop overlay. `custom` bypasses the platform geometry and checks and keeps the 0.1 code path.
 
 A project targets exactly one profile. Other platforms are sibling projects created by `Studio.derive`: a new record in `projects/<id>/` that copies the edit, starts at revision 1 without artifacts, approval or jobs, and records `derived_from` (parent id, revision and digest). Because the sibling is an ordinary project, revision checks, artifact lineage and the human approval of an exact digest apply to it unchanged. Derivation is the planned home for clips (F5): a source range would narrow the copied cuts inside `_derived_project`.
+
+## Animated captions
+
+`Studio._caption_words` turns kept transcript words into program-time words. `captions.build` turns them into an ASS script with one event per caption state, snapped to the frame grid and placed with the same `platform_layout` geometry as other text. `export_video` burns that script, and Studio publishes it as `captions_ass`. `quality_report` then reads the published script rather than rebuilding it, so the check covers the exact events that were burned. Timing is compared with decoded frame timestamps, and bounds with measured glyph boxes. `classic` keeps the earlier libass cue path.
 
 ## Planned execution path
 

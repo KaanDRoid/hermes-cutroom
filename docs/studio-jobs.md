@@ -14,7 +14,7 @@ The same jobs are reachable from three surfaces: the Python facade, the plugin R
 | `vision` | `frame_step` | `settings.face_model` | `analysis` (frames capped at 2000 in the project; review-only intervals) | +1, approval removed |
 | `segment` | none | `settings.segmentation_model`; optional `background` (file or `#RRGGBB`), `graphic`, `max_width` | `segmented` artifact and `segmentation` summary | +1, approval removed |
 | `storyboard` | none | a transcript with words | `story` (three hooks; scenes once a hook is selected), `storyboard` and `caption` JSON artifacts | +1, approval removed |
-| `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain | unchanged |
+| `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain, and `captions_ass` (the burned script) for animated caption styles | unchanged |
 | `final` | none | current human approval; selected hook and current storyboard if a story exists; an edit no longer than the platform's hard limit | `final` MP4 plus caption sidecars | unchanged |
 | `cover` | `time` | a current `final` (preferred) or `preview` | `cover` PNG | unchanged |
 | `qa` | none | a current `final` (preferred) or `preview` | `quality` JSON report, with platform checks for platform projects | unchanged |
@@ -47,6 +47,35 @@ For platform projects:
 - `final` is refused before a job is created when the kept ranges run longer than the profile's hard limit (Shorts 180 s, Reels 1,200 s, TikTok 3,600 s). `preview` still runs so the edit can be reviewed and trimmed.
 - `qa` adds `platform_frame`, `platform_duration`, `platform_fps`, `platform_upscale`, `platform_loudness` and `safe_zone`. A warning (for example a Reels edit over three minutes, a 25 fps Reels render or a 320×180 source enlarged to 1080×1920) makes `passed` false, as for other checks. `platform_fps` accepts NTSC 30000/1001 as 30 fps and, for variable-rate video, also checks the slowest frame interval (`min_instantaneous_fps`). `platform_upscale` compares the fitted picture with the source size of the render, which Studio passes as `source_video` in the QA settings; it is skipped when that is unknown. The `safe_zone` check recomputes the text boxes from the render geometry; it does not inspect glyph pixels.
 
+## Caption styles
+
+Burned captions (`settings.captions: true`) use `settings.caption_style`:
+
+| Style | What the viewer sees |
+|---|---|
+| `classic` (default) | Timed cues, unchanged from earlier versions |
+| `highlight` | The whole cue, with the spoken word in `caption_highlight_color` (default `#FFCC00`) |
+| `pop` | Words appear one by one with a short scale-in; the line layout is fixed from the first frame |
+| `one_word` | Only the spoken word, larger, at `caption_word_y` in the safe area (0 top, 1 bottom, default 0.8 so it sits below a talking head's face) |
+
+```python
+project = studio.update(project["id"], {"settings": {
+    "captions": True,
+    "caption_style": "highlight",
+    "caption_highlight_color": "#00E5FF",
+}}, project["revision"])
+```
+
+- Words come from the transcript, mapped to the edited timeline. Excluded words never appear, and a word split by a cut is shown once.
+- Each caption state is its own ASS event, snapped to the frame grid. At most two lines are shown, inside the platform safe zone (or the brand margin for `custom`). Lines are measured with the brand font when Pillow is installed.
+- `preview` and `final` publish the burned script as `captions_ass`. `qa` reads it and adds two checks:
+  - `caption_timing`: each word's first frame comes no earlier than its start and at most one frame interval later, and its last frame no more than one interval after its end.
+  - `caption_bounds`: every event box stays inside the safe zone.
+- In an update, `null` resets `caption_highlight_color` or `caption_word_y` to its default.
+- Long-form `youtube` projects get SRT/VTT sidecars, and burning captions in is opt-in:
+  - Deriving a YouTube version, or switching a project to `youtube`, turns burned captions off unless the same change turns them on.
+  - The Desktop form unticks **Burn timed captions** when YouTube is chosen.
+
 ## Platform versions (derived projects)
 
 `Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling project for another platform:
@@ -58,7 +87,7 @@ shorts = studio.derive(project["id"], "youtube_shorts", name="Talk – Shorts")
 
 | Copied | Not copied |
 |---|---|
-| Source path, fingerprint and probe; transcript; `base_segments`, `segments`, `excluded_word_ids`, `gaze_exclusions`; `story` and `selected_hook`; `brief`, `voice`; settings (brand, title, captions, normalisation, graphic, background, model paths, frame step, width) | Artifacts and lineage, approval, job history, vision `analysis`, `use_segmented` (rebuild the person layer for the sibling) |
+| Source path, fingerprint and probe; transcript; `base_segments`, `segments`, `excluded_word_ids`, `gaze_exclusions`; `story` and `selected_hook`; `brief`, `voice`; settings (brand, title, captions and caption style, normalisation, graphic, background, model paths, frame step, width; a `youtube` sibling starts with burned captions off) | Artifacts and lineage, approval, job history, vision `analysis`, `use_segmented` (rebuild the person layer for the sibling) |
 
 The sibling gets `settings.platform`, the profile's aspect, the profile's default `final_resolution` (`"1080"`; pass `final_resolution="2160"` to ask for 4K, a parent's 4K choice is not carried over; `custom` siblings get none), the stripped name, revision 1, status `draft` and `derived_from: {project_id, revision, digest}` naming the parent revision it was copied from. The source fingerprint is checked first. The parent is not modified. The sibling has its own digest, so the parent's approval never covers it. The same action is available as `cutroom_project` `derive(project_id, platform, name?, final_resolution?)`, as `POST /projects/{id}/derive` with `{"platform": ..., "name": ..., "final_resolution": ...}` (a missing source or asset file answers 422 naming the file), and as **Create version for …** buttons in Desktop. None of them approves anything. `GET /platforms` returns the profile data used by the Desktop selector and safe-zone overlay.
 
