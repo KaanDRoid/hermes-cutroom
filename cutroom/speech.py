@@ -7,6 +7,7 @@ import subprocess
 import unicodedata
 from pathlib import Path
 
+from .childenv import child_env
 from .media import PROCESS_TIMEOUT, _local_path, _number, _run
 
 
@@ -452,6 +453,7 @@ def transcribe(source, model_path, language=None):
         stdin=subprocess.DEVNULL,
         capture_output=True,
         check=True,
+        env=child_env(python=False),
         timeout=PROCESS_TIMEOUT,
         shell=False,
     )

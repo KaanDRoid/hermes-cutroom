@@ -10,6 +10,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from .childenv import child_env
+
 SPEECH_REVISION = "d90ca5fe260221311c53c58e660288d3deb8d356"
 GOOGLE = "https://storage.googleapis.com/mediapipe-models/"
 HF = f"https://huggingface.co/Systran/faster-whisper-tiny/resolve/{SPEECH_REVISION}/"
@@ -226,6 +228,7 @@ def _tool(name):
         completed = subprocess.run(
             [path, "-version"],
             stdin=subprocess.DEVNULL,
+            env=child_env(python=False),
             capture_output=True,
             text=True,
             timeout=10,

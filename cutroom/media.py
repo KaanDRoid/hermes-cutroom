@@ -8,6 +8,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+try:
+    from .childenv import child_env
+except ImportError:  # loaded as a standalone module file
+    from cutroom.childenv import child_env
+
 PROCESS_TIMEOUT = 300
 
 
@@ -51,6 +56,7 @@ def _run(arguments):
         check=True,
         timeout=PROCESS_TIMEOUT,
         shell=False,
+        env=child_env(python=False),
     )
 
 

@@ -23,6 +23,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
+try:
+    from .childenv import NETWORK, child_env
+except ImportError:  # loaded as a standalone module file
+    from cutroom.childenv import NETWORK, child_env
+
 MEDIA_HOSTS = frozenset(
     {
         "youtube.com",
@@ -671,6 +676,7 @@ def _run(argv, *, timeout=PROCESS_TIMEOUT):
             shell=False,
             check=True,
             timeout=timeout,
+            env=child_env(python=False, forward=NETWORK, prefixes=("RCLONE_",)),
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError("Integration command timed out") from None

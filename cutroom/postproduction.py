@@ -11,6 +11,11 @@ import tempfile
 from fractions import Fraction
 from pathlib import Path
 
+try:
+    from .childenv import child_env
+except ImportError:  # loaded as a standalone module file
+    from cutroom.childenv import child_env
+
 
 def _number(value, low=None, high=None):
     if (
@@ -143,6 +148,7 @@ def _run(args, *, cwd=None, timeout=300):
         shell=False,
         check=True,
         timeout=timeout,
+        env=child_env(python=False),
     )
 
 

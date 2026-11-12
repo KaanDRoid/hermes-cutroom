@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-from .hermes_plugin import draft, inspect, render_approved
+from .hermes_plugin import draft_plan, inspect, render_plan
 from .project import approve_plan, write_review
 
 
@@ -60,10 +60,10 @@ def main(argv=None):
         "doctor": _doctor,
         "setup-models": _setup_models,
         "inspect": inspect,
-        "draft": draft,
+        "draft": draft_plan,
         "review": write_review,
         "approve": approve_plan,
-        "render": render_approved,
+        "render": render_plan,
     }
     try:
         result = functions[command](**args)

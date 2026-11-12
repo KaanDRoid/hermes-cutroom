@@ -1,7 +1,10 @@
 """Documented Hermes tools. Importing this module does not run media jobs."""
 
 import json
+import os
+from pathlib import Path
 
+from .paths import inside, plans_root
 from .plan import build_plan
 from .project import file_digest, load_approved, save_draft, write_review
 
@@ -12,7 +15,47 @@ def inspect(source):
     return probe(source)
 
 
-def draft(source, project_dir, noise_db=-35.0, min_duration=0.5, padding=0.12):
+def _local_text(value, name):
+    if isinstance(value, os.PathLike):
+        value = os.fspath(value)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty name or workspace path")
+    # Refuse network paths before anything resolves (and so contacts) them.
+    if value[:2] in {"\\\\", "//", "\\/", "/\\"}:
+        raise PermissionError(
+            f"{name} must be a local path inside the Cutroom workspace"
+        )
+    return value
+
+
+def _project_dir(project_dir):
+    """A new plan directory, always inside the Cutroom workspace."""
+    project_dir = _local_text(project_dir, "project_dir")
+    base = plans_root()
+    target = Path(project_dir).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    target = inside(target, base)
+    if target == base:
+        raise PermissionError("Choose a new directory inside the Cutroom workspace")
+    base.mkdir(parents=True, exist_ok=True)
+    # Re-resolve after creating the base so a link planted meanwhile still fails.
+    return inside(target, base)
+
+
+def _workspace_plan(path):
+    path = _local_text(path, "plan path")
+    return inside(Path(path).expanduser().resolve(strict=True), plans_root())
+
+
+def draft_plan(
+    source, project_dir, noise_db=-35.0, min_duration=0.5, padding=0.12, guard=None
+):
+    """Core draft for the user-run CLI; agent tools use the confined ``draft``.
+
+    ``guard`` re-validates ``project_dir`` right before anything is written,
+    because silence analysis can take a while.
+    """
     from .media import _local_path, detect_silences, probe
 
     source = _local_path(source)
@@ -20,6 +63,8 @@ def draft(source, project_dir, noise_db=-35.0, min_duration=0.5, padding=0.12):
     info = probe(source)
     silences = detect_silences(source, noise_db=noise_db, min_duration=min_duration)
     plan = build_plan(source, info, silences, padding)
+    if guard is not None:
+        project_dir = guard(project_dir)
     path = save_draft(plan, project_dir, expected_source_sha256=source_digest)
     return dict(
         write_review(path),
@@ -29,9 +74,27 @@ def draft(source, project_dir, noise_db=-35.0, min_duration=0.5, padding=0.12):
     )
 
 
-def render_approved(plan_path):
-    from pathlib import Path
+def draft(source, project_dir, noise_db=-35.0, min_duration=0.5, padding=0.12):
+    return draft_plan(
+        source,
+        _project_dir(project_dir),
+        noise_db,
+        min_duration,
+        padding,
+        guard=_project_dir,
+    )
 
+
+def review(path):
+    return write_review(_workspace_plan(path))
+
+
+def render_approved(plan_path):
+    return render_plan(_workspace_plan(plan_path))
+
+
+def render_plan(plan_path):
+    """Core render for the user-run CLI; agent tools use ``render_approved``."""
     from .media import render
 
     plan_path = Path(plan_path).expanduser().resolve(strict=True)
@@ -69,13 +132,14 @@ def register(ctx):
         ),
         (
             "cutroom_draft",
-            "Analyze local audio silence and save a non-destructive plan plus HTML review. Does not render. This does not identify words, fillers or gaze.",
+            "Analyze local audio silence and save a non-destructive plan plus HTML review inside the Cutroom workspace. Does not render. This does not identify words, fillers or gaze.",
             draft,
             {
                 "source": {"type": "string"},
                 "project_dir": {
                     "type": "string",
-                    "description": "New local project directory; must not exist",
+                    "description": "New project name (or path) inside the Cutroom "
+                    "workspace; must not exist. Paths outside it are refused.",
                 },
                 "noise_db": {"type": "number", "default": -35},
                 "min_duration": {"type": "number", "default": 0.5, "minimum": 0.05},
@@ -86,15 +150,25 @@ def register(ctx):
         (
             "cutroom_review",
             "Regenerate review HTML and digest after manual plan edits. Show the review to the user; never approve on their behalf.",
-            write_review,
-            {"path": {"type": "string", "description": "Local plan.json path"}},
+            review,
+            {
+                "path": {
+                    "type": "string",
+                    "description": "plan.json path inside the Cutroom workspace",
+                }
+            },
             ["path"],
         ),
         (
             "cutroom_render",
             "Render an already approved exact plan to project/render.mp4. Rejects changed source/plan and existing output. Never create approval receipts on the user behalf.",
             render_approved,
-            {"plan_path": {"type": "string"}},
+            {
+                "plan_path": {
+                    "type": "string",
+                    "description": "Approved plan.json inside the Cutroom workspace",
+                }
+            },
             ["plan_path"],
         ),
     ]

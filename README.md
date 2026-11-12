@@ -84,11 +84,13 @@ For local development, link this directory as `<active-HERMES_HOME>/plugins/cutr
 | Tool | Behavior |
 | --- | --- |
 | `cutroom_inspect` | Read media dimensions, duration and audio availability |
-| `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review |
-| `cutroom_review` | Regenerate review and digest after plan edits |
-| `cutroom_render` | Render the approved plan; reject stale approval and existing output |
+| `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review in a new directory inside the Cutroom workspace |
+| `cutroom_review` | Regenerate review and digest after plan edits; refuses plans outside the workspace and any `review.html` Cutroom did not write |
+| `cutroom_render` | Render an approved plan inside the workspace; reject stale approval and existing output |
 | `cutroom_project` | Create, list, read, update and review Studio projects (no approval) |
 | `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs |
+
+Agent tools write only inside the Cutroom workspace (`CUTROOM_WORKSPACE`, otherwise Hermes' plugin data directory for `cutroom`); the legacy plan tools use its `plans/` subdirectory. The user-run `python -m cutroom` CLI keeps writing where you point it.
 
 There is deliberately **no approval tool**. Show the draft to the user and let them confirm locally. Receipts are an accidental-stale-render guard, **not** an authenticated approval mechanism: another program with filesystem access can write receipts. Do not describe them as a security sandbox.
 
@@ -104,7 +106,9 @@ There is deliberately **no approval tool**. Show the draft to the user and let t
 
 ## Data and permissions
 
-The plugin reads the video path explicitly supplied, launches local FFmpeg/ffprobe subprocesses, and writes only the requested new project and its render artifacts. It does not send media anywhere, read credential stores, update itself, alter Hermes core, or attach global hooks. FFmpeg is an external executable the user supplies. A malicious media file can exploit a vulnerable decoder: use a maintained FFmpeg build and only process trusted files. Local protocols are restricted; this is defense in depth, not an OS sandbox.
+The plugin reads the video path explicitly supplied, launches local FFmpeg/ffprobe subprocesses, and writes only inside its workspace (agent tools) or the directory you pass to the CLI.
+
+Child processes receive a minimal allowlisted environment (executable lookup, home/temp directories, locale, fonts and `CUTROOM_*` settings); provider API keys and other tokens in the Hermes process are not forwarded. Consented rclone/yt-dlp commands additionally receive `RCLONE_*`, proxy and CA-bundle variables. Native-model workers run under `CUTROOM_PYTHON` if you set it, otherwise the plugin's bundled `.venv`, otherwise Hermes' interpreter; projects, the Desktop page and agent tools cannot choose an executable. It does not send media anywhere, read credential stores, update itself, alter Hermes core, or attach global hooks. FFmpeg is an external executable the user supplies. A malicious media file can exploit a vulnerable decoder: use a maintained FFmpeg build and only process trusted files. Local protocols are restricted; this is defense in depth, not an OS sandbox.
 
 ## Current boundaries
 

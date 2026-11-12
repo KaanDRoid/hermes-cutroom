@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import os
 import subprocess
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from cutroom.hermes_plugin import register
 from cutroom.project import approve_plan
@@ -61,6 +63,9 @@ class WorkflowTests(unittest.TestCase):
             timeout=30,
         )
         original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        workspace = patch.dict(os.environ, {"CUTROOM_WORKSPACE": str(root / "studio")})
+        workspace.start()
+        self.addCleanup(workspace.stop)
         ctx = ToolContext()
         register(ctx)
 
@@ -72,10 +77,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertAlmostEqual(metadata["result"]["duration"], 6, delta=0.1)
         created = call(
             "cutroom_draft",
-            {"source": str(source), "project_dir": str(root / "project")},
+            {"source": str(source), "project_dir": "project"},
         )
         self.assertTrue(created["ok"], created)
         draft = created["result"]
+        self.assertEqual(
+            Path(draft["plan"]).parent,
+            (root / "studio" / "plans" / "project").resolve(),
+        )
         self.assertEqual(len(draft["segments"]), 2)
         self.assertAlmostEqual(draft["output_duration"], 4.24, delta=0.1)
         blocked = call("cutroom_render", {"plan_path": draft["plan"]})
