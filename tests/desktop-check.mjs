@@ -540,3 +540,41 @@ test('uses only public SDK/React imports and no renderer or polling bypasses', a
   assert.doesNotMatch(source, /window\.|hermesDesktop|__HERMES|\beval\(|new Function|\bsetInterval\(|\bsetTimeout\(|\bfetch\(|document\./);
   assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b|rgb\(/);
 });
+
+
+test('selects reframing and adds a program-time pin from playback with a horizontal slider', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:framing'; URL.revokeObjectURL = () => {};
+  try {
+    jobRows = [];
+    const ui = await studio(async (path, options) => {
+      if (path.includes('/media/')) return { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' };
+      if (options?.method === 'PATCH') selectedProject = { ...selectedProject, ...options.body.changes, revision: selectedProject.revision + 1 };
+      return selectedProject;
+    }, { settings: { framing: 'fit', brand: {} }, segments: [{ start: 2, end: 10 }], artifacts: { preview: 'preview.mp4' } });
+    let tree = ui.draw();
+    const group = nodes(tree).find(n => n.props?.['aria-label'] === 'Framing mode');
+    assert.ok(group);
+    assert.equal(nodes(group).filter(n => n.type === 'Button').length, 4);
+    button(group, 'Face track').props.onClick();
+    await button(ui.draw(), 'Save settings').props.onClick();
+    assert.equal(ui.calls.find(c => c.options?.body?.changes?.settings).options.body.changes.settings.framing, 'face_track');
+    await button(ui.draw(), 'Load preview').props.onClick();
+    ui.draw(); tree = ui.draw();
+    const video = nodes(tree).find(n => n.type === 'video');
+    video.props.onTimeUpdate({ currentTarget: { currentTime: 2.5 } });
+    tree = ui.draw();
+    const slider = nodes(tree).find(n => n.props?.name === 'framing.x');
+    assert.ok(slider); assert.equal(slider.props.type, 'range');
+    slider.props.onChange({ target: { value: '0.35' } });
+    await button(ui.draw(), 'Add framing keyframe').props.onClick();
+    const saves = ui.calls.filter(c => c.options?.body?.changes?.settings?.framing_keyframes);
+    assert.deepEqual(saves.at(-1).options.body.changes.settings.framing_keyframes, [{ time: 2.5, x: 0.35 }]);
+    assert.match(source, /`framing-mode:\$\{value\}`/);
+    assert.match(source, /`framing-key:\$\{key.time\}`/);
+    tree = ui.draw();
+    assert.match(text(tree), /program time/i);
+    await button(tree, 'Remove framing keyframe').props.onClick();
+    assert.deepEqual(ui.calls.at(-2).options.body.changes.settings.framing_keyframes, []);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});

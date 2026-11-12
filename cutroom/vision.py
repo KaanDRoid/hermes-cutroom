@@ -399,6 +399,8 @@ def _composite(frame, alpha, background=None, graphic=None):
 def _face_metrics(points, width, height):
     """Measure iris/head symmetry and mouth opening in pixel coordinates."""
     unknown = {
+        "box": None,
+        "eye_y": None,
         "gaze_score": None,
         "mouth_open": None,
         "acceptable": None,
@@ -433,6 +435,13 @@ def _face_metrics(points, width, height):
     ) / 2
     score = max(0.0, min(1.0, 1 - 2 * head_offset - 2 * iris_offset))
     return {
+        "box": [
+            min(p.x for p in points),
+            min(p.y for p in points),
+            max(p.x for p in points),
+            max(p.y for p in points),
+        ],
+        "eye_y": center[1] / height,
         "gaze_score": score,
         "mouth_open": mouth_open,
         "acceptable": score >= 0.55,
