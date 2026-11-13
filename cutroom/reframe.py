@@ -528,6 +528,11 @@ def validate_report(report):
         for value in values:
             number(value, high=100000)
     number(report.get("fps"), low=0.001, high=1000)
+    output = report.get("output_frames")
+    if output is not None and (
+        type(output) is not int or not 1 <= output <= MAX_FRAMES
+    ):
+        raise ValueError("Invalid output frame count")
     for key in ("resets", "face_frames"):
         if not isinstance(report.get(key), list) or len(report[key]) > MAX_FRAMES:
             raise ValueError("Invalid framing evidence")
@@ -571,12 +576,19 @@ def quality_checks(add, report, decoded_frames, report_upscale=True):
     validate_report(report)
     count = report["frames"]
     actual = decoded_frames
+    # Time-placed video (frames not evenly spaced) repeats a cropped frame
+    # across lost source frames, so the output can hold more frames than the
+    # planned crop path; the report records how many the render wrote.
+    expected = report.get("output_frames", count)
+    detail = {"planned": count, "decoded": actual}
+    if expected != count:
+        detail["expected_output"] = expected
     add(
         "framing_frames",
         "pass"
-        if actual == count and len(report["x"]) == len(report["y"]) == count
+        if actual == expected and len(report["x"]) == len(report["y"]) == count
         else "fail",
-        {"planned": count, "decoded": actual},
+        detail,
     )
     resets = set(report["resets"])
     maximum = [0.0, 0.0]
@@ -672,7 +684,7 @@ def quality_checks(add, report, decoded_frames, report_upscale=True):
         )
 
 
-def prepare_path(source, info, ranges, settings, width, height):
+def prepare_path(source, info, ranges, settings, width, height, frame_ranges=None):
     """Map decoded source PTS to the exact kept frames; expressions use joined n."""
     import json
 
@@ -730,8 +742,12 @@ def prepare_path(source, info, ranges, settings, width, height):
     sample_interval = gaps[len(gaps) // 2] if gaps else 1 / fps
     source_cuts = analysis["scene_cuts"] or []
     half = 0.5 / fps
-    for start, end in ranges:
-        indices = [t for t in timestamps if start <= t < end]
+    for k, (start, end) in enumerate(ranges):
+        if frame_ranges is not None:
+            first, count = frame_ranges[k]
+            indices = timestamps[first : first + count]
+        else:
+            indices = [t for t in timestamps if start <= t < end]
         if not indices:
             continue
         resets.append(len(selected))
