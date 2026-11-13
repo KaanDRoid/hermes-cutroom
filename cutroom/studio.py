@@ -312,11 +312,9 @@ class Studio:
 
                 validate_framing(merged.get("framing", "fit"))
                 if "framing_keyframes" in merged:
+                    # Shape only here; program length is checked after the edit.
                     merged["framing_keyframes"] = validate_keyframes(
-                        merged["framing_keyframes"],
-                        duration=sum(
-                            s["end"] - s["start"] for s in updated["segments"]
-                        ),
+                        merged["framing_keyframes"]
                     )
                 updated["settings"] = merged
             if "transcript" in changes:
@@ -357,19 +355,33 @@ class Studio:
                 )
             ):
                 self._rebuild_segments(updated)
-            if "framing_keyframes" in updated["settings"]:
+            notes = []
+            if updated["settings"].get("framing_keyframes"):
                 from .reframe import validate_keyframes
 
-                validate_keyframes(
-                    updated["settings"]["framing_keyframes"],
-                    duration=sum(s["end"] - s["start"] for s in updated["segments"]),
-                )
+                program = sum(s["end"] - s["start"] for s in updated["segments"])
+                pins = updated["settings"]["framing_keyframes"]
+                if "framing_keyframes" in (changes.get("settings") or {}):
+                    # Pins supplied now must fit the edit; the error names the pin.
+                    validate_keyframes(pins, duration=program)
+                else:
+                    # An edit that got shorter drops the pins it no longer reaches.
+                    late = [pin for pin in pins if pin["time"] > program]
+                    if late:
+                        updated["settings"]["framing_keyframes"] = [
+                            pin for pin in pins if pin["time"] <= program
+                        ]
+                        notes.append(
+                            "Dropped framing keyframes past the new "
+                            f"{program:g} s program end at "
+                            + ", ".join(f"{pin['time']:g} s" for pin in late)
+                        )
             updated["revision"] += 1
             updated["status"] = "draft"
             updated.pop("approval", None)
             self._prune_artifacts(updated)
             self._write(updated)
-            return updated
+            return {**updated, "notes": notes} if notes else updated
 
     @staticmethod
     def platform(project):

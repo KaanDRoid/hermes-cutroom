@@ -182,12 +182,31 @@ def _quarter_turn(video):
         return False
 
 
+def _sample_aspect(video):
+    """Sample (pixel) aspect ratio of a stream; 1 when absent or invalid."""
+    try:
+        numerator, denominator = str(video.get("sample_aspect_ratio") or "1:1").split(
+            ":"
+        )
+        sar = float(numerator) / float(denominator)
+    except (ValueError, ZeroDivisionError):
+        return 1.0
+    return sar if math.isfinite(sar) and sar > 0 else 1.0
+
+
 def _source_video(info):
-    """Source pixel grid in display orientation, for upscaling checks."""
+    """Source grid in display orientation and square display pixels.
+
+    Anamorphic storage widths are scaled by the sample aspect ratio (to an even
+    width), so crops and upscaling checks work on what the viewer sees.
+    """
     video = next(
         (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
     )
     width, height = info["width"], info["height"]
+    sar = _sample_aspect(video)
+    if abs(sar - 1) > 1e-6:
+        width = max(2, round(width * sar / 2) * 2)
     if _quarter_turn(video):
         width, height = height, width
     return dict(
@@ -774,6 +793,28 @@ def _measure_loudness(source, audio_graph, directory, settings):
     return values
 
 
+def _timeline(info):
+    """(format start, video offset) in seconds.
+
+    FFmpeg's filter graph timeline starts at the container's earliest stream
+    start, so segment times, trim edges and planned crop frames all use that
+    timeline; the video's first frame sits `video offset` seconds into it.
+    """
+    starts, video = [], None
+    for stream in info.get("streams", []):
+        try:
+            value = float(stream.get("start_time"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        starts.append(value)
+        if video is None and stream.get("codec_type") == "video":
+            video = value
+    base = min(starts) if starts else 0.0
+    return base, max(0.0, (base if video is None else video) - base)
+
+
 def _frame_aligned(ranges, rate, source_duration, start_time=None):
     """Snap kept ranges to whole source frames without cumulative drift.
 
@@ -782,7 +823,9 @@ def _frame_aligned(ranges, rate, source_duration, start_time=None):
     counts follow the rounded running total, keeping the output within half a
     frame of the requested duration. Boundaries sit halfway between frame
     timestamps so small container jitter cannot change which frames are kept.
-    Ranges shorter than one frame at their position are dropped.
+    Ranges shorter than one frame at their position are dropped. Times are in
+    FFmpeg's filter timeline (see `_timeline`); `start_time` is the video's
+    offset into it, not the container's absolute start.
     """
     numerator, _, denominator = rate.partition("/")
     fps = Fraction(int(numerator), int(denominator or 1))
@@ -842,9 +885,7 @@ def export_video(source, segments, output, settings=None, captions=None):
         rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0"
     )
     if constant_rate:
-        ranges = _frame_aligned(
-            ranges, rate, info["duration"], video_stream.get("start_time")
-        )
+        ranges = _frame_aligned(ranges, rate, info["duration"], _timeline(info)[1])
         if not ranges:
             raise ValueError("Segments are shorter than one video frame")
     # Loudness processing can extend the tail; never let audio outlast the cut.
@@ -913,7 +954,12 @@ def export_video(source, segments, output, settings=None, captions=None):
             )
             framing_report["expression_pieces"] = [xp, yp]
             crop_w, crop_h = framing_report["crop"]
-            filters = [
+            display_w, display_h = framing_report["source"]
+            square = abs(_sample_aspect(video_stream) - 1) <= 1e-6
+            # Anamorphic sources are first resampled to square display pixels.
+            filters = (
+                [] if square else [f"scale={display_w}:{display_h}", "setsar=1"]
+            ) + [
                 f"crop={crop_w}:{crop_h}:x='{xexpr}':y='{yexpr}'",
                 f"scale={width}:{height}",
                 "setsar=1",
