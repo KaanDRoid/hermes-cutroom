@@ -168,7 +168,14 @@ class Studio:
         payload = {
             key: value
             for key, value in project.items()
-            if key not in {"artifacts", "artifact_lineage", "approval", "status"}
+            if key
+            not in {
+                "artifacts",
+                "artifact_lineage",
+                "approval",
+                "status",
+                "clip_candidates",
+            }
         }
         assets = {}
         settings = project["settings"]
@@ -531,7 +538,205 @@ class Studio:
         ):
             if key in parent:
                 child[key] = copy.deepcopy(parent[key])
+        span = self._source_range(parent)
+        if span:
+            child["derived_from"]["range"] = copy.deepcopy(span)
         return child
+
+    def find_clips(self, project_id, min_s=None, max_s=None, count=None, platform=None):
+        """Persist suggestions without changing the reviewed edit or revision."""
+        from .clips import _bounds, find_candidates
+
+        _bounds(min_s, max_s, count, platform)
+        project = self.get(project_id)
+        words = (project.get("transcript") or {}).get("words") or []
+        if not words:
+            raise ValueError("Transcribe first: finding clips needs timed words")
+        self._check_source(project)
+        fingerprint = self._transcript_fingerprint(project)
+        result = find_candidates(
+            words,
+            project["source_info"]["duration"],
+            min_s=min_s,
+            max_s=max_s,
+            count=count,
+            platform=platform,
+            energy=self._clip_energy(project),
+            faces=(project.get("analysis") or {}).get("face_samples"),
+        )
+        result["transcript_sha256"] = fingerprint
+        with self._lock():
+            current = self.get(project_id)
+            if self._transcript_fingerprint(current) != fingerprint:
+                raise ValueError("Transcript changed while finding clips; try again")
+            self._check_source(current)
+            current["clip_candidates"] = result
+            self._write(current)
+        return result
+
+    @staticmethod
+    def _transcript_fingerprint(project):
+        return hashlib.sha256(
+            json.dumps(
+                (project.get("transcript") or {}).get("words") or [],
+                sort_keys=True,
+                allow_nan=False,
+            ).encode()
+        ).hexdigest()
+
+    def _clip_energy(self, project):
+        from .clips import energy_profile
+
+        if not project["source_info"].get("has_audio"):
+            return None
+        try:
+            return energy_profile(project["source"], project["source_info"]["duration"])
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return None
+
+    def create_clip(
+        self,
+        project_id,
+        platform,
+        candidate_id=None,
+        start=None,
+        end=None,
+        name=None,
+        final_resolution=None,
+    ):
+        """Make a sentence-bounded source range its own unapproved project."""
+        from .clips import snap_range, validate_pick
+        from .platforms import FINAL_RESOLUTIONS, profile
+
+        entry = profile(platform)
+        validate_pick(candidate_id, start, end)
+        if name is not None:
+            if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200:
+                raise ValueError("Name must contain 1 to 200 characters")
+            name = name.strip()
+        if final_resolution is not None and (
+            final_resolution not in FINAL_RESOLUTIONS or entry["frame"] is None
+        ):
+            raise ValueError("final_resolution must be '1080' or '2160' for a platform")
+        project = self.get(project_id)
+        self._check_source(project)
+        words = (project.get("transcript") or {}).get("words") or []
+        if not words:
+            raise ValueError("Transcribe first: making a clip needs timed words")
+        if candidate_id is not None:
+            stored = project.get("clip_candidates") or {}
+            match = next(
+                (c for c in stored.get("candidates", []) if c["id"] == candidate_id),
+                None,
+            )
+            if match is None or stored.get(
+                "transcript_sha256"
+            ) != self._transcript_fingerprint(project):
+                raise ValueError(
+                    "This candidate is no longer available; Find clips again"
+                )
+            span = {"start": match["start"], "end": match["end"]}
+        else:
+            snapped = snap_range(
+                words,
+                project["source_info"]["duration"],
+                start,
+                end,
+                energy=self._clip_energy(project),
+            )
+            span = {"start": snapped["start"], "end": snapped["end"]}
+        outer = self._source_range(project)
+        if outer:
+            # Snapping adds quiet padding. A nested clip must not restore
+            # padding outside the range of the clip it was picked from.
+            span = {
+                "start": max(span["start"], outer["start"]),
+                "end": min(span["end"], outer["end"]),
+            }
+            if span["end"] - span["start"] < 20:
+                raise ValueError(
+                    "Keep at least 20 s inside the parent clip's source range"
+                )
+        limit = (entry["max_duration_s"] or {}).get("value")
+        length = span["end"] - span["start"]
+        if limit is not None and length > limit:
+            raise ValueError(
+                f"This clip runs {length:.1f} s; {entry['label']} allows at most {limit} s"
+            )
+        if name is None:
+            name = f"{project['name']} · clip {span['start']:g}–{span['end']:g} s ({entry['short_label']})"[
+                :200
+            ]
+        with self._lock():
+            parent = self.get(project_id)
+            self._check_source(parent)
+            if self._transcript_fingerprint(parent) != self._transcript_fingerprint(
+                project
+            ):
+                raise ValueError("Transcript changed; Find clips again")
+            child = self._derived_project(
+                parent, platform, entry, name, final_resolution
+            )
+            child["derived_from"]["range"] = span
+            if candidate_id is not None:
+                child["derived_from"]["candidate_id"] = candidate_id
+            self._limit_to_range(child)
+            self._directory(child["id"]).mkdir(parents=True, exist_ok=False)
+            self._write(child)
+            return child
+
+    @staticmethod
+    def _source_range(project):
+        return (project.get("derived_from") or {}).get("range")
+
+    def _range_transcript(self, project, transcript):
+        from .speech import filler_suggestions
+
+        span = self._source_range(project)
+        if not span:
+            return copy.deepcopy(transcript)
+        words = [
+            copy.deepcopy(w)
+            for w in transcript["words"]
+            if span["start"] <= (w["start"] + w["end"]) / 2 <= span["end"]
+        ]
+        return {
+            **transcript,
+            "words": words,
+            "text": " ".join(w["text"] for w in words),
+            "fillers": filler_suggestions(words, transcript["language"] or ""),
+        }
+
+    def _limit_to_range(self, project):
+        """A clip keeps source timestamps; existing render/caption mapping applies."""
+        span = self._source_range(project)
+        project["base_segments"] = self._intersect_range(project["base_segments"], span)
+        if not project["base_segments"]:
+            raise ValueError("The edit removes all of this clip's source range")
+        project["transcript"] = self._range_transcript(project, project["transcript"])
+        kept = {w["id"] for w in project["transcript"]["words"]}
+        project["excluded_word_ids"] = [
+            i for i in project["excluded_word_ids"] if i in kept
+        ]
+        project["gaze_exclusions"] = self._intersect_range(
+            project["gaze_exclusions"], span
+        )
+        project["story"] = None
+        project.pop("selected_hook", None)
+        project["settings"].pop("framing_keyframes", None)
+        self._rebuild_segments(project)
+
+    @staticmethod
+    def _intersect_range(segments, span):
+        return [
+            {
+                **s,
+                "start": max(s["start"], span["start"]),
+                "end": min(s["end"], span["end"]),
+            }
+            for s in segments
+            if max(s["start"], span["start"]) < min(s["end"], span["end"])
+        ]
 
     def _platform_problem(self, project):
         """Why the current edit cannot be exported for its platform, if at all."""
@@ -633,6 +838,8 @@ class Studio:
         from .speech import filler_suggestions, validate_transcript
 
         validate_transcript(transcript, project["source_info"]["duration"])
+        transcript = self._range_transcript(project, transcript)
+        project.pop("clip_candidates", None)
         cleared_ids = list(project["excluded_word_ids"])
         if cleared_ids:
             project["base_segments"] = self._word_selected_segments(project)
@@ -701,6 +908,16 @@ class Studio:
                     if end < segment["end"]:
                         remainder.append({"start": end, "end": segment["end"]})
             segments = remainder
+        span = self._source_range(project)
+        if span:
+            segments = self._intersect_range(segments, span)
+            project["base_segments"] = self._intersect_range(
+                project["base_segments"], span
+            )
+            if not segments:
+                raise ValueError(
+                    "An edit must keep an interval inside this clip's source range"
+                )
         if not segments:
             raise ValueError("An edit must keep at least one source interval")
         limit = (project["settings"].get("pacing") or {}).get("max_pause")

@@ -1446,6 +1446,137 @@ test('poster frames come from the poster route for home cards, the player and ca
   assert.ok(nodes(tree).some(n => n.type === 'img' && n.props.src === posterData.data_url), 'Home thumbnail');
 }));
 
+const longTalk = (extra = {}) => ({ ...transcriptProject(), source_info: { duration: 1063 }, base_segments: [{ start: 0, end: 1063 }], segments: [{ start: 0, end: 1063 }], ...extra });
+const clipCandidates = { settings: { min_s: 20, max_s: 60, count: 8, platform: 'youtube_shorts' }, mode: 'punctuation', energy: true, candidates: [
+  { id: 'clip-12000-48000', rank: 1, start: 12, end: 48, duration: 36, score: 77, hook: 'Why do cities flood?', text: 'Why do cities flood? Water runs downhill.', reasons: [{ text: 'Opens with a question', points: 12 }, { text: 'Starts mid-thought: "And"', points: -15 }] },
+  { id: 'clip-600000-655000', rank: 2, start: 600, end: 655, duration: 55, score: 61, hook: 'Here is the truth.', text: 'Here is the truth.', reasons: [{ text: 'Steady speaking pace', points: 6 }] },
+] };
+
+test('long videos offer Find clips; candidates show poster, range, score and reasons, and Make clip opens the new project', async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,CCCC', time: 12 };
+  const ui = await studio(async (path, options) => {
+    if (path.endsWith('/find-clips')) { selectedProject = { ...selectedProject, clip_candidates: clipCandidates }; return clipCandidates; }
+    if (path.endsWith('/clips')) return { ...selectedProject, id: 'clip-child', revision: 1, derived_from: { project_id: 'p1', revision: 7, range: { start: 12, end: 48 } } };
+    return selectedProject;
+  }, longTalk());
+  let tree = ui.draw();
+  const finder = role(tree, 'region', 'Find clips');
+  assert.ok(finder, 'A labelled Find clips area on the Edit step');
+  assert.match(text(finder), /sentence/i, 'Says clips start and end on whole sentences');
+  await button(finder, 'Find clips').props.onClick();
+  const call = ui.calls.find(c => c.path === '/projects/p1/find-clips');
+  assert.deepEqual(call.options, { method: 'POST', body: { platform: 'youtube_shorts' }, timeoutMs: 180000 });
+  assert.ok(invalidations.length >= 1);
+  tree = ui.draw();
+  const list = role(tree, 'list', 'Clip candidates');
+  assert.ok(list, 'Candidates are a list');
+  const items = nodes(list).filter(n => n.props?.role === 'listitem');
+  assert.equal(items.length, 2);
+  assert.match(text(items[0]), /0:12–0:48/);
+  assert.match(text(items[0]), /36 s/);
+  assert.match(text(items[0]), /77/);
+  assert.match(text(items[0]), /Opens with a question/);
+  assert.match(text(items[0]), /Starts mid-thought/);
+  assert.match(text(items[0]), /Why do cities flood\?/);
+  assert.ok(nodes(items[0]).some(n => n.type === 'img' && n.props.src === posterData.data_url && n.props.alt === ''), 'Poster frame of the clip');
+  const poster = queries.find(q => q.queryKey.includes('poster') && q.queryKey.includes(12 / 1063));
+  assert.ok(poster, 'Poster of the clip start');
+  await poster.queryFn();
+  assert.ok(ui.calls.some(c => c.path === `/projects/p1/poster?at=${12 / 1063}`), 'Poster route with at=');
+  const play = nodes(items[0]).find(n => n.type === 'Button' && n.props['aria-label'] === 'Play clip 1, 0:12 to 0:48');
+  assert.ok(play, 'An accessible Play button');
+  play.props.onClick();
+  // Platform for the new clip, then Make clip.
+  const platform = nodes(tree).find(n => n.type === 'select' && n.props.name === 'clip.platform');
+  assert.ok(platform, 'A platform choice');
+  assert.equal(platform.props.value, 'youtube_shorts');
+  platform.props.onChange({ target: { value: 'instagram_reels' } });
+  tree = ui.draw();
+  const make = nodes(role(tree, 'list', 'Clip candidates')).find(n => n.type === 'Button' && text(n).includes('Make clip'));
+  await make.props.onClick();
+  assert.deepEqual(ui.calls.find(c => c.path === '/projects/p1/clips').options, { method: 'POST', body: { candidate_id: 'clip-12000-48000', platform: 'instagram_reels' } });
+  assert.equal(ui.stored.at(-1)[1], 'clip-child', 'Opens the new clip project');
+  assert.ok(!ui.calls.some(c => c.path.endsWith('/approve')), 'Making a clip never approves');
+  posterData = null;
+});
+
+test('short videos and clip projects do not offer Find clips; a clip says which part it uses', async () => {
+  jobRows = [];
+  let ui = await studio(async () => selectedProject, transcriptProject());
+  assert.equal(role(ui.draw(), 'region', 'Find clips'), undefined);
+  ui = await studio(async () => selectedProject, longTalk({ derived_from: { project_id: 'p0', revision: 2, range: { start: 12, end: 48 } } }));
+  const tree = ui.draw();
+  assert.equal(role(tree, 'region', 'Find clips'), undefined);
+  assert.match(text(tree), /Clip of 0:12–0:48 from the original/);
+  // Home cards show a clip's own first frame.
+  hookStores.clear(); queries.length = 0;
+  projectRows = [{ id: 'c1', name: 'Clip', revision: 1, settings: {}, artifacts: {}, source_info: { duration: 1063 }, derived_from: { project_id: 'p0', range: { start: 106.3, end: 140 } } }];
+  const entries = [];
+  (await load()).default.register({ register: x => entries.push(x), storage: { get: (key, fallback) => fallback, set() {} }, rest: async () => null });
+  draw(entries.find(x => x.area === sdk.ROUTES_AREA));
+  assert.ok(queries.some(q => q.queryKey.includes('poster') && q.queryKey.some(v => typeof v === 'number' && Math.abs(v - 0.1) < 1e-8)), 'Clip card poster at its range start');
+});
+
+test('Play loads the original, seeks on metadata, ignores kept cuts and stops at the candidate end', async () => withBlobs(async () => {
+  jobRows = [];
+  const ui = await studio(async path => path.includes('/media/') ? chunk(path) : selectedProject,
+    longTalk({ clip_candidates: clipCandidates, segments: [{ start: 0, end: 10 }, { start: 100, end: 1063 }] }));
+  const play = () => nodes(role(ui.draw(), 'list', 'Clip candidates')).find(n => n.type === 'Button' && n.props['aria-label']?.startsWith('Play clip 1,'));
+  await play().props.onClick(); await tick();
+  const tree = ui.draw();
+  const video = nodes(tree).find(n => n.type === 'video');
+  const fake = { currentTime: 0, duration: 1063, paused: true, play() { this.paused = false; return Promise.resolve(); }, pause() { this.paused = true; } };
+  video.props.ref.current = fake;
+  video.props.onLoadedMetadata({ currentTarget: fake });
+  assert.equal(fake.currentTime, 12);
+  assert.equal(fake.paused, false);
+  fake.currentTime = 20;
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: fake });
+  assert.equal(fake.currentTime, 20, 'Candidate playback is source-range playback, not the edited program');
+  fake.currentTime = 48.1;
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: fake });
+  assert.equal(fake.paused, true);
+  await play().props.onClick();
+  assert.equal(fake.currentTime, 12, 'An already loaded original seeks immediately');
+  assert.equal(fake.paused, false);
+}));
+
+test('clip finder keeps empty and error states visible and never opens a failed clip', async () => {
+  jobRows = [];
+  let fail = false;
+  const ui = await studio(async path => {
+    if (path.endsWith('/find-clips')) return { candidates: [] };
+    if (path.endsWith('/clips')) throw new Error('This candidate is no longer available; Find clips again');
+    if (fail) throw new Error('Transcribe first');
+    return selectedProject;
+  }, longTalk({ clip_candidates: clipCandidates }));
+  const make = nodes(role(ui.draw(), 'list', 'Clip candidates')).find(n => n.type === 'Button' && text(n) === 'Make clip');
+  await make.props.onClick();
+  assert.match(text(ui.draw()), /no longer available/);
+  assert.equal(ui.stored.length, 0);
+  await button(role(ui.draw(), 'region', 'Find clips'), 'Find clips').props.onClick();
+  assert.match(text(ui.draw()), /No whole-sentence clips/);
+  assert.equal(role(ui.draw(), 'list', 'Clip candidates'), undefined);
+  fail = true;
+  selectedProject = { ...selectedProject, clip_candidates: clipCandidates, transcript: { ...selectedProject.transcript, words: [{ id: 0, text: 'New.', start: 1, end: 2 }] } };
+  assert.equal(role(ui.draw(), 'list', 'Clip candidates')?.props.children.length, 2, 'A different transcript does not reuse the local empty result');
+});
+
+test('finding clips flushes autosave first and blocks on a save conflict', async () => {
+  jobRows = [];
+  const ui = await studio(async (path, options) => {
+    if (options?.method === 'PATCH') throw new Error('Revision changed; reload first');
+    if (path.endsWith('/find-clips')) return clipCandidates;
+    return selectedProject;
+  }, longTalk());
+  type(field(ui.draw(), 'project.name'), 'Unsaved talk');
+  await button(role(ui.draw(), 'region', 'Find clips'), 'Find clips').props.onClick();
+  assert.equal(ui.patches().length, 1);
+  assert.ok(!ui.calls.some(c => c.path.endsWith('/find-clips')));
+  assert.match(text(ui.draw()), /saved|Revision changed/);
+});
+
 test('uses only public SDK/React imports and no renderer or polling bypasses', async () => {
   await load();
   assert.ok(imports.length > 0);
