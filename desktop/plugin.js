@@ -344,13 +344,21 @@ function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }
     el('section', { 'aria-labelledby': 'cutroom-recent', style: stack, children: [
       el('h2', { id: 'cutroom-recent', style: h2s, children: 'Recent projects' }),
       loading ? jsx(GlyphSpinner, {}) : null,
-      sorted.length ? el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }, children: sorted.map(item => el(Button, { variant: 'ghost', onClick: () => choose(item.id), style: { ...panel, gap: 4, padding: 12, height: 'auto', alignItems: 'flex-start', textAlign: 'left', whiteSpace: 'normal' }, children: [
+      sorted.length ? el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }, children: sorted.map(item => el(Button, { variant: 'ghost', onClick: () => choose(item.id), style: { ...panel, gap: 6, padding: 8, height: 'auto', alignItems: 'stretch', textAlign: 'left', whiteSpace: 'normal' }, children: [
+        jsx(Thumb, { ctx, scope, id: item.id }),
         el('strong', { children: item.name }),
         el('span', { style: muted, children: [label(item), plainStatus(item, jobs), when(item)].filter(Boolean).join(' · ') }),
       ] }, item.id)) }) : el('p', { style: muted, children: loading ? '' : 'No projects yet. Import a video above to start.' }),
     ] }, 'recent'),
     el('p', { style: muted, children: 'Tip: you can also ask in Hermes chat to prepare a video. It appears here, ready for you to watch and approve.' }, 'tip'),
   ] });
+}
+
+// A project's poster frame on a dark tile; empty until the frame arrives.
+function Thumb({ ctx, scope, id }) {
+  const poster = usePoster(ctx, scope, id);
+  return el('span', { 'aria-hidden': true, style: { display: 'block', width: '100%', aspectRatio: '16 / 9', borderRadius: 6, overflow: 'hidden', backgroundColor: STAGE },
+    children: poster ? jsx('img', { src: poster.data_url, alt: '', style: { display: 'block', width: '100%', height: '100%', objectFit: 'cover' } }) : null });
 }
 
 // Shallow merge of pending patches; settings merge key by key.
@@ -772,9 +780,10 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
     ] }, 'top'),
     save.state === 'error' ? jsx(Notice, { error: new Error(`Couldn't save: ${errorText(save.error)}. Your change is kept; select Retry.`) }, 'save-error') : null,
     jsx(Notice, { error }, 'error'),
-    el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 16, alignItems: 'start' }, children: [
-      el('section', { 'aria-label': 'Player', style: stack, children: jsx(MediaPanel, { ctx, project, platforms, profile, videoRef, api: player, onPlayback: setPlayback }) }, 'player'),
-      el('section', { 'aria-label': 'Steps', style: stack, children: [
+    // The stage takes the room; the steps keep a reading width beside it and wrap below on narrow windows.
+    el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }, children: [
+      el('section', { 'aria-label': 'Player', style: { ...stack, flex: '999 1 440px', position: 'sticky', top: 0, zIndex: 1 }, children: jsx(MediaPanel, { ctx, scope, project, view, platforms, profile, videoRef, api: player, onPlayback: setPlayback, preferred: previewCurrent ? 'preview' : 'source' }) }, 'player'),
+      el('section', { 'aria-label': 'Steps', style: { ...stack, flex: '1 1 380px', minWidth: 0 }, children: [
         jsx(StepTabs, { step, setStep }, 'tabs'),
         el('div', { role: 'tabpanel', id: `cutroom-panel-${step}`, 'aria-labelledby': `cutroom-tab-${step}`, tabIndex: 0, style: { ...stack, minHeight: 200 }, children: [
           jsx(Notice, { error: jobError }, 'job-error'),
@@ -833,15 +842,97 @@ function Activity({ jobs, cancel, retry }) {
   ] });
 }
 
+// Theme-derived dark surfaces for the video stage; text on it uses the editor background.
+const STAGE = 'color-mix(in srgb, var(--ui-base) 88%, transparent)';
+const ON_STAGE = 'var(--ui-bg-editor)';
+const AUTO_LOAD_BYTES = 67108864;
+const MEDIA_CHOICES = [['source', 'Original'], ['preview', 'Preview'], ['final', 'Final']];
+const megabytes = bytes => `${Math.max(1, Math.round(bytes / 1048576))} MB`;
+const captionText = settings => (HEX.test(settings?.brand?.subtitle_color || '') ? settings.brand.subtitle_color : ON_STAGE);
+const captionAccent = settings => (HEX.test(settings?.caption_highlight_color || '') ? settings.caption_highlight_color : 'var(--ui-yellow, var(--ui-accent))');
+const outline = '0 0 0.12em var(--ui-base), 0 0 0.12em var(--ui-base), 0 0.06em 0.14em var(--ui-base)';
+const ratioFor = (orientation, info) => orientation === 'portrait' ? [9, 16] : orientation === 'landscape' ? [16, 9] : orientation === 'square' ? [1, 1]
+  : info?.width > 0 && info?.height > 0 ? [info.width, info.height] : [16, 9];
+
+// One poster per project; its own cache key so saves do not refetch it.
+const posterKey = (scope, id) => [`${scope[0]}-poster`, ...scope.slice(1), 'poster', id];
+function usePoster(ctx, scope, id) {
+  const query = useQuery({ queryKey: posterKey(scope, id), queryFn: () => ctx.rest(`/projects/${enc(id)}/poster`), enabled: Boolean(id), staleTime: Infinity, retry: false, refetchOnWindowFocus: false });
+  const value = query?.data;
+  return value && typeof value.data_url === 'string' && value.data_url.length < 4000000 && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value.data_url) ? value : null;
+}
+
+// Words the edit keeps, in source time: not removed and inside a kept range.
+function keptWords(view) {
+  const excluded = new Set(view.excluded_word_ids || []);
+  const ranges = baseSegments(view);
+  return (view.transcript?.words || []).filter(word => Number.isFinite(word.start) && Number.isFinite(word.end) && !excluded.has(word.id) && String(word.text || '').trim()
+    && ranges.some(range => (word.start + word.end) / 2 >= range.start && (word.start + word.end) / 2 < range.end)).sort((a, b) => a.start - b.start);
+}
+
+// Caption groups like the renderer: up to six words within three seconds, one word at a time for one_word.
+function captionAt(view, time) {
+  const settings = view.settings || {};
+  const style = settings.captions === true ? settings.caption_style || 'classic' : 'off';
+  if (style === 'off' || !Number.isFinite(time)) return null;
+  const groups = [];
+  for (const word of keptWords(view)) {
+    const last = groups.at(-1);
+    if (last && style !== 'one_word' && last.length < 6 && word.start - last[0].start <= 3) last.push(word);
+    else groups.push([word]);
+  }
+  const index = groups.findIndex((group, i) => {
+    const end = Math.min(Math.max(...group.map(word => word.end)), groups[i + 1]?.[0].start ?? Infinity);
+    return time >= group[0].start && time < end;
+  });
+  if (index < 0) return null;
+  const words = groups[index];
+  const active = [...words].reverse().find(word => word.start <= time && time < word.end) || null;
+  if (style === 'one_word' && !active) return null;
+  return { style, words, active };
+}
+
+function CaptionOverlay({ cue, zone, portrait, settings, time }) {
+  const edge = zone || { top: 0.05, bottom: 0.05, left: 0.05, right: 0.05 };
+  const one = cue.style === 'one_word';
+  const size = (portrait ? 3.5 : 6.25) * (one ? 2 : 1);
+  const y = Number.isFinite(settings.caption_word_y) ? settings.caption_word_y : 0.8;
+  const place = one ? { top: percent(edge.top + (1 - edge.top - edge.bottom) * y), transform: 'translateY(-50%)' } : { bottom: `calc(${percent(edge.bottom)} + 1cqh)` };
+  const accent = captionAccent(settings);
+  return el('div', { 'data-cutroom-caption': cue.style, 'aria-hidden': true, style: { position: 'absolute', left: percent(edge.left), right: percent(edge.right), ...place, padding: '0 2%',
+    textAlign: 'center', fontSize: `${+size.toFixed(2)}cqh`, lineHeight: 1.25, fontWeight: 800, color: captionText(settings), textShadow: outline, pointerEvents: 'none', overflowWrap: 'anywhere' },
+  children: cue.words.filter(word => !one || word === cue.active).map(word => {
+    const active = word === cue.active;
+    return el('span', { 'data-active': active || undefined, style: { color: active && cue.style === 'highlight' ? accent : undefined, visibility: cue.style === 'pop' && word.start > time ? 'hidden' : undefined }, children: word.text }, `cue:${word.id}`);
+  }).flatMap((node, index) => (index ? [' ', node] : [node])) });
+}
+
 function SafeZoneOverlay({ zone }) {
-  const shade = { position: 'absolute', background: 'var(--ui-stroke-secondary)', opacity: 0.6, pointerEvents: 'none' };
+  const shade = { position: 'absolute', background: 'var(--ui-base)', backgroundImage: 'repeating-linear-gradient(135deg, color-mix(in srgb, var(--ui-bg-editor) 22%, transparent) 0 2px, transparent 2px 9px)', opacity: 0.55, pointerEvents: 'none' };
   const middle = 100 - (zone.top + zone.bottom) * 100;
   return [
     jsx('div', { 'data-cutroom-unsafe': 'top', style: { ...shade, left: 0, right: 0, top: 0, height: percent(zone.top) } }, 'unsafe:top'),
     jsx('div', { 'data-cutroom-unsafe': 'bottom', style: { ...shade, left: 0, right: 0, bottom: 0, height: percent(zone.bottom) } }, 'unsafe:bottom'),
     jsx('div', { 'data-cutroom-unsafe': 'left', style: { ...shade, left: 0, top: percent(zone.top), height: `${+middle.toFixed(2)}%`, width: percent(zone.left) } }, 'unsafe:left'),
     jsx('div', { 'data-cutroom-unsafe': 'right', style: { ...shade, right: 0, top: percent(zone.top), height: `${+middle.toFixed(2)}%`, width: percent(zone.right) } }, 'unsafe:right'),
+    jsx('div', { 'aria-hidden': true, style: { position: 'absolute', top: percent(zone.top), bottom: percent(zone.bottom), left: percent(zone.left), right: percent(zone.right), border: `1px dashed color-mix(in srgb, ${ON_STAGE} 70%, transparent)`, pointerEvents: 'none' } }, 'safe:edge'),
   ];
+}
+
+// Removed parts of the original, for marks on the scrubber.
+function removedRanges(view, total) {
+  if (!(total > 0)) return [];
+  const out = [];
+  let cursor = 0;
+  for (const range of [...baseSegments(view)].sort((a, b) => a.start - b.start)) { if (range.start > cursor) out.push([cursor, range.start]); cursor = Math.max(cursor, range.end); }
+  if (cursor < total) out.push([cursor, total]);
+  const excluded = new Set(view.excluded_word_ids || []);
+  for (const word of view.transcript?.words || []) if (excluded.has(word.id) && Number.isFinite(word.start) && Number.isFinite(word.end)) out.push([word.start, word.end]);
+  return out.sort((a, b) => a[0] - b[0]).reduce((merged, range) => {
+    const last = merged.at(-1);
+    if (last && range[0] <= last[1] + 0.05) last[1] = Math.max(last[1], range[1]); else merged.push([...range]);
+    return merged;
+  }, []).filter(([a, b]) => b > a && a < total).slice(0, 200);
 }
 
 // Explicit, authenticated, bounded media loads; downloads never load the file into memory.
@@ -853,13 +944,16 @@ async function downloadArtifact(ctx, project, kind) {
   await save(metadata.path, metadata.name);
 }
 
-function MediaPanel({ ctx, project, profile = null, platforms = [], videoRef, api, onPlayback = () => {} }) {
-  const [overlay, setOverlay] = useState(false);
+function MediaPanel({ ctx, scope, project, view = project, profile = null, platforms = [], videoRef, api, onPlayback = () => {}, preferred = 'source' }) {
+  const [overlay, setOverlay] = useState(true);
+  const [captionsShown, setCaptionsShown] = useState(true);
   const [ready, setReady] = useState(false);
   const [media, setMedia, mediaRef] = useLive(null);
+  const [offer, setOffer] = useState(null);
   const [duration, setDuration] = useState(null);
   const [time, setTime] = useState(null);
   const [playing, setPlaying] = useState(false);
+  const poster = usePoster(ctx, scope, project.id);
   // A loaded render shows the zone of the profile it was rendered with (recorded in its lineage), not the current setting.
   const rendered = media && media.kind !== 'source';
   const shown = rendered ? platformOf(platforms, { settings: { platform: project.artifact_lineage?.[media.kind]?.platform || 'custom' } }) : profile;
@@ -870,20 +964,23 @@ function MediaPanel({ ctx, project, profile = null, platforms = [], videoRef, ap
   const loading = useRef(null);
   const url = useRef(null);
   const lock = useRef(false);
+  // An explicit choice of Original, Preview or Final is kept until a revision retires it.
+  const chosen = useRef(false);
   const release = () => {
     generation.current++; lock.current = false; loading.current = null;
     if (url.current) URL.revokeObjectURL(url.current);
-    url.current = null; setMedia(null); setProgress(null); setReady(false); setTime(null); setPlaying(false);
+    url.current = null; setMedia(null); setOffer(null); setProgress(null); setReady(false); setTime(null); setPlaying(false);
     onPlayback({ kind: null, time: null });
   };
   useEffect(() => () => { generation.current++; if (url.current) URL.revokeObjectURL(url.current); url.current = null; }, [project.id]);
   // Renders belong to a revision; the source never changes, so editing does not stop it.
   useEffect(() => {
     const kind = mediaRef.current?.kind || loading.current;
-    if (kind && kind !== 'source') release();
+    if (kind && kind !== 'source') { chosen.current = false; release(); }
   }, [project.revision, project.artifacts?.preview, project.artifacts?.final]);
-  const load = async kind => {
+  const load = async (kind, explicit = false) => {
     if (lock.current) return;
+    if (explicit) chosen.current = true;
     release(); lock.current = true; loading.current = kind; setError(null);
     const token = generation.current;
     try {
@@ -908,38 +1005,76 @@ function MediaPanel({ ctx, project, profile = null, platforms = [], videoRef, ap
     } catch (failure) { if (token === generation.current) setError(failure); }
     finally { if (token === generation.current) { lock.current = false; loading.current = null; setProgress(null); } }
   };
-  if (api) api.current = { load, release };
-  const portrait = (shown?.orientation || project.settings?.aspect) === 'portrait';
-  const showZone = overlay && zone && ready && media && media.kind !== 'source';
-  const player = media ? jsx('video', { ref: videoRef, src: media.url, preload: 'metadata', controls: true, 'aria-label': `${media.kind === 'source' ? 'Source' : media.kind === 'preview' ? 'Preview' : 'Final video'} player`,
-    style: { display: 'block', maxWidth: '100%', maxHeight: '62vh', ...(showZone ? {} : { width: '100%' }) },
-    onTimeUpdate: event => { const now = event.currentTarget.currentTime; setTime(now); onPlayback({ kind: media.kind, time: now }); },
-    onPlay: () => setPlaying(true), onPause: () => setPlaying(false),
+  // Opening loads the video at once when it is small; a larger one waits for one click on its poster.
+  const autoLoad = async kind => {
+    if (lock.current) return;
+    const token = generation.current;
+    let size = null;
+    try {
+      const info = await ctx.rest(`/projects/${enc(project.id)}/artifact-info/${kind}`);
+      if (Number.isSafeInteger(info?.size) && info.size > 0) size = info.size;
+    } catch { /* Unknown size: offer the button instead. */ }
+    if (token !== generation.current || lock.current || mediaRef.current || chosen.current) return;
+    if (size !== null && size <= AUTO_LOAD_BYTES) await load(kind);
+    else setOffer({ kind, size });
+  };
+  const want = preferred === 'preview' && project.artifacts?.preview ? 'preview' : 'source';
+  useEffect(() => {
+    if (lock.current || loading.current || chosen.current || mediaRef.current?.kind === want) return;
+    autoLoad(want);
+  }, [project.id, want, media ? media.kind : '']);
+  if (api) api.current = { load: kind => load(kind, true), release };
+  const [w, h] = ratioFor(shown?.orientation || (shown?.frame ? null : view.settings?.aspect), project.source_info);
+  const tall = h > w;
+  const original = !media || media.kind === 'source';
+  const fill = rendered || (view.settings?.framing || 'fit') === 'fit' ? 'contain' : 'cover';
+  const showZone = overlay && zone && (media ? ready : true);
+  const total = duration ?? (original ? project.source_info?.duration : NaN);
+  const now = media ? time ?? 0 : poster?.time ?? 0;
+  const style = view.settings?.captions === true ? view.settings?.caption_style || 'classic' : 'off';
+  const cue = captionsShown && original ? captionAt(view, now) : null;
+  const active = media?.kind || loading.current || offer?.kind || null;
+  const seekTo = value => { const video = videoRef?.current; if (video && Number.isFinite(value)) { try { video.currentTime = value; } catch { /* Before metadata. */ } setTime(value); } };
+  const player = media ? jsx('video', { ref: videoRef, src: media.url, preload: 'metadata', playsInline: true, 'aria-label': `${media.kind === 'source' ? 'Original' : media.kind === 'preview' ? 'Preview' : 'Final video'} player`,
+    style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' },
+    onTimeUpdate: event => { const at = event.currentTarget.currentTime; setTime(at); onPlayback({ kind: media.kind, time: at }); },
+    onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false),
     onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); },
-    onError: () => { setError(new Error('This host cannot play this file. Download it or make a compatible MP4 preview.')); release(); } }, 'player:video') : null;
-  return el('div', { style: stack, children: [
-    el('div', { 'aria-label': shown ? `${shown.label} frame` : 'Video frame', style: { display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: 240, padding: 8, borderRadius: 10, border: '1px solid var(--ui-stroke-secondary)', background: 'var(--ui-bg-tertiary)' }, children:
-      media ? (showZone
-        // Drawn once the frame size is known; the wrapper shrinks to the video box, so percentages follow the rendered frame.
-        ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'relative', display: 'inline-block', maxWidth: '100%' }, children: [player, ...SafeZoneOverlay({ zone })] })
-        : player)
-        : el('div', { style: { ...stack, alignItems: 'center', textAlign: 'center', gap: 6, aspectRatio: portrait ? '9 / 16' : '16 / 9', maxHeight: '50vh', justifyContent: 'center', padding: 16 }, children: [
-          el('strong', { style: { fontSize: 13 }, children: 'Nothing loaded' }),
-          el('span', { style: muted, children: 'Load the source to edit by text, or a preview to check the result.' }),
-        ] }) }, 'frame'),
-    progress !== null ? el('div', { style: row, children: [el('span', { style: muted, children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress' }), el('span', { style: muted, children: `${pct(progress)}%` })] }, 'progress-row') : null,
+    onError: () => { setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); release(); } }, 'player:video') : null;
+  const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' } }, 'player:poster') : null;
+  const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
+  const marks = original ? removedRanges(view, total) : [];
+  const zoneLabel = zone ? ` (${shown.label} safe zone: the shaded parts may be covered by the app)` : rendered ? ' (this video was made without a platform)' : ' (choose a platform in Style)';
+  return el('div', { style: { ...stack, gap: 8 }, children: [
     el('div', { style: { ...row, justifyContent: 'space-between' }, children: [
-      el('div', { style: row, children: [
+      el('div', { role: 'group', 'aria-label': 'Video to play', style: { ...row, gap: 2, padding: 2, borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)' }, children: MEDIA_CHOICES.map(([kind, label]) => jsx(Button, {
+        variant: active === kind ? 'secondary' : 'ghost', 'aria-pressed': active === kind, disabled: progress !== null || (kind !== 'source' && !project.artifacts?.[kind]),
+        title: kind === 'source' ? 'The imported video, with an approximate caption preview' : kind === 'preview' ? 'The rendered preview of the edit' : 'The exported final video',
+        onClick: () => load(kind, true), children: label }, `media:${kind}`)) }),
+      el('span', { style: muted, children: shown ? `${shown.label} · ${w}:${h}` : `${w}:${h}` }),
+    ] }, 'choices'),
+    el('div', { 'aria-label': 'Video stage', style: { ...stack, alignItems: 'center', gap: 10, padding: 12, borderRadius: 10, background: STAGE, color: ON_STAGE }, children: [
+      el('div', { 'aria-label': shown ? `${shown.label} frame` : 'Video frame', style: { position: 'relative', width: tall ? `min(100%, calc(68vh * ${w} / ${h}))` : `min(100%, calc(60vh * ${w} / ${h}))`, aspectRatio: `${w} / ${h}`, overflow: 'hidden', borderRadius: 4, background: 'var(--ui-base)', containerType: 'size' }, children: [
+        player, still,
+        showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
+        cue ? jsx(CaptionOverlay, { cue, zone, portrait: tall, settings: view.settings || {}, time: now }, 'caption') : null,
+        !media && offer && progress === null ? el('div', { style: center, children: jsx(Button, { onClick: () => load(offer.kind, true), children: offer.size ? `Load video (${megabytes(offer.size)})` : 'Load video' }) }, 'offer') : null,
+        progress !== null ? el('div', { style: center, children: [el('span', { children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress' })] }, 'loading') : null,
+      ] }, 'frame'),
+      el('div', { style: { ...row, flexWrap: 'nowrap', gap: 10, width: '100%', fontSize: 12 }, children: [
         jsx(Button, { variant: 'secondary', disabled: !media, 'aria-label': playing ? 'Pause' : 'Play', onClick: () => { const video = videoRef?.current; if (video) { if (video.paused) video.play?.(); else video.pause?.(); } }, children: playing ? '❚❚' : '▶' }),
-        el('span', { style: muted, children: `${clock(time ?? 0)} / ${clock(duration ?? (media?.kind === 'source' ? project.source_info?.duration : NaN))}` }),
-      ] }),
-      el('label', { style: { ...row, fontSize: 12 }, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true) }),
-        zone ? `Show ${shown.label} safe zone on previews (shaded areas may be covered by the app)` : rendered ? 'Safe zone: this preview was made without a platform' : 'Safe zone: choose a platform in Style'] }),
-    ] }, 'transport'),
-    el('div', { style: row, children: [
-      ...['source', 'preview', 'final'].map(kind => jsx(Button, { variant: 'ghost', disabled: progress !== null || (kind !== 'source' && !project.artifacts?.[kind]), onClick: () => load(kind), children: `Load ${kind}` }, `load:${kind}`)),
-      jsx(Button, { variant: 'ghost', disabled: !media && progress === null, onClick: release, children: 'Unload media' }, 'unload'),
-    ] }, 'loads'),
+        el('span', { style: { whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }, children: `${clock(now)} / ${clock(total)}` }),
+        el('div', { style: { position: 'relative', flex: '1 1 auto', minWidth: 60, display: 'flex', alignItems: 'center' }, children: [
+          ...marks.map(([a, b]) => jsx('span', { 'aria-hidden': true, 'data-cutroom-removed': true, style: { position: 'absolute', left: percent(a / total), width: percent((b - a) / total), top: '50%', height: 6, marginTop: -3, borderRadius: 2, background: 'var(--ui-red, var(--ui-accent))', opacity: 0.75, pointerEvents: 'none' } }, `cut:${a}`)),
+          jsx('input', { type: 'range', name: 'player.position', 'aria-label': 'Position', 'aria-valuetext': clock(now), min: 0, max: Number.isFinite(total) ? total : 0, step: 0.01, value: Math.min(now, Number.isFinite(total) ? total : 0), disabled: !media,
+            onChange: event => seekTo(Number(event.target.value)), style: { position: 'relative', width: '100%', margin: 0, accentColor: 'var(--ui-accent)', background: 'transparent' } }, 'scrubber'),
+        ] }),
+        el('label', { style: { ...row, flexWrap: 'nowrap', gap: 6, whiteSpace: 'nowrap' }, children: [jsx(Tick, { 'aria-label': 'Show safe zone', checked: overlay && Boolean(zone), disabled: !zone, onCheckedChange: checked => setOverlay(checked === true), style: { borderColor: ON_STAGE } }),
+          'Safe area', el('span', { style: hidden, children: zoneLabel })] }),
+        el('label', { style: { ...row, flexWrap: 'nowrap', gap: 6, whiteSpace: 'nowrap' }, children: [jsx(Tick, { 'aria-label': 'Show captions', checked: captionsShown && original && style !== 'off', disabled: !original || style === 'off', onCheckedChange: checked => setCaptionsShown(checked === true), style: { borderColor: ON_STAGE } }), 'Captions'] }),
+      ] }, 'transport'),
+    ] }, 'stage'),
+    captionsShown && original && style !== 'off' ? el('p', { style: muted, children: 'Approximate caption preview. The rendered preview shows the exact result.' }, 'approximate') : null,
     jsx(Notice, { error }, 'error'),
   ] });
 }
@@ -1041,7 +1176,7 @@ function Transcript({ kit }) {
       } }, `fix:${fixWord.id}`),
       jsx(Button, { variant: 'ghost', onClick: () => setFixing(null), children: 'Done' }, 'done'),
     ] }, 'fixer') : null,
-    playback.kind === 'source' ? null : el('p', { style: muted, children: 'Load the source in the player to jump to a word when you click it.' }, 'hint'),
+    playback.kind === 'source' ? null : el('p', { style: muted, children: 'Choose Original above the player to jump to a word when you click it.' }, 'hint'),
     el('div', { role: 'listbox', 'aria-label': 'Transcript', 'aria-multiselectable': true, tabIndex: 0, 'aria-activedescendant': focus != null ? `cutroom-word-${focus}` : undefined,
       onKeyDown: keys, onMouseLeave: () => { drag.current = null; },
       style: { lineHeight: 1.9, fontSize: 14, maxHeight: '48vh', overflow: 'auto', padding: 8, borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)', userSelect: 'none' },
@@ -1083,13 +1218,17 @@ function StyleStep({ kit }) {
   };
   const captionValue = settings.captions === true ? settings.caption_style || 'classic' : 'off';
   const colour = HEX.test(settings.caption_highlight_color || '') ? settings.caption_highlight_color : null;
+  // Each card shows its caption over a frame of this video, like the player does.
+  const poster = usePoster(kit.ctx, kit.scope, view.id);
   const sample = value => {
-    const accent = colour || 'var(--ui-accent)';
-    const box = { display: 'inline-block', padding: '4px 6px', borderRadius: 4, background: 'var(--ui-bg-tertiary)', fontWeight: 700, fontSize: 12 };
-    if (value === 'off') return el('span', { 'aria-hidden': true, style: { ...box, fontWeight: 400 }, children: 'No text' });
-    if (value === 'one_word') return el('span', { 'aria-hidden': true, style: { ...box, fontSize: 15 }, children: el('span', { style: { color: accent }, children: 'Guyana' }) });
-    if (value === 'classic') return el('span', { 'aria-hidden': true, style: box, children: 'I came from Guyana' });
-    return el('span', { 'aria-hidden': true, style: box, children: ['I came from ', el('span', { style: { color: accent, fontSize: value === 'pop' ? 14 : 12 }, children: 'Guyana' }, 'word')] });
+    const accent = captionAccent(settings);
+    const one = value === 'one_word';
+    const words = value === 'off' ? null : one ? el('span', { style: { color: accent }, children: 'Guyana' })
+      : value === 'classic' ? 'I came from Guyana'
+        : ['I came from ', el('span', { style: { color: value === 'highlight' ? accent : undefined, fontSize: value === 'pop' ? '1.2em' : undefined }, children: 'Guyana' }, 'word')];
+    return el('span', { 'aria-hidden': true, style: { position: 'relative', display: 'flex', alignItems: one ? 'center' : 'flex-end', justifyContent: 'center', width: '100%', aspectRatio: '16 / 9', borderRadius: 6, overflow: 'hidden',
+      backgroundColor: STAGE, backgroundImage: poster ? `url("${poster.data_url}")` : undefined, backgroundSize: 'cover', backgroundPosition: 'center', containerType: 'size' },
+    children: words ? el('span', { style: { padding: '0 6% 6%', textAlign: 'center', fontWeight: 800, lineHeight: 1.15, fontSize: one ? '30cqh' : '19cqh', color: captionText(settings), textShadow: outline }, children: words }) : null });
   };
   const faceReady = Boolean(view.analysis?.face_samples);
   const vision = kit.jobs.find(job => job.action === 'vision' && ACTIVE.includes(job.status));
@@ -1124,8 +1263,8 @@ function StyleStep({ kit }) {
         options: CAPTION_STYLES.map(([value, title, detail]) => ({ key: `caption-style:${value}`, value, title, detail, preview: sample(value) })) }),
       jsx(Disclosure, { title: 'More caption options', children: [
         el('div', { style: { ...row, alignItems: 'flex-end' }, children: [
-          jsx(Field, { label: 'Highlight colour (hex; blank uses the theme accent)', name: 'caption_highlight_color', value: settings.caption_highlight_color, onCommit: colourField }),
-          el('span', { 'aria-hidden': true, style: { width: 24, height: 24, borderRadius: 4, border: '1px solid var(--ui-stroke-secondary)', background: colour || 'var(--ui-accent)' } }),
+          jsx(Field, { label: 'Highlight colour (hex; blank uses the default yellow)', name: 'caption_highlight_color', value: settings.caption_highlight_color, onCommit: colourField }),
+          el('span', { 'aria-hidden': true, style: { width: 24, height: 24, borderRadius: 4, border: '1px solid var(--ui-stroke-secondary)', background: captionAccent(settings) } }),
         ] }, 'colour'),
         jsx(Field, { label: 'One-word position (0 top – 1 bottom; blank = 0.8, below the face)', name: 'caption_word_y', type: 'number', value: settings.caption_word_y, onCommit: positionField }, 'word-y'),
       ] }),

@@ -332,6 +332,16 @@ def file_artifact(
     )
 
 
+@router.get("/projects/{project_id}/poster")
+def project_poster(
+    project_id: ProjectId,
+    at: Annotated[float, Query(ge=0, le=1, allow_inf_nan=False)] = 0.3,
+    studio=Depends(get_studio),
+):
+    """A small JPEG source frame (data URL) for project cards and the player."""
+    return invoke(studio.poster, project_id, at)
+
+
 @router.get("/projects/{project_id}/artifact-info/{kind}")
 def artifact_info(
     project_id: ProjectId, kind: ArtifactKind, studio=Depends(get_studio)

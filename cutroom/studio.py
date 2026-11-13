@@ -1,19 +1,24 @@
 """Durable local studio projects and reviewed editing workflows."""
 
+import base64
 import copy
 import hashlib
 import json
+import math
 import os
 import re
+import subprocess
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .media import _local_path, probe
+from .media import _local_path, poster_frame, probe
 from .project import file_digest
 
 _CHILD_PROCESSES = {}
+# A 480 px JPEG is tens of kilobytes; anything far larger is not a poster.
+POSTER_MAX_BYTES = 2_000_000
 
 
 class MissingAssetError(FileNotFoundError):
@@ -1533,6 +1538,67 @@ class Studio:
             ):
                 raise PermissionError("Artifact changed after publication")
         return path
+
+    def poster(self, project_id, at=0.3):
+        """One source frame as a JPEG data URL, cached per source hash and position.
+
+        ``at`` is a share of the source duration. The cache lives in the
+        project folder, so a new source (a new project) never reuses it.
+        """
+        if (
+            isinstance(at, bool)
+            or not isinstance(at, (int, float))
+            or not math.isfinite(at)
+            or not 0 <= at <= 1
+        ):
+            raise ValueError("Poster position must be between 0 and 1")
+        project = self.get(project_id)
+        source = _local_path(project["source"], must_exist=False)
+        if not source.is_file():
+            raise MissingAssetError(
+                f"Source file is missing: {project['source']}; restore it or "
+                "import a new project"
+            )
+        digest = project.get("source_sha256")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError("The project has no source hash")
+        duration = (project.get("source_info") or {}).get("duration")
+        if not isinstance(duration, (int, float)) or not math.isfinite(duration):
+            duration = 0.0
+        # The last frame can sit just before the reported end.
+        moment = round(max(0.0, min(duration * at, duration - 0.05)), 3)
+        directory = self._directory(project_id) / "posters"
+        path = directory / f"{digest[:24]}-{round(at * 1000):04d}.jpg"
+        if not path.is_file():
+            self._check_source(project)
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f".{uuid.uuid4().hex}.jpg"
+            try:
+                try:
+                    poster_frame(source, moment, temporary)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError(
+                        "Making the poster frame took too long"
+                    ) from error
+                except (subprocess.CalledProcessError, OSError) as error:
+                    raise RuntimeError("The poster frame could not be made") from error
+                size = temporary.stat().st_size if temporary.is_file() else 0
+                if not 0 < size <= POSTER_MAX_BYTES:
+                    raise RuntimeError("The poster frame could not be made")
+                _replace_file(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        data = path.read_bytes()
+        if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
+            path.unlink(missing_ok=True)
+            raise RuntimeError("The cached poster frame was unreadable; try again")
+        return {
+            "mime": "image/jpeg",
+            "data_url": "data:image/jpeg;base64,"
+            + base64.b64encode(data).decode("ascii"),
+            "at": at,
+            "time": moment,
+        }
 
     def list(self):
         """Projects plus ``modified_at``, the last save time for display only."""

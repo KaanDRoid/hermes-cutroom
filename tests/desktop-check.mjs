@@ -23,6 +23,7 @@ const invalidations = [];
 let projectRows = [];
 let selectedProject = null;
 let jobRows = [];
+let posterData = null;
 const zone = (top, bottom, left, right) => ({ top, bottom, left, right, source: 'https://example.test/spec', checked: '2026-11-12' });
 const frames = portrait => ({ preview: portrait ? [1080, 1920] : [1920, 1080], final: portrait ? { 1080: [1080, 1920], 2160: [2160, 3840] } : { 1080: [1920, 1080], 2160: [3840, 2160] }, default_final: '1080' });
 const platformRows = [
@@ -52,8 +53,8 @@ react.useEffect = (effect, dependencies) => {
 sdk.useValue = value => value.get();
 sdk.useQuery = options => {
   queries.push(options);
-  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs', 'platforms', 'activity'].includes(x));
-  return { data: options.enabled === false ? undefined : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : kind === 'platforms' ? platformRows : jobRows,
+  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs', 'platforms', 'activity', 'poster'].includes(x));
+  return { data: options.enabled === false ? undefined : kind === 'poster' ? posterData : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : kind === 'platforms' ? platformRows : jobRows,
     isPending: false, isFetching: false, error: null, refetch: () => options.queryFn() };
 };
 sdk.useQueryClient = () => ({ invalidateQueries: options => invalidations.push(options), setQueryData: () => {} });
@@ -98,6 +99,7 @@ const field = (tree, name) => nodes(tree).find(n => (n.type === 'Input' || n.typ
 const role = (tree, kind, label) => nodes(tree).find(n => n.props?.role === kind && (label === undefined || n.props['aria-label'] === label || text(n).includes(label)));
 const radio = (tree, group, value) => nodes(role(tree, 'radiogroup', group)).find(n => n.props?.role === 'radio' && n.props['data-value'] === value);
 const labelled = (tree, label) => nodes(tree).find(n => n.props?.['aria-label'] === label);
+const choice = (tree, label) => nodes(role(tree, 'group', 'Video to play')).find(n => n.type === 'Button' && text(n).trim() === label);
 const disclosure = (tree, title) => nodes(tree).find(n => n.type === 'details' && text(nodes(n.props.children).find(c => c.type === 'summary')).includes(title));
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const type = (input, value) => input.props.onChange({ target: { value } });
@@ -401,7 +403,7 @@ test('transcript: click seeks, drag and Shift-click select, Delete removes and R
     const ui = await studio(async (path, options) => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : patchApplies(path, options), transcriptProject());
     let tree = ui.draw();
     assert.ok(role(tree, 'listbox', 'Transcript'));
-    await button(tree, 'Load source').props.onClick();
+    await choice(tree, 'Original').props.onClick();
     tree = ui.draw();
     const fake = { currentTime: 0, paused: true, play() { this.paused = false; }, pause() { this.paused = true; } };
     nodes(tree).find(n => n.type === 'video').props.ref.current = fake;
@@ -782,20 +784,23 @@ test('loads authenticated versioned media chunks, rejects oversize media and rev
       }
       return selectedProject;
     }, { artifacts: { preview: 'backend-only.mp4', final: 'final.mp4' } });
-    assert.ok(button(ui.draw(), 'Load source'));
-    await button(ui.draw(), 'Load preview').props.onClick();
+    assert.ok(choice(ui.draw(), 'Original'));
+    await choice(ui.draw(), 'Preview').props.onClick();
     const tree = ui.draw();
     assert.equal(nodes(tree).find(n => n.type === 'video').props.src, 'blob:test-1');
     assert.equal(created[0].size, 6);
     assert.ok(ui.calls.some(c => c.path.includes('version=v1')));
-    await button(tree, 'Unload media').props.onClick();
+    assert.equal(choice(tree, 'Preview').props['aria-pressed'], true);
+    // Switching to another video revokes the URL of the previous one.
+    await choice(tree, 'Original').props.onClick();
     assert.deepEqual(revoked, ['blob:test-1']);
     oversize = true;
     const before = ui.calls.length;
-    await button(ui.draw(), 'Load source').props.onClick();
+    await choice(ui.draw(), 'Final').props.onClick();
     assert.equal(ui.calls.length, before + 1);
     assert.match(text(ui.draw()), /256 MiB/);
-    assert.equal(created.length, 1);
+    assert.equal(created.length, 2);
+    assert.deepEqual(revoked, ['blob:test-1', 'blob:test-2']);
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
 });
 
@@ -805,7 +810,7 @@ test('space plays and pauses unless focus is in a text field', async () => {
   try {
     jobRows = [];
     const ui = await studio(async path => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : selectedProject);
-    await button(ui.draw(), 'Load source').props.onClick();
+    await choice(ui.draw(), 'Original').props.onClick();
     const fake = { paused: true, play() { this.paused = false; }, pause() { this.paused = true; } };
     nodes(ui.draw()).find(n => n.type === 'video').props.ref.current = fake;
     const workspace = () => labelled(ui.draw(), 'Project editing workspace');
@@ -872,14 +877,14 @@ test('keeps the project fresh after a job finishes and releases render URLs on r
     const ui = await studio(async () => ({ data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' }), { artifacts: { preview: 'p.mp4' } });
     ui.draw();
     assert.ok(queries.some(query => query.queryKey.includes('project') && query.enabled && query.refetchInterval >= 2000), 'Completion must not stop project refresh before artifacts arrive');
-    await button(ui.draw(), 'Load preview').props.onClick();
+    await choice(ui.draw(), 'Preview').props.onClick();
     ui.draw();
     selectedProject = { ...selectedProject, revision: 8 };
     ui.draw();
     assert.deepEqual(revoked, ['blob:revision-1']);
     assert.equal(nodes(ui.draw()).find(n => n.type === 'video'), undefined);
     // The source never changes with a revision, so editing does not stop it.
-    await button(ui.draw(), 'Load source').props.onClick();
+    await choice(ui.draw(), 'Original').props.onClick();
     ui.draw();
     selectedProject = { ...selectedProject, revision: 9 };
     ui.draw();
@@ -967,7 +972,7 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
     let toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
     assert.ok(toggle, 'Safe-zone toggle is rendered');
     assert.notEqual(toggle.props.disabled, true);
-    await button(ui.draw(), 'Load preview').props.onClick();
+    await choice(ui.draw(), 'Preview').props.onClick();
     toggle = nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
     toggle.props.onCheckedChange(true);
     let tree = ui.draw();
@@ -987,7 +992,7 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
     assert.ok(nodes(tree).find(n => n.type === 'video'), 'The player stays visible under the overlay');
     // A render without a recorded platform was made by the custom profile.
     ui = await studio(media, { settings: { platform: 'tiktok', aspect: 'portrait' }, artifacts: { preview: 'preview.mp4' }, artifact_lineage: { preview: { job_id: 'j'.repeat(32) } } });
-    await button(ui.draw(), 'Load preview').props.onClick();
+    await choice(ui.draw(), 'Preview').props.onClick();
     nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone').props.onCheckedChange(true);
     nodes(ui.draw()).find(n => n.type === 'video').props.onLoadedMetadata({ currentTarget: { duration: 10 } });
     assert.deepEqual(nodes(ui.draw()).filter(n => n.props?.['data-cutroom-unsafe']), [], 'Custom renders get no platform overlay');
@@ -1148,7 +1153,7 @@ test('selects reframing and adds a program-time pin from playback with a horizon
     radio(tree, 'Framing', 'center_crop').props.onClick();
     await ui.flush();
     assert.equal(ui.patches().at(-1).options.body.changes.settings.framing, 'center_crop');
-    await button(ui.draw(), 'Load preview').props.onClick();
+    await choice(ui.draw(), 'Preview').props.onClick();
     ui.draw(); tree = ui.draw();
     nodes(tree).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 2.5 } });
     tree = ui.draw();
@@ -1212,6 +1217,144 @@ test('chat card shows a compact video summary, opens the Studio and never approv
   hookStores.clear();
   assert.doesNotThrow(() => draw({ render: () => renderer.data.render({ file, result: null, fallback: 'FALLBACK' }) }));
 });
+
+const chunk = (path, total = 3) => {
+  const offset = Number(new URL(path, 'https://test').searchParams.get('offset') || 0);
+  return { data: btoa('abc'), offset, next_offset: offset + 3, total, mime: 'video/mp4', version: 'v1' };
+};
+async function withBlobs(body) {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  let count = 0;
+  URL.createObjectURL = () => `blob:auto-${++count}`; URL.revokeObjectURL = () => {};
+  try { await body(); } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; posterData = null; }
+}
+
+test('opens with the video loaded: the current preview, else the original, when it is small', async () => withBlobs(async () => {
+  const preview = currentPreview();
+  jobRows = preview.jobs;
+  let ui = await studio(async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 6 } : path.includes('/media/') ? chunk(path, 6) : selectedProject, preview.project);
+  ui.draw(); await tick();
+  let tree = ui.draw();
+  assert.match(String(nodes(tree).find(n => n.type === 'video')?.props.src), /^blob:/, 'The player loads without a click');
+  assert.ok(ui.calls.some(c => c.path === '/projects/p1/artifact-info/preview'), 'Size comes from a metadata call');
+  assert.ok(ui.calls.some(c => c.path.startsWith('/projects/p1/media/preview')));
+  assert.ok(!ui.calls.some(c => c.path.includes('/media/source')), 'A current preview wins over the original');
+  assert.equal(choice(tree, 'Preview').props['aria-pressed'], true);
+  assert.doesNotMatch(text(tree), /Nothing loaded/);
+  for (const label of ['Load source', 'Unload media', 'Download']) assert.equal(button(tree, label), undefined, `${label} is not in the player`);
+  jobRows = [];
+  ui = await studio(async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 1024 } : path.includes('/media/') ? chunk(path) : selectedProject, { artifacts: { preview: 'old.mp4' } });
+  ui.draw(); await tick();
+  tree = ui.draw();
+  assert.ok(nodes(tree).find(n => n.type === 'video'), 'Without a current preview the original loads');
+  assert.ok(ui.calls.some(c => c.path === '/projects/p1/artifact-info/source'));
+  assert.ok(!ui.calls.some(c => c.path.includes('/media/preview')), 'A stale preview is not loaded');
+  assert.equal(choice(tree, 'Original').props['aria-pressed'], true);
+}));
+
+test('a large video shows its poster frame and one Load button with its size', async () => withBlobs(async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
+  const ui = await studio(async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : path.includes('/media/') ? chunk(path) : selectedProject);
+  ui.draw(); await tick();
+  let tree = ui.draw();
+  assert.ok(!ui.calls.some(c => c.path.includes('/media/')), 'Large files are not loaded without a click');
+  assert.equal(nodes(tree).find(n => n.type === 'video'), undefined);
+  assert.ok(nodes(tree).some(n => n.type === 'img' && n.props.src === posterData.data_url), 'The poster frame stands in for the video');
+  const load = button(tree, 'Load video (100 MB)');
+  assert.ok(load, 'One button names the size');
+  await load.props.onClick();
+  tree = ui.draw();
+  assert.ok(ui.calls.some(c => c.path.includes('/media/source')));
+  assert.ok(nodes(tree).find(n => n.type === 'video'));
+  assert.equal(button(tree, 'Load video'), undefined);
+}));
+
+test('the platform safe area is shown by default and can be turned off', async () => withBlobs(async () => {
+  jobRows = [];
+  const ui = await studio(async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject, { settings: { platform: 'instagram_reels', aspect: 'portrait' } });
+  ui.draw(); await tick();
+  let tree = ui.draw();
+  nodes(tree).find(n => n.type === 'video').props.onLoadedMetadata({ currentTarget: { duration: 12 } });
+  tree = ui.draw();
+  const toggle = nodes(tree).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show safe zone');
+  assert.equal(toggle.props.checked, true, 'On by default');
+  assert.deepEqual(nodes(tree).filter(n => n.props?.['data-cutroom-unsafe']).map(n => n.props['data-cutroom-unsafe']).sort(), ['bottom', 'left', 'right', 'top']);
+  assert.equal(labelled(tree, 'Instagram Reels frame').props.style.aspectRatio, '9 / 16', 'The stage frames the platform shape');
+  assert.match(String(labelled(tree, 'Video stage').props.style.background), /^color-mix\(in srgb, var\(--ui-/, 'A theme-derived dark stage');
+  toggle.props.onCheckedChange(false);
+  assert.deepEqual(nodes(ui.draw()).filter(n => n.props?.['data-cutroom-unsafe']), []);
+}));
+
+const captionProject = (settings = {}) => ({ ...transcriptProject(), excluded_word_ids: ['w2'],
+  settings: { platform: 'instagram_reels', aspect: 'portrait', captions: true, caption_style: 'highlight', caption_highlight_color: '#112233', ...settings } });
+const captionNode = tree => nodes(tree).find(n => n.props?.['data-cutroom-caption']);
+
+test('draws an approximate live caption over the original, from words that are not removed', async () => withBlobs(async () => {
+  jobRows = [];
+  const media = async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject;
+  let ui = await studio(media, { ...captionProject(), artifacts: { preview: 'p.mp4' } });
+  ui.draw(); await tick();
+  let tree = ui.draw();
+  nodes(tree).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 0.65 } });
+  tree = ui.draw();
+  const cue = captionNode(tree);
+  assert.ok(cue, 'Caption overlay while the original plays');
+  assert.match(text(cue), /My/); assert.match(text(cue), /is/);
+  assert.doesNotMatch(text(cue), /name/, 'Removed words are not captioned');
+  const active = nodes(cue).find(n => n.props?.['data-active']);
+  assert.equal(text(active), 'is');
+  assert.equal(active.props.style.color, '#112233', 'Highlight colour from settings');
+  assert.equal(cue.props.style.fontSize, '3.5cqh', 'Readable size for vertical video');
+  assert.match(text(tree), /Approximate caption preview\. The rendered preview shows the exact result\./);
+  assert.equal(text(tree).match(/Approximate caption preview/g).length, 1, 'Labelled once');
+  // The Captions toggle hides it.
+  nodes(tree).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show captions').props.onCheckedChange(false);
+  assert.equal(captionNode(ui.draw()), undefined);
+  nodes(ui.draw()).find(n => n.type === 'Checkbox' && n.props['aria-label'] === 'Show captions').props.onCheckedChange(true);
+  // Rendered media already has its captions burned in.
+  await choice(ui.draw(), 'Preview').props.onClick();
+  tree = ui.draw();
+  nodes(tree).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 0.65 } });
+  assert.equal(captionNode(ui.draw()), undefined, 'No overlay on a rendered preview');
+  // One word: only the spoken word, twice as large, at the one-word position.
+  ui = await studio(media, captionProject({ caption_style: 'one_word', caption_word_y: 0.5, platform: 'youtube', aspect: 'landscape' }));
+  ui.draw(); await tick();
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 1.1 } });
+  tree = ui.draw();
+  assert.equal(text(captionNode(tree)).trim(), 'when');
+  assert.equal(captionNode(tree).props.style.fontSize, '12.5cqh', 'One word is twice the landscape size');
+  // Captions off: nothing drawn.
+  ui = await studio(media, captionProject({ captions: false }));
+  ui.draw(); await tick();
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 0.65 } });
+  assert.equal(captionNode(ui.draw()), undefined);
+}));
+
+test('poster frames come from the poster route for home cards, the player and caption cards', async () => withBlobs(async () => {
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,BBBB', time: 1 };
+  jobRows = [];
+  const ui = await studio(async path => selectedProject, captionProject());
+  let tree = ui.draw();
+  const poster = queries.find(q => q.queryKey.includes('poster'));
+  assert.ok(poster, 'A poster query');
+  assert.ok(poster.queryKey.includes('host-a') || poster.queryKey.includes(connectionId), 'Scoped to the connection');
+  assert.ok(!poster.queryKey.includes('cutroom') || poster.queryKey[0] !== 'cutroom', 'Saves do not refetch posters');
+  await poster.queryFn();
+  assert.ok(ui.calls.some(c => c.path === '/projects/p1/poster'), 'Fetched from the poster route');
+  assert.ok(nodes(tree).some(n => n.type === 'img' && n.props.src === posterData.data_url), 'Player poster');
+  tree = await ui.step('Style');
+  const card = radio(tree, 'Caption style', 'highlight');
+  assert.ok(nodes(card).some(n => String(n.props?.style?.backgroundImage || '').includes(posterData.data_url)), 'Caption cards sit on the poster');
+  assert.match(text(card), /Guyana|came|from/);
+  // Home: each recent project shows its poster.
+  hookStores.clear(); queries.length = 0;
+  projectRows = [{ id: 'p1', name: 'Local demo', revision: 1, settings: {}, artifacts: {} }];
+  const entries = [];
+  (await load()).default.register({ register: x => entries.push(x), storage: { get: (key, fallback) => fallback, set() {} }, rest: async () => posterData });
+  tree = draw(entries.find(x => x.area === sdk.ROUTES_AREA));
+  assert.ok(nodes(tree).some(n => n.type === 'img' && n.props.src === posterData.data_url), 'Home thumbnail');
+}));
 
 test('uses only public SDK/React imports and no renderer or polling bypasses', async () => {
   await load();

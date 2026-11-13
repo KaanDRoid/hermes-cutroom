@@ -14,6 +14,9 @@ except ImportError:  # loaded as a standalone module file
     from cutroom.childenv import child_env
 
 PROCESS_TIMEOUT = 300
+# One still frame should take seconds; a stuck decoder must not hold a request.
+POSTER_TIMEOUT = 60
+POSTER_MAX_SIDE = 480
 
 
 def _local_path(value, *, must_exist=True):
@@ -179,6 +182,52 @@ def detect_silences(source: str | Path, noise_db=-35.0, min_duration=0.5) -> lis
     if start is not None and start < duration:
         intervals.append({"start": start, "end": duration})
     return intervals
+
+
+def poster_frame(source: str | Path, time, output: str | Path) -> None:
+    """Write one JPEG frame at ``time`` seconds, at most 480 px on its longest side."""
+    time = _number(time)
+    if time < 0:
+        raise ValueError("Poster time must not be negative")
+    source = _local_path(source)
+    side = POSTER_MAX_SIDE
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-ss",
+            f"{time:.3f}",
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-an",
+            "-vf",
+            f"scale=w='min({side},iw)':h='min({side},ih)'"
+            ":force_original_aspect_ratio=decrease",
+            "-q:v",
+            "4",
+            "-f",
+            "image2",
+            "-c:v",
+            "mjpeg",
+            "-y",
+            str(output),
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+        timeout=POSTER_TIMEOUT,
+        shell=False,
+        env=child_env(python=False),
+    )
 
 
 def probe(source: str | Path) -> dict:
