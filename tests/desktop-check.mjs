@@ -646,6 +646,45 @@ test('review without a current preview offers Make preview, then checks it autom
 
 const qaJob = checks => ({ id: 'qj', action: 'qa', status: 'completed', revision: 7, upstream: 'preview', result: { passed: false, video: 'preview', checks } });
 
+test('face tracking without a face analysis: Make preview analyses faces first, then previews and checks', async () => {
+  jobRows = [];
+  const ui = await studio(async (path, options) => options?.method === 'POST' ? { id: `new-${options.body.action}` } : selectedProject,
+    { settings: { framing: 'face_track', aspect: 'portrait' } });
+  const tree = await ui.step('Review');
+  assert.match(text(tree), /analys\w* faces/i);
+  await button(tree, 'Make preview').props.onClick();
+  assert.deepEqual(ui.calls.at(-1).options.body, { action: 'vision', options: {} });
+  jobRows = [{ id: 'new-vision', action: 'vision', status: 'completed', revision: 7, progress: 1 }];
+  ui.draw(); await tick();
+  assert.deepEqual(ui.calls.at(-1).options.body, { action: 'preview', options: {} });
+  jobRows = [...jobRows, { id: 'new-preview', action: 'preview', status: 'completed', revision: 7, progress: 1 }];
+  ui.draw(); await tick();
+  assert.deepEqual(ui.calls.at(-1).options.body, { action: 'qa', options: {} });
+});
+
+test('host errors read as one plain sentence and stay on the step where they happened', async () => {
+  jobRows = [];
+  const detail = 'No speech model found. Put a Whisper model folder such as faster-whisper-small in C:/w/models.';
+  const ui = await studio(async (path, options) => {
+    if (options?.method === 'POST') throw new Error(`Error invoking remote method 'hermes:api': Error: 422: ${JSON.stringify({ detail })}`);
+    return selectedProject;
+  });
+  await button(ui.draw(), 'Transcribe').props.onClick();
+  await tick();
+  const shown = text(ui.draw());
+  assert.match(shown, /No speech model found/);
+  assert.doesNotMatch(shown, /Error invoking|hermes:api|422|\{"detail/);
+  assert.doesNotMatch(text(await ui.step('Style')), /No speech model found/);
+});
+
+test('caption style cards show the same neutral sample in every project', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, transcriptProject());
+  const all = text(await ui.step('Style'));
+  assert.doesNotMatch(all, /Guyana|I came from/);
+  assert.match(all, /Your words/);
+});
+
 test('review headline comes from check statuses: warnings only is ready with notes and can still be approved', async () => {
   const digest = 'e'.repeat(64);
   const preview = currentPreview(7, [qaJob([{ name: 'platform_upscale', status: 'warning', detail: {} }, { name: 'decode', status: 'pass' }, { name: 'mystery_check', status: 'pass' }, { name: 'audio', status: 'skip' }])]);
@@ -1022,7 +1061,7 @@ test('chooses caption style cards including Off and saves accent colour and one-
   const group = role(tree, 'radiogroup', 'Caption style');
   assert.deepEqual(nodes(group).filter(n => n.props?.role === 'radio').map(n => n.props['data-value']), ['off', 'classic', 'highlight', 'pop', 'one_word']);
   assert.equal(radio(tree, 'Caption style', 'off').props['aria-checked'], true, 'Captions are off until chosen');
-  assert.match(text(radio(tree, 'Caption style', 'highlight')), /came from/, 'Cards show a text preview');
+  assert.match(text(radio(tree, 'Caption style', 'highlight')), /Your words/, 'Cards show a text preview');
   assert.match(source, /`caption-style:\$\{value\}`/, 'Style keys are namespaced');
   radio(tree, 'Caption style', 'highlight').props.onClick();
   tree = ui.draw();
@@ -1440,7 +1479,7 @@ test('poster frames come from the poster route for home cards, the player and ca
   tree = await ui.step('Style');
   const card = radio(tree, 'Caption style', 'highlight');
   assert.ok(nodes(card).some(n => String(n.props?.style?.backgroundImage || '').includes(posterData.data_url)), 'Caption cards sit on the poster');
-  assert.match(text(card), /Guyana|came|from/);
+  assert.match(text(card), /Your words|here/);
   // Home: each recent project shows its poster.
   hookStores.clear(); queries.length = 0;
   projectRows = [{ id: 'p1', name: 'Local demo', revision: 1, settings: {}, artifacts: {} }];

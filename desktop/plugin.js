@@ -22,7 +22,18 @@ const CSS = '[data-cutroom] :focus-visible{outline:2px solid var(--ui-accent);ou
 
 // The host's unchecked checkbox border can match the page background; outline it with a theme token.
 const Tick = props => jsx(Checkbox, { ...props, style: props.checked ? props.style : { borderColor: 'var(--ui-text-tertiary)', ...props.style } });
-const errorText = error => error?.message || String(error || '');
+// The host wraps REST failures as "Error invoking remote method 'hermes:api': Error: 422: {"detail": ...}".
+// People should read only the sentence Cutroom wrote.
+const errorText = error => {
+  let message = error?.message || String(error || '');
+  message = message.replace(/^Error invoking remote method '[^']*':\s*/, '').replace(/^(Error:\s*)+/, '').replace(/^\d{3}:\s*/, '');
+  try {
+    const body = JSON.parse(message);
+    if (typeof body?.detail === 'string') message = body.detail;
+    else if (Array.isArray(body?.detail)) message = body.detail.map(item => item?.msg).filter(Boolean).join('; ') || message;
+  } catch { /* Not JSON: keep the text. */ }
+  return message;
+};
 const seconds = value => Number.isFinite(value) ? `${value.toFixed(2)}s` : '—';
 const clock = value => {
   if (!Number.isFinite(value)) return '—';
@@ -513,6 +524,9 @@ function combineSuggestions(view, items) {
 }
 
 function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setStep, open = () => {}, back = () => {} }) {
+  // A failed job is reported on the step where it was started, not on every step after it.
+  const stepRef = useRef(step);
+  stepRef.current = step;
   const client = useQueryClient();
   const current = useRef(project);
   current.current = project;
@@ -677,7 +691,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
       if (saving()) await flush();
       if (saving()) throw new Error('Your latest change is not saved yet. Retry saving first.');
       await submit(action, options, then);
-    } catch (failure) { setJobError(failure); }
+    } catch (failure) { setJobError({ error: failure, step: stepRef.current }); }
     finally { jobLock.current = false; }
   };
   const runAction = action => {
@@ -694,7 +708,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
         if (!Number.isFinite(value) || (key === 'min_duration' && value <= 0)) throw new Error('Pause length must be positive and options must be numbers');
         options[key] = value;
       }
-    } catch (failure) { setJobError(failure); return; }
+    } catch (failure) { setJobError({ error: failure, step: stepRef.current }); return; }
     return run(action, options);
   };
   const cancel = async job => {
@@ -711,7 +725,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
       const next = chain.current[job.id];
       if (next && job.status === 'completed') {
         delete chain.current[job.id];
-        submit(next[0], {}, next.slice(1)).catch(failure => setJobError(failure));
+        submit(next[0], {}, next.slice(1)).catch(failure => setJobError({ error: failure, step: stepRef.current }));
       } else if (next && !ACTIVE.includes(job.status)) delete chain.current[job.id];
       // Native notice when a long job ends; the host only shows it while the window is in the background.
       if (!ACTIVE.includes(before) || !['completed', 'failed'].includes(job.status) || !['preview', 'final', 'transcribe'].includes(job.action)) continue;
@@ -808,7 +822,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
       el('section', { 'aria-label': 'Steps', style: { ...stack, flex: '1 1 380px', minWidth: 0 }, children: [
         jsx(StepTabs, { step, setStep }, 'tabs'),
         el('div', { role: 'tabpanel', id: `cutroom-panel-${step}`, 'aria-labelledby': `cutroom-tab-${step}`, tabIndex: 0, style: { ...stack, minHeight: 200 }, children: [
-          jsx(Notice, { error: jobError }, 'job-error'),
+          jsx(Notice, { error: jobError?.step === step ? jobError.error : null }, 'job-error'),
           jsx(stepNode, { kit }, `step:${step}`),
         ] }, 'panel'),
         el('div', { style: { ...row, justifyContent: 'space-between' }, children: [
@@ -1152,7 +1166,7 @@ function EditStep({ kit }) {
     return el('div', { style: stack, children: [intro, el('div', { style: { ...panel, alignItems: 'flex-start' }, children: [
       el('p', { style: { margin: 0 }, children: silent ? 'This video has no sound, so there are no words to edit.' : transcribing ? `Transcribing… ${pct(transcribing.progress)}%` : 'This video has no transcript yet. Transcribe it to edit by text.' }),
       silent ? null : jsx(Button, { disabled: Boolean(transcribing), onClick: () => kit.runAction('transcribe'), children: 'Transcribe' }),
-      el('p', { style: muted, children: 'Transcription runs on the computer that runs Cutroom, with the speech model from Settings → Plugins → Cutroom.' }),
+      el('p', { style: muted, children: 'Transcription runs on the computer that runs Cutroom. It uses the speech model from Settings → Plugins → Cutroom, or the best one in the Cutroom models folder.' }),
     ] })] });
   }
   return el('div', { style: stack, children: [intro,
@@ -1345,9 +1359,9 @@ function StyleStep({ kit }) {
   const sample = value => {
     const accent = captionAccent(settings);
     const one = value === 'one_word';
-    const words = value === 'off' ? null : one ? el('span', { style: { color: accent }, children: 'Guyana' })
-      : value === 'classic' ? 'I came from Guyana'
-        : ['I came from ', el('span', { style: { color: value === 'highlight' ? accent : undefined, fontSize: value === 'pop' ? '1.2em' : undefined }, children: 'Guyana' }, 'word')];
+    const words = value === 'off' ? null : one ? el('span', { style: { color: accent }, children: 'words' })
+      : value === 'classic' ? 'Your words appear here'
+        : ['Your words appear ', el('span', { style: { color: value === 'highlight' ? accent : undefined, fontSize: value === 'pop' ? '1.2em' : undefined }, children: 'here' }, 'word')];
     return el('span', { 'aria-hidden': true, style: { position: 'relative', display: 'flex', alignItems: one ? 'center' : 'flex-end', justifyContent: 'center', width: '100%', aspectRatio: '16 / 9', borderRadius: 6, overflow: 'hidden',
       backgroundColor: STAGE, backgroundImage: poster ? `url("${poster.data_url}")` : undefined, backgroundSize: 'cover', backgroundPosition: 'center', containerType: 'size' },
     children: words ? el('span', { style: { padding: '0 6% 6%', textAlign: 'center', fontWeight: 800, lineHeight: 1.15, fontSize: one ? '30cqh' : '19cqh', color: captionText(settings), textShadow: outline }, children: words }) : null });
@@ -1397,8 +1411,7 @@ function StyleStep({ kit }) {
         options: FRAMINGS.map(([value, title, detail]) => ({ key: `framing-mode:${value}`, value, title, detail })) }),
       settings.framing === 'face_track' && !faceReady ? el('div', { style: { ...panel, padding: 12, gap: 8 }, children: [
         el('p', { style: { margin: 0, fontSize: 13 }, children: 'Face tracking needs a face analysis first. It runs on this project once.' }),
-        settings.face_model ? jsx(Button, { variant: 'secondary', disabled: Boolean(vision), onClick: () => kit.run('vision', {}), children: vision ? `Analysing faces… ${pct(vision.progress)}%` : 'Analyse faces' })
-          : el('p', { style: muted, children: 'Add a face model file in Settings → Plugins → Cutroom, or under More tools → Project model paths.' }),
+        jsx(Button, { variant: 'secondary', disabled: Boolean(vision), onClick: () => kit.run('vision', {}), children: vision ? `Analysing faces… ${pct(vision.progress)}%` : 'Analyse faces' }),
       ] }) : null,
       el('p', { style: muted, children: 'Cropping enlarges the picture, so a small source can look softer. The Review step tells you when that happens.' }),
     ] }),
@@ -1561,10 +1574,15 @@ function ReviewStep({ kit }) {
   const qaJob = jobs.find(job => job.action === 'qa' && ACTIVE.includes(job.status));
   const intro = el('div', { style: { ...stack, gap: 4 }, children: [el('h2', { style: h2s, children: 'Review' }), el('p', { style: muted, children: 'Cutroom makes a preview and checks it. Watch it, then approve the version you want to export.' })] });
   const edited = kit.editedAfter ? el('p', { role: 'status', style: alertStyle, children: 'You changed the video after approving it. Review it again.' }) : null;
+  const settings = kit.view?.settings || {};
+  const needsFaces = settings.framing === 'face_track' && !kit.view?.analysis?.face_samples;
+  const visionJob = jobs.find(job => job.action === 'vision' && ACTIVE.includes(job.status));
+  const makePreview = () => needsFaces ? kit.run('vision', {}, ['preview', 'qa']) : kit.run('preview', {}, ['qa']);
   if (!previewCurrent) return el('div', { style: stack, children: [intro, edited, el('div', { style: { ...panel, alignItems: 'flex-start' }, children: [
     el('p', { style: { margin: 0 }, children: previewJob ? `Making preview… ${pct(previewJob.progress)}%` : project.artifacts?.preview ? 'You changed the video since the last preview. Make a new preview to review it.' : 'There is no preview of this version yet.' }),
-    jsx(Button, { disabled: Boolean(previewJob), onClick: () => kit.run('preview', {}, ['qa']), children: 'Make preview' }),
-    el('p', { style: muted, children: 'The preview is checked automatically when it is ready.' }),
+    visionJob ? el('p', { style: { margin: 0 }, children: `Analysing faces… ${pct(visionJob.progress)}%` }) : null,
+    jsx(Button, { disabled: Boolean(previewJob || visionJob), onClick: makePreview, children: 'Make preview' }),
+    el('p', { style: muted, children: needsFaces ? 'This version follows the speaker, so Cutroom analyses faces first (once per project), then makes and checks the preview.' : 'The preview is checked automatically when it is ready.' }),
   ] })] });
   const headline = qa ? qaHeadline(qa.checks) : null;
   const current = review && review.project?.revision === project.revision;
@@ -2069,7 +2087,7 @@ function SettingsPage({ ctx }) {
     el('div', { style: { ...stack, gap: 4 }, children: [el('h2', { style: h2s, children: 'Cutroom' }), el('p', { style: muted, children: 'Defaults for new videos you import in Cutroom. Existing projects keep their own settings.' })] }, 'head'),
     el('section', { 'aria-labelledby': 'cutroom-models', style: stack, children: [
       el('h3', { id: 'cutroom-models', style: h3s, children: 'Model files' }),
-      el('p', { style: muted, children: 'Files on the computer that runs Cutroom. Nothing is downloaded automatically.' }),
+      el('p', { style: muted, children: 'Files on the computer that runs Cutroom. Nothing is downloaded automatically. Leave a field empty to use the best model in the models folder inside the Cutroom workspace.' }),
       path('whisper_model', 'Speech model (Whisper) file'),
       el('p', { style: { ...muted, marginTop: -4 }, children: 'For removing words, the small model hears short words reliably. The tiny model is faster but can invent or miss a word; listen before you remove one.' }, 'whisper-hint'),
       path('face_model', 'Face model file'), path('segmentation_model', 'Background model file'),
