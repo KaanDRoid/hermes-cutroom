@@ -116,6 +116,43 @@ The sibling gets `settings.platform`, the profile's aspect, the profile's defaul
 
 Hooks and storyboards are deterministic excerpts of the transcript. Nothing is generated, paraphrased or invented, and footage is never reordered.
 
+## Media summaries in tool results
+
+When `cutroom_job get` (or `submit`, if the job is already complete) returns a completed `preview`, `final` or `cover` job, the result also carries `media` and `display_hint`. `cutroom_project get` adds `media` with the current `preview` and/or `final` summary when those renders exist. Hermes Desktop reads these fields to draw the Cutroom card for the `MEDIA:` line; any other surface just plays the file.
+
+```json
+{
+  "media": {
+    "path": "C:\\Users\\you\\AppData\\Local\\hermes\\plugins\\cutroom\\jobs\\<job id>\\outputs\\preview.mp4",
+    "kind": "preview",
+    "project_id": "<project id>",
+    "project_name": "talk",
+    "platform": "instagram_reels",
+    "duration": 41.96,
+    "width": 1080,
+    "height": 1920,
+    "current": true,
+    "qa": {
+      "job_id": "<qa job id>",
+      "status": "warning",
+      "passed": 13,
+      "failed": 0,
+      "warnings": 1,
+      "total": 14,
+      "failed_checks": [],
+      "warning_checks": ["platform_upscale"]
+    },
+    "approved": false
+  },
+  "display_hint": "Show it to the person with a line: MEDIA:C:\\Users\\you\\...\\preview.mp4"
+}
+```
+
+- `path` is the absolute file path exactly as published; `media` is omitted when the file is missing or the path is not absolute. No file contents are included.
+- `qa` comes from the latest completed `qa` job for that same render (for a cover, the render it was taken from), or is `null` when none exists. `status` is computed from the check statuses: `fail` if any check failed, otherwise `warning` if any check warned, otherwise `pass`. Skipped checks count only in `total`. The report's own `passed` flag is `false` on warnings, so do not use it for the summary: a `warning` result is ready with notes.
+- `approved` is true only when the project's human approval matches its current revision. `current` says whether this job's render is still the project's published one.
+- Lookup problems never hide the job: the result is returned without `media`. Non-finite numbers become `null`.
+
 ## Artifact lineage and staleness
 
 Every published file must live in its job's own `jobs/<id>/outputs/` directory. Its lineage records the job, SHA-256, size, modification time and the review digest it was rendered for (`segmented` records a fingerprint of the source, segmentation model, background, graphic and width instead).
