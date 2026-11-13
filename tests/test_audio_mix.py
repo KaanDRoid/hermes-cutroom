@@ -508,7 +508,12 @@ class MixRenderTests(_MediaCase):
         output, _ = self.export("qa.mp4", None, platform=None)
 
         def status(depth, requested):
-            mix = {"music": {"present": True, "ducking": {"depth_db": depth, "requested_db": requested}}}
+            mix = {
+                "music": {
+                    "present": True,
+                    "ducking": {"depth_db": depth, "requested_db": requested},
+                }
+            }
             qa = pp.quality_report(output, {"preset": "preview", "audio_mix": mix})
             return {check["name"]: check for check in qa["checks"]}["music"]["status"]
 
