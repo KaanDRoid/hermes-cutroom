@@ -2377,7 +2377,10 @@ class Studio:
                 packages._write_text(
                     directory / "README.txt",
                     packages.readme_file(
-                        entry["label"], roles.items(), project["name"]
+                        entry["label"],
+                        roles.items(),
+                        project["name"],
+                        linked=link == "hardlink",
                     ),
                 )
                 manifest = packages.manifest_record(

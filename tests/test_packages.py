@@ -328,6 +328,9 @@ class PackageTests(_Workspace):
         self.assertLess((directory / "cover.jpg").stat().st_size, 2_000_000)
         readme = (directory / "README.txt").read_text(encoding="utf-8")
         self.assertIn("Nothing has been posted. Upload these files yourself.", readme)
+        # A hard link shares bytes with the approved final: say so in the
+        # file people read, not only in the developer docs.
+        self.assertIn("make a copy first", readme)
         post = (directory / "post.txt").read_text(encoding="utf-8")
         self.assertIn("Waves all day.\n\n#ocean #sea", post)
         self.assertIn("of 2,200 characters", post)
@@ -489,6 +492,8 @@ class PackageTests(_Workspace):
         self.assertFalse(
             os.path.samefile(final, Path(result["directory"]) / "video.mp4")
         )
+        readme = (Path(result["directory"]) / "README.txt").read_text("utf-8")
+        self.assertNotIn("make a copy first", readme)
         with final.open("ab") as stream:
             stream.write(b"x")
         with self.assertRaisesRegex(PermissionError, "changed"):

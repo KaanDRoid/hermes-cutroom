@@ -416,7 +416,7 @@ def post_file(platform, check, *, cover_line, extra_lines=()):
     return "\n".join(lines) + "\n"
 
 
-def readme_file(label, files, project_name):
+def readme_file(label, files, project_name, linked=False):
     lines = [
         f"Cutroom delivery package for {label}",
         "",
@@ -431,6 +431,14 @@ def readme_file(label, files, project_name):
         "- manifest.json: the size and SHA-256 checksum of every file above.",
         "",
         "To check that nothing changed, use Check package in Cutroom Studio (Export).",
+    ]
+    if linked:
+        lines += [
+            "video.mp4 shares its storage with the approved final in Cutroom, so",
+            "it takes no extra space. To edit or trim it, make a copy first;",
+            "changing this file changes the final too.",
+        ]
+    lines += [
         "Cutroom made these files on this computer. It did not upload, share or",
         "post anything.",
     ]
