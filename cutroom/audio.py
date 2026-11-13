@@ -1,7 +1,11 @@
 """Local audio assets and deterministic speech-aware mixing."""
 
+import array
+import bisect
 import math
 import re
+import subprocess
+import time
 from pathlib import Path
 
 from .project import file_digest
@@ -50,6 +54,11 @@ def _asset(spec, allowed, maximum_duration):
         or not spec["path"]
     ):
         raise ValueError("Audio asset needs a local path and known fields")
+    if not Path(spec["path"]).is_absolute():
+        # A relative path would depend on the server's working directory.
+        raise ValueError(
+            "Audio asset path must be absolute (for example C:/Music/bed.wav)"
+        )
     path = _path(spec["path"])
     if path.stat().st_size > MUSIC_MAX_BYTES:
         raise ValueError("Audio asset is larger than 256 MiB")
@@ -205,14 +214,14 @@ def limit_peaks(path, directory, gain_db, ceiling_db, timeout, name="mix-limited
 
 
 def parse_levels(path):
-    result, time = [], None
+    result, moment = [], None
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         match = re.search(r"pts_time:([-+\deE.]+)", line)
         if match:
-            time = float(match[1])
-        elif time is not None and "RMS_level=" in line:
+            moment = float(match[1])
+        elif moment is not None and "RMS_level=" in line:
             value = float(line.split("=", 1)[1])
-            result.append((time, max(-120.0, value)))
+            result.append((moment, max(-120.0, value)))
     return result
 
 
@@ -220,18 +229,29 @@ def speech_intervals(levels, window=0.05):
     finite = [level for _, level in levels if math.isfinite(level)]
     threshold = max(-50, max(finite, default=-120) - 30)
     result = []
-    for time, level in levels:
+    for moment, level in levels:
         if level <= threshold:
             continue
-        end = round(time + window, 6)
-        if result and time - result[-1][1] <= 0.25:
+        end = round(moment + window, 6)
+        if result and moment - result[-1][1] <= 0.25:
             result[-1] = (result[-1][0], end)
         else:
-            result.append((time, end))
+            result.append((moment, end))
     return result
 
 
+ATTACK = 0.15
+RELEASE = 0.25
+RATE = 48000
+_CHUNK = 1 << 20
+# Loops with more copies than this repeat a buffered segment instead.
+_CONCAT_LIMIT = 16
+# Short fade that closes music followed by silence, avoiding a click.
+ANTI_CLICK = 0.01
+
+
 def envelope_gain(intervals, depth):
+    """Reference ducking gain at one time; slow, kept for tests and spot checks."""
     floor = 10 ** (-depth / 20)
 
     def gain(time):
@@ -248,6 +268,125 @@ def envelope_gain(intervals, depth):
         return 1 - amount * (1 - floor)
 
     return gain
+
+
+def _first_at_or_after(x):
+    """Smallest sample index whose time is >= x."""
+    index = max(0, math.ceil(x * RATE))
+    while index > 0 and (index - 1) / RATE >= x:
+        index -= 1
+    while index / RATE < x:
+        index += 1
+    return index
+
+
+def _first_after(x):
+    """Smallest sample index whose time is > x."""
+    index = _first_at_or_after(x)
+    while index / RATE <= x:
+        index += 1
+    return index
+
+
+def envelope_chunks(intervals, depth, count, typecode="h"):
+    """Yield the ducking gain for samples 0..count-1 as arrays.
+
+    Same values as envelope_gain, built piecewise: each speech interval adds an
+    attack ramp, a floor plateau and a release ramp. Runs at unity or at the
+    floor are filled by array repetition, single ramps come from cached
+    tables, and only overlapping ramps are evaluated sample by sample. typecode
+    "h" yields 16-bit PCM (round(32767 * gain)), "d" the gain itself.
+    """
+    floor = 10 ** (-depth / 20)
+    span = 1 - floor
+    pcm = typecode == "h"
+
+    def convert(value):
+        return round(32767 * value) if pcm else value
+
+    pieces = []  # (first, stop, kind, start, end): kind 0 attack, 1 plateau, 2 release
+    for start, end in intervals:
+        a = _first_at_or_after(start - ATTACK)
+        b = _first_at_or_after(start)
+        c = _first_after(end)
+        d = _first_at_or_after(end + RELEASE)
+        for first, stop, kind in ((a, b, 0), (b, c, 1), (c, d, 2)):
+            first, stop = min(first, count), min(stop, count)
+            if first < stop:
+                pieces.append((first, stop, kind, start, end))
+    tables = {}
+
+    def amount(piece, index):
+        _, _, kind, start, end = piece
+        t = index / RATE
+        if kind == 1:
+            return 1.0
+        if kind == 0:
+            return max(0.0, min(1.0, (t - (start - ATTACK)) / ATTACK))
+        return max(0.0, min(1.0, (end + RELEASE - t) / RELEASE))
+
+    def table(piece):
+        first, stop, kind, start, end = piece
+        # Ramps on the same sample phase share one table.
+        origin = (start - ATTACK) * RATE if kind == 0 else (end + RELEASE) * RATE
+        key = (kind, stop - first, round(origin - first, 6))
+        if key not in tables:
+            gains = array.array(
+                "d", (1 - amount(piece, first + k) * span for k in range(stop - first))
+            )
+            tables[key] = (
+                gains,
+                array.array(typecode, (convert(g) for g in gains)) if pcm else gains,
+            )
+        return tables[key]
+
+    def constant(value, length):
+        unit = array.array(typecode, [convert(value)])
+        while length > 0:
+            size = min(length, _CHUNK)
+            yield unit * size
+            length -= size
+
+    bounds = sorted({0, count, *(p[0] for p in pieces), *(p[1] for p in pieces)})
+    pieces.sort()
+    active, cursor = [], 0
+    for left, right in zip(bounds, bounds[1:]):
+        while cursor < len(pieces) and pieces[cursor][0] <= left:
+            active.append(pieces[cursor])
+            cursor += 1
+        active = [p for p in active if p[1] > left]
+        if not active:
+            yield from constant(1.0, right - left)
+        elif any(p[2] == 1 for p in active):
+            yield from constant(floor, right - left)
+        elif len(active) == 1:
+            piece = active[0]
+            yield table(piece)[1][left - piece[0] : right - piece[0]]
+        else:
+            # Overlapping ramps between close speech runs: the deepest gain wins.
+            gains = array.array(
+                "d",
+                (
+                    1 - max(amount(p, index) for p in active) * span
+                    for index in range(left, right)
+                ),
+            )
+            yield array.array(typecode, (convert(g) for g in gains)) if pcm else gains
+
+
+def write_envelope(path, intervals, depth, count, *, deadline):
+    """Write the ducking gain as 48 kHz mono 16-bit PCM before the deadline."""
+    import wave
+
+    if time.monotonic() > deadline:
+        raise subprocess.TimeoutExpired("ducking envelope", 0)
+    with wave.open(str(path), "wb") as stream:
+        stream.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+        for block in envelope_chunks(intervals, depth, count):
+            if time.monotonic() > deadline:
+                raise subprocess.TimeoutExpired("ducking envelope", 0)
+            stream.writeframes(block.tobytes())
+    return path
 
 
 def validate_settings(spec, *, check_hash=True):
@@ -301,11 +440,18 @@ def _levels(path, directory, name, timeout):
 
 def _duck_measurement(levels, intervals, duration, requested):
     speech, pauses = [], []
-    for time, level in levels:
-        if any(start + 0.2 <= time <= end - 0.25 for start, end in intervals):
+    ordered = sorted(intervals)
+    starts = [start for start, _ in ordered]
+    ends = [end for _, end in ordered]
+    # Speech runs are sorted and disjoint, so the latest run starting before a
+    # time is the only one that can contain it (and the latest end bounds it).
+    for moment, level in levels:
+        index = bisect.bisect_right(starts, moment - 0.2) - 1
+        late = bisect.bisect_right(starts, moment + 0.3) - 1
+        if index >= 0 and moment <= ends[index] - 0.25:
             speech.append(level)
-        elif 0.6 <= time <= duration - 0.6 and not any(
-            start - 0.3 <= time <= end + 0.4 for start, end in intervals
+        elif 0.6 <= moment <= duration - 0.6 and not (
+            late >= 0 and moment <= ends[late] + 0.4
         ):
             pauses.append(level)
 
@@ -326,11 +472,19 @@ def _duck_measurement(levels, intervals, duration, requested):
 def prepare_mix(
     source, audio_graph, directory, duration, spec, ranges, *, has_audio, timeout
 ):
-    """Render an exact-length PCM mix before the final two-pass loudnorm scan."""
-    import array
-    import wave
+    """Render an exact-length PCM mix before the final two-pass loudnorm scan.
 
+    timeout bounds the whole preparation, not each step.
+    """
     from .postproduction import _render_graph, _run
+
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired("audio mix", timeout)
+        return left
 
     voice = directory / "voice.wav"
     chain = cleanup_filters(spec["voice_cleanup"])
@@ -358,7 +512,7 @@ def prepare_mix(
                 str(voice),
             ],
             cwd=directory,
-            timeout=timeout,
+            timeout=remaining(),
         )
     else:
         _run(
@@ -376,9 +530,9 @@ def prepare_mix(
                 "pcm_f32le",
                 str(voice),
             ],
-            timeout=timeout,
+            timeout=remaining(),
         )
-    levels = _levels(voice, directory, "speech.txt", timeout)
+    levels = _levels(voice, directory, "speech.txt", remaining())
     intervals = speech_intervals(levels)
     inputs = ["-protocol_whitelist", "file", "-i", str(voice)]
     graph, tracks = [], ["[0:a:0]"]
@@ -387,47 +541,59 @@ def prepare_mix(
     )
     music = spec.get("music")
     if music:
-        inputs += ["-stream_loop", "-1"] if music["loop"] else []
-        inputs += [
-            "-ss",
-            str(music["start_offset"]),
-            "-protocol_whitelist",
-            "file",
-            "-i",
-            music["path"],
-        ]
-        bed_filters = [
-            "asetpts=PTS-STARTPTS",
-            "aresample=48000",
+        offset = music["start_offset"]
+        segment = music["duration"] - offset
+        looped = music["loop"] and segment < duration
+        # Every copy starts at the offset, so a loop repeats the chosen segment.
+        repeats = math.ceil(duration / segment) + 1 if looped else 1
+        copies = repeats if repeats <= _CONCAT_LIMIT else 1
+        for _ in range(copies):
+            inputs += [
+                "-ss",
+                f"{offset:.6f}",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                music["path"],
+            ]
+        head = "".join(f"[{1 + i}:a:0]" for i in range(copies))
+        bed_filters = [f"concat=n={copies}:v=0:a=1"] if copies > 1 else []
+        bed_filters += ["asetpts=PTS-STARTPTS", "aresample=48000"]
+        if looped and copies == 1:
+            # A very short segment loops in memory; it is under 1/16 of the program.
+            bed_filters += [
+                f"aloop=loop=-1:size={math.ceil(segment * RATE)}",
+                "asetpts=N/SR/TB",
+            ]
+        bed_filters += [
             f"volume={music['volume_db']}dB",
             "apad",
             f"atrim=duration={duration:.6f}",
         ]
-        for key in ("fade_in", "fade_out"):
-            fade = min(music[key], duration)
-            if fade:
-                bed_filters.append(
-                    f"afade=t={'in' if key == 'fade_in' else 'out'}:st={0 if key == 'fade_in' else duration - fade}:d={fade}"
-                )
-        graph.append("[1:a:0]" + ",".join(bed_filters) + "[bed]")
+        # Without a loop, short music ends (and fades out) where the music ends.
+        end = duration if music["loop"] or segment >= duration else segment
+        fade_in = min(music["fade_in"], end)
+        fade_out = min(music["fade_out"], end)
+        if end < duration:
+            # Silence follows the music, so always close it with a short fade.
+            fade_out = max(fade_out, min(ANTI_CLICK, end))
+        if fade_in:
+            bed_filters.append(f"afade=t=in:st=0:d={fade_in:.6f}")
+        if fade_out:
+            bed_filters.append(f"afade=t=out:st={end - fade_out:.6f}:d={fade_out:.6f}")
+        graph.append(head + ",".join(bed_filters) + "[bed]")
         if music["duck"]:
-            # A small guard absorbs sample quantization and codec leakage at the floor.
-            gain = envelope_gain(intervals, music["duck_db"] + 0.75)
             envelope = directory / "envelope.wav"
-            with wave.open(str(envelope), "wb") as stream:
-                stream.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
-                count = round(duration * 48000)
-                for start in range(0, count, 48000):
-                    block = array.array(
-                        "h",
-                        (
-                            round(32767 * gain(index / 48000))
-                            for index in range(start, min(start + 48000, count))
-                        ),
-                    )
-                    stream.writeframes(block.tobytes())
+            # A small guard absorbs sample quantization and codec leakage at the floor.
+            write_envelope(
+                envelope,
+                intervals,
+                music["duck_db"] + 0.75,
+                round(duration * RATE),
+                deadline=deadline,
+            )
             inputs += ["-protocol_whitelist", "file", "-i", str(envelope)]
-            graph.append("[bed][2:a:0]amultiply[music]")
+            graph.append(f"[bed][{1 + copies}:a:0]amultiply[music]")
         else:
             graph.append("[bed]anull[music]")
         # Keep the actual stem for an auditable depth measurement, not a configured claim.
@@ -451,9 +617,9 @@ def prepare_mix(
                 str(stem),
             ],
             cwd=directory,
-            timeout=timeout,
+            timeout=remaining(),
         )
-        measured = _levels(stem, directory, "music-levels.txt", timeout)
+        measured = _levels(stem, directory, "music-levels.txt", remaining())
         report["music"] = dict(
             present=True,
             source_note=music["source_note"],
@@ -518,7 +684,7 @@ def prepare_mix(
             str(mix),
         ],
         cwd=directory,
-        timeout=timeout,
+        timeout=remaining(),
     )
     # Recheck assets after reading; Studio also verifies before publication.
     validate_settings(spec)

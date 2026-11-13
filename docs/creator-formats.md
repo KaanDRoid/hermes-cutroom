@@ -72,7 +72,7 @@ Status: merged into `feat/creator-formats` (pull request #12).
 - **Settings.** Projects accept `settings.platform` (default `custom`) and `settings.final_resolution` (`"1080"` or `"2160"`). Projects without the keys load as `custom`, and `custom` produces the same render settings as 0.1 (regression-tested byte for byte). Choosing a platform sets `settings.aspect` to the profile's orientation.
 - **Platform renders.** A non-custom project renders at the profile's exact frame (preview at the profile preview size, final at the chosen resolution), with −14 LUFS / −1 dBTP loudness. Title, lower third and caption band are placed from one geometry function (`postproduction.platform_layout`) that keeps every box inside the safe zone, using the stricter of the profile zone and the brand's `safe_margin`. The two-line caption band is clamped at both edges of the safe area, and the lower third is moved (with the captions below it) rather than rejected; an error is raised only when the safe area is too short for both. Burned cues are split into events of at most two lines (`platform_caption_cues`: words wrapped at the band's characters per line using a full em per character, time shared by characters, no text dropped) and libass word wrapping is off for platform renders. Text on asymmetric zones is centred in the safe area, not in the frame. Covers use the same geometry.
 - **Final export limit.** `final` is refused before a job exists when the edit is longer than the profile's hard limit (for example 185 s for Shorts). Previews are still allowed so the person can see and trim the edit.
-- **Per-platform QA.** For platform projects, `quality_report` adds `platform_frame` (exact size), `platform_duration` (fail above the hard limit, warning above the recommended length), `platform_fps` (warning below the profile minimum, skip when there is none; NTSC 30000/1001 counts as 30; for variable-rate video the slowest frame interval is reported as `min_instantaneous_fps` and also warns when below the minimum), `platform_upscale` (warning when the fitted picture is larger than the source pixel grid in display orientation; Studio passes the render's `source_video` into the QA settings, and the check is skipped when it is absent), `platform_loudness` (warning outside ±1 LU of −14 LUFS or above −1 dBTP + 0.3 dB) and `safe_zone` (fail when a title, lower-third or caption box computed from the render geometry reaches into the unsafe margins). The checks use the existing report structure, so Desktop lists them with the others. Custom projects get no platform checks.
+- **Per-platform QA.** For platform projects, `quality_report` adds `platform_frame` (exact size), `platform_duration` (fail above the hard limit, warning above the recommended length), `platform_fps` (warning below the profile minimum, skip when there is none; NTSC 30000/1001 counts as 30; for variable-rate video the slowest frame interval is reported as `min_instantaneous_fps` and also warns when below the minimum), `platform_upscale` (warning when the fitted picture is larger than the source pixel grid in display orientation; Studio passes the render's `source_video` into the QA settings, and the check is skipped when it is absent), `platform_loudness` (warning outside ±1 LU of −14 LUFS or above −1 dBTP) and `safe_zone` (fail when a title, lower-third or caption box computed from the render geometry reaches into the unsafe margins). The checks use the existing report structure, so Desktop lists them with the others. Custom projects get no platform checks.
 - **Derived projects.** `Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling from the same source. It copies the transcript, cuts (`base_segments`, `segments`, `excluded_word_ids`, `gaze_exclusions`), story and selected hook, brief, voice and all settings (brand, title, captions flag, model paths), then sets the platform and the target profile's default final resolution (a parent's `"2160"` is not carried over unless `final_resolution` asks for it; `custom` siblings have none). The stored name is stripped of surrounding whitespace. It does not copy artifacts, approval, job history, vision analysis or `use_segmented` (the person layer must be rebuilt for the sibling). The sibling starts at revision 1 as a draft and records `derived_from` (`project_id`, `revision`, `digest`). The source fingerprint is checked first.
 - **Surfaces.** Agent tool action `cutroom_project derive` with optional `final_resolution` (no approval is copied or granted), `POST /projects/{id}/derive` (a missing source or asset file answers 422 with the file named, not 404), `GET /platforms`, and on the Desktop page a platform selector, a final-resolution selector, a profile summary, a **Show safe zone** toggle that shades the unsafe areas over a loaded preview or final (CSS boxes from the API's profile data, for the profile recorded in the render's lineage, drawn once the video metadata has loaded), and **Create version for Reels / Shorts / TikTok / YouTube** buttons that open the new project.
 - **Room for source ranges.** `derive` builds the sibling in `_derived_project`; F5 can narrow the copied cuts there and add a range to `derived_from` without changing callers.
@@ -221,7 +221,7 @@ Status: implemented on `feat/f4-music-voice`.
   - `settings.voice_cleanup`: `off`, `light` or `strong`.
 
   Studio, the REST model and the `cutroom_project` tool all apply the same rules, and `null` removes music or a cut sound.
-- **Local files only.** An audio file must be a local regular file of at most 256 MiB, whose container FFprobe reads as an audio data format (WAV, MP3, FLAC, Ogg, AAC, MP4/M4A/MOV/3GP, Matroska/WebM or AIFF) with an audio stream. Music may be up to 24 h long.
+- **Local files only.** An audio path must be absolute; a relative path is refused with "Audio asset path must be absolute", because it would depend on the server's working directory. An audio file must be a local regular file of at most 256 MiB, whose container FFprobe reads as an audio data format (WAV, MP3, FLAC, Ogg, AAC, MP4/M4A/MOV/3GP, Matroska/WebM or AIFF) with an audio stream. The 256 MiB size cap is the practical limit on music length (the probed duration may not exceed 24 h, but few files that long fit the cap).
   - Cutroom records the file's SHA-256, duration and format, and the file is part of the review digest, so replacing it revokes approval.
   - A render checks the hash again before and after mixing, and refuses a file that changed since it was saved ("select the file again").
   - Nothing is downloaded and no music library is shipped.
@@ -231,17 +231,19 @@ Status: implemented on `feat/f4-music-voice`.
   - The FFT denoiser delays audio by 1,200 samples (25 ms) at 48 kHz. Cutroom pads and trims around it, so the cleaned voice stays on its frames.
 - **Mix.** The cut, cleaned voice is rendered to 32-bit float PCM first.
   - **Speech detection.** Speech is found from 50 ms RMS windows above max(−50 dBFS, loudest − 30 dB), and gaps up to 0.25 s are bridged.
-  - **Ducking.** The music gain reaches its full depth 0.15 s before speech and recovers over 0.25 s after it. The depth is `duck_db` plus a 0.75 dB guard.
-  - **Music bed.** Music is looped or padded with silence to the program length, with fades at both ends.
+  - **Ducking.** The music gain reaches its full depth 0.15 s before speech and recovers over 0.25 s after it. The depth is `duck_db` plus a 0.75 dB guard. The gain envelope is built piecewise (constant runs filled at once, ramps from cached tables) and the whole mix preparation, envelope included, is bounded by the render timeout.
+  - **Music bed.** Music starts at `start_offset`. With `loop`, the segment from `start_offset` to the end repeats until the program ends, and `fade_out` ends at the program end. Without `loop`, music shorter than the program ends where the music ends: `fade_out` finishes there (at least a 10 ms fade, so there is no click) and silence follows. `fade_in` starts at the program start.
   - **Cut sounds.** A cut sound is resampled to 48 kHz and placed on every cut in program time.
-  - **Measurement.** The music stem is rendered separately and its level is measured on speech and pause plateaus, so the reported depth is measured, not configured.
+  - **Measurement.** The music stem is rendered separately and its level is measured on speech and pause plateaus, so the reported depth is measured, not configured. This is render-stage evidence: it is taken before final normalization and encoding, not on the delivered file.
 - **Loudness.**
   - The mix is normalised in two passes to the profile target (−14 LUFS and −1 dBTP for platforms, −16 LUFS and −1.5 dBTP for `custom`).
   - FFmpeg's `loudnorm` applies a linear gain only if the gained true peak stays under the limit; otherwise it silently switches to dynamic mode and can miss the target. When the gain would not fit, Cutroom applies the gain itself, limits peaks at 0.3 dB under the limit with a 4× oversampled limiter (look-ahead compensated), measures again, and repeats at most three times.
+  - Resampling and AAC encoding can still push peaks above the limit. Every normalised export is therefore measured after encoding (EBU R128 true peak, as QA reads it). If it is over the limit, the render is repeated with an oversampled limiter after `loudnorm` whose ceiling is lowered by the overshoot plus 0.2 dB, at most twice more. The export result records `delivered_true_peak_db` and the `delivered_peak_ceiling_db` used (or `null`).
   - The export result names the method: `two-pass measured loudnorm`, `two-pass measured loudnorm (true-peak limited)`, or `dynamic loudnorm (linear gain would exceed the true-peak limit)`. Plain renders without music now report a dynamic fallback too, instead of claiming a measured two-pass result.
 - **QA.** `qa` adds two checks:
-  - `music`: the measured ducking depth must be at least the requested depth minus 0.5 dB, and never below 12 dB.
-  - `mix_loudness`: within ±0.5 LU of the target, and a true peak no more than 0.3 dB over the limit.
+  - `music`: the measured ducking depth must be at least the requested depth minus 0.5 dB, and never below 12 dB. Its detail says `stage: render`: the depth comes from the rendered music stem, not from the delivered file.
+  - `mix_loudness`: within ±0.5 LU of the target, and a true peak at or under the limit.
+  - `audio_loudness`, `platform_loudness` and `mix_loudness` warn as soon as the true peak is over the limit; there is no extra tolerance.
 - **Desktop.** Settings has a "Music, cut sounds & voice" group: file paths, levels, fades, offset and a source note, switches for loop and ducking, and three voice clean-up buttons. A blank number uses the default. A blank path removes a saved sound, or sends nothing if there was none. Out-of-range numbers are refused before saving.
 
 ### Audio/video sync across cuts (all renders)
@@ -267,12 +269,12 @@ The plain and mixed paths share the same audio ranges. Variable-frame-rate sourc
   - `av-sync-red.log`, `av-sync-many-red.log` and `av-duration-red.log`: the A/V offset, the per-cut drift and the short audio.
   - The Desktop removal path was checked by mutation (`desktop-mutation.log`).
 - **GREEN.**
-  - `artifacts/f4/full-4.log`: 284 Python tests OK, 14 skipped without local models and media.
+  - `artifacts/f4/full-4.log`: 285 Python tests OK, 14 skipped without local models and media (before the review fixes; see below for the current count).
   - Desktop checks 22/22, Ruff clean.
 - **`tests/test_audio_mix.py`:**
   - Strict settings, hashing and refusal of changed files.
   - Speech detection and the ducking envelope.
-  - Ducking depth measured on the delivered file, loudness, true peak and duration.
+  - Ducking depth measured in the music band of the delivered file (by the test, not by QA), loudness, true peak and duration.
   - Loop and pad with fades.
   - The custom target is kept, and an unchanged graph when audio settings are absent.
   - Cut sounds on each cut, including a 44.1 kHz effect.
@@ -285,15 +287,30 @@ The plain and mixed paths share the same audio ranges. Variable-frame-rate sourc
   - three ranges,
   - twelve ranges cut between frames.
 - **Real footage.** `artifacts/f4/render_evidence.py`, `artifacts/f4/evidence/measurements.json`. The Sandra clip (Wikitongues / Elise Lieberman, CC BY-SA 4.0), kept ranges 0–12 s and 14–26 s, rendered as a 24 s Reels preview with music, a cut sound and `light` clean-up. The music bed and cut sound were generated for the test.
-  - Loudness −14.1 LUFS, true peak −1.3 dBTP; `music`, `mix_loudness` and `duration` pass. Before the limiter fix, the same render measured −13.4 LUFS and the method said "two-pass" while FFmpeg had run in dynamic mode.
-  - Ducking measured independently on the delivered file is 15.75 dB, against an identical render without ducking with the voice band as the gain reference. The request was 15 dB plus the 0.75 dB guard; the stem report says 15.95 dB.
+  - Loudness −14.1 LUFS, true peak −1.3 dBTP; `music`, `mix_loudness` and `duration` pass. Repeated after the review fixes (`artifacts/f4/evidence-fix/measurements.json`) with the same figures: −14.1 LUFS, −1.3 dBTP delivered (no re-limit needed), ducking 15.75 dB independently and 15.95 dB in the stem report, cut sound 34.8 dB above the plain render, voice lag −1 sample (clean-up and mix) and 0 (music only), audio and video lengths 23.990625 s and 23.990633 s. Before the limiter fix, the same render measured −13.4 LUFS and the method said "two-pass" while FFmpeg had run in dynamic mode.
+  - Ducking measured independently on the delivered file by the evidence script (not by QA) is 15.75 dB, against an identical render without ducking with the voice band as the gain reference. The request was 15 dB plus the 0.75 dB guard; the stem report says 15.95 dB.
   - The cut sound is 34.8 dB above the plain render in its band at the cut (12.012 s).
   - Voice offset against the plain render is 0 or −1 sample in both ranges, and audio and video lengths match to within one sample.
   - The source file is unchanged (hash compared before and after).
 
+### Review fixes
+
+An independent review (`artifacts/f4/review/FINDINGS.md`) found six problems. Each has a regression test in `tests/test_audio_review_fixes.py`, which failed before the fix (`artifacts/f4/fix/red.log`: 13 failures, 4 errors in 12 tests). Measurements: `artifacts/f4/fix/fixes.json` (`artifacts/f4/fix/probe_fixes.py`).
+
+1. **Ducking envelope cost.** The envelope was computed per sample in Python against every speech interval, without a time limit: 120 s of program with 60 speech runs took 129 s under a 30 s timeout. It is now built piecewise, and the mix preparation stops with a timeout at its deadline. A 30-minute envelope with 750 speech runs is written in 0.14 s; the 120 s case takes 0.97 s. The envelope matches the reference within 1.4e-14 and gives the same 16-bit samples. The speech/pause measurement also no longer scans every interval for every window.
+2. **Loop from the offset.** `-stream_loop` with `-ss` restarted later loops at the file start. Each loop now repeats the segment from `start_offset` (copies of the input seeked to the offset, or an in-memory loop for segments shorter than 1/16 of the program). A two-tone file looped from 2 s gives 800 Hz in all ten seconds (was 800, 800, 200, 200, …).
+3. **Short music without loop.** Music stopped abruptly and `fade_out` ran over the padded silence. The fade now ends where the music ends, with at least a 10 ms anti-click fade: a 3 s file with a 2 s fade falls from −21.1 dB to −71.9 dB in its last 10 ms; without a fade the last 2 ms are at −42.0 dB.
+4. **Delivered true peak.** Deliveries could reach −0.9 dBTP (−0.7 on the loud-crest case) and QA passed them through a silent 0.3 dB tolerance. Exports are now measured after encoding and re-limited when over, and QA warns above the limit. The loud-crest case delivers −14.1 LUFS at −1.4 dBTP with a −1.5 dB limiter ceiling, and all loudness checks pass.
+5. **Music QA label.** The `music` check now says `stage: render` and that it is not measured on the delivered file.
+6. **Relative music paths.** These resolved against the server's working directory. Music and cut-sound paths must now be absolute, in Studio, REST and the tool alike.
+
+Gates after the fixes: **297 Python tests OK**, 14 skipped without local models and media (`artifacts/f4/fix/tests.log`), including `tests/test_av_sync.py`; **22/22 Desktop tests** (`artifacts/f4/fix/desktop.log`); Ruff check and format clean (`artifacts/f4/fix/ruff.log`).
+
 ### Open items
 
 - A native Desktop run of the new controls (F8 / A28).
+- A re-limited export renders the video a second time; only exports whose encoded peak is over the limit pay this cost.
+- Music whose real decoded length is shorter than its probed duration ends at the decoded end; the fade then cannot be placed exactly.
 - Ducking follows detected speech energy. Loud non-speech sound in the voice track also ducks the music.
 - The limiter and its latency compensation use `alimiter` options available since FFmpeg 5.1. The FFmpeg 7.1 run in F8 will confirm them.
 - A source whose peaks sit within 13 dB of its loudness cannot reach −14 LUFS at −1 dBTP without heavy limiting. After three attempts Cutroom falls back to dynamic loudness and QA reports `mix_loudness` as a warning.

@@ -733,6 +733,52 @@ def _output_path(output, suffixes):
     return path
 
 
+# Encoded deliveries are measured and, when over the true-peak limit, rendered
+# again through an oversampled limiter whose ceiling drops by the overshoot.
+DELIVERY_PEAK_ATTEMPTS = 3
+DELIVERY_PEAK_MARGIN = 0.2
+
+
+def _peak_limiter(ceiling_db):
+    limit = min(1.0, max(0.0625, 10 ** (ceiling_db / 20)))
+    # latency=1 compensates the look-ahead, so the audio stays on its frames.
+    return (
+        "aresample=192000,"
+        f"alimiter=limit={limit:.6f}:attack=1:release=50:level=0:latency=1,"
+        "aresample=48000"
+    )
+
+
+def _true_peak(path, timeout):
+    """ebur128 true peak of the first audio stream, as delivery QA reads it."""
+    text = _run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-v",
+            "info",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-af",
+            "ebur128=peak=true",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=timeout,
+    ).stderr
+    values = re.findall(r"Peak:\s*([-+\d.inf]+) dBFS", text or "")
+    value = float(values[-1]) if values else None
+    return value if value is not None and math.isfinite(value) else None
+
+
 def _linear_fits(measured, settings):
     """FFmpeg's loudnorm applies a linear gain only if the gained true peak fits the limit.
 
@@ -1237,10 +1283,8 @@ def export_video(
                     normalization_method = "two-pass measured loudnorm"
             else:
                 normalization_method = "single-pass dynamic loudnorm"
-            graph.append(
-                f"[audio]{loudnorm},aresample=48000,"
-                f"atrim=duration={program:.6f}[normalized]"
-            )
+            normalized_at = len(graph)
+            graph.append(None)
         elif has_audio:
             normalization_method = "disabled"
         graph.append(
@@ -1248,7 +1292,6 @@ def export_video(
             + ",".join(filters)
             + "[video]"
         )
-        (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
         temporary = directory / ("render" + output.suffix)
         args = [
             "ffmpeg",
@@ -1301,9 +1344,35 @@ def export_video(
             args += ["-fps_mode", "cfr", "-r", rate]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
-        _render_graph(
-            args + [str(temporary)], cwd=directory, timeout=settings["timeout"]
-        )
+        delivered_peak, ceiling = None, None
+        normalized = has_audio and (settings["normalize_audio"] or bool(mix_path))
+        for attempt in range(DELIVERY_PEAK_ATTEMPTS):
+            if normalized:
+                line = f"[audio]{loudnorm},aresample=48000,"
+                if ceiling is not None:
+                    # Resampling and AAC encoding can push peaks over the limit
+                    # loudnorm met; an oversampled limiter keeps the delivery under it.
+                    line += _peak_limiter(ceiling) + ","
+                graph[normalized_at] = (
+                    line + f"atrim=duration={program:.6f}[normalized]"
+                )
+            (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
+            temporary.unlink(missing_ok=True)
+            _render_graph(
+                args + [str(temporary)], cwd=directory, timeout=settings["timeout"]
+            )
+            if not normalized:
+                break
+            delivered_peak = _true_peak(temporary, settings["timeout"])
+            if delivered_peak is None or delivered_peak <= settings["true_peak_db"]:
+                break
+            if attempt + 1 < DELIVERY_PEAK_ATTEMPTS:
+                excess = delivered_peak - settings["true_peak_db"]
+                ceiling = (
+                    (settings["true_peak_db"] if ceiling is None else ceiling)
+                    - excess
+                    - DELIVERY_PEAK_MARGIN
+                )
         result = _probe(temporary, settings["timeout"])
         result.pop("streams")
         os.link(temporary, output)
@@ -1366,6 +1435,8 @@ def export_video(
             "enabled": has_audio and (settings["normalize_audio"] or bool(mix_path)),
             "target_lufs": settings["loudness_lufs"],
             "true_peak_db": settings["true_peak_db"],
+            "delivered_true_peak_db": delivered_peak,
+            "delivered_peak_ceiling_db": ceiling,
             "method": normalization_method,
         },
     }
@@ -1903,7 +1974,7 @@ def quality_report(
                 integrated is not None
                 and abs(integrated - settings["loudness_lufs"]) > 1
                 or peak is not None
-                and peak > settings["true_peak_db"] + 0.3
+                and peak > settings["true_peak_db"]
             )
             add(
                 "audio_loudness",
@@ -1922,7 +1993,7 @@ def quality_report(
                     integrated is None
                     or abs(integrated - settings["loudness_lufs"]) > 1
                     or peak is not None
-                    and peak > settings["true_peak_db"] + 0.3
+                    and peak > settings["true_peak_db"]
                 )
                 add(
                     "platform_loudness",
@@ -1956,14 +2027,17 @@ def quality_report(
                         present=bool(music.get("present")),
                         depth_db=depth,
                         ducking=duck,
-                        method="render-stage measured stem; final mix cannot isolate arbitrary music",
+                        stage="render",
+                        method="render-stage evidence: RMS of the rendered music stem before "
+                        "final normalization and encoding; not measured on the delivered "
+                        "file, whose final mix cannot isolate arbitrary music",
                     ),
                 )
                 mix_issue = (
                     integrated is None
                     or abs(integrated - settings["loudness_lufs"]) > 0.5
                     or peak is not None
-                    and peak > settings["true_peak_db"] + 0.3
+                    and peak > settings["true_peak_db"]
                 )
                 add(
                     "mix_loudness",
