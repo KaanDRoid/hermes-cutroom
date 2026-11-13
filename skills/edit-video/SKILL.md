@@ -67,6 +67,18 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
     approval, the final is refused: ask the person to review and approve the
     current version again.
 
+## Clips from a long recording
+
+For recordings longer than about three minutes, offer to find standalone clips.
+After transcription, use `cutroom_project find_clips` with the target `platform`
+(default 8 candidates; `min_s` and `max_s` stay within 20–90 s, Shorts defaults
+to at most 60 s). Show the top candidates with times, scores and reasons, then
+let the person pick. You may add your judgement about the topic, but clip
+bounds must stay on the sentence boundaries returned by the tool. Use
+`cutroom_project create_clip` with the chosen `candidate_id` and platform.
+It opens a separate project limited to that source range, with its own preview,
+QA and approval. Never turn a score into a promise that a clip will perform well.
+
 ## Other platforms
 
 To make another version, call `cutroom_project derive` with the target

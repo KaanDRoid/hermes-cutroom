@@ -355,7 +355,7 @@ function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }
       el('h2', { id: 'cutroom-recent', style: h2s, children: 'Recent projects' }),
       loading ? jsx(GlyphSpinner, {}) : null,
       sorted.length ? el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }, children: sorted.map(item => el(Button, { variant: 'ghost', onClick: () => choose(item.id), style: { ...panel, gap: 6, padding: 8, height: 'auto', alignItems: 'stretch', textAlign: 'left', whiteSpace: 'normal' }, children: [
-        jsx(Thumb, { ctx, scope, id: item.id }),
+        jsx(Thumb, { ctx, scope, id: item.id, at: item.derived_from?.range ? clamp01(item.derived_from.range.start / item.source_info?.duration) : null }),
         el('strong', { children: item.name }),
         el('span', { style: muted, children: [label(item), plainStatus(item, jobs), when(item)].filter(Boolean).join(' · ') }),
       ] }, item.id)) }) : el('p', { style: muted, children: loading ? '' : 'No projects yet. Import a video above to start.' }),
@@ -365,8 +365,8 @@ function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }
 }
 
 // A project's poster frame on a dark tile; empty until the frame arrives.
-function Thumb({ ctx, scope, id }) {
-  const poster = usePoster(ctx, scope, id);
+function Thumb({ ctx, scope, id, at = null }) {
+  const poster = usePoster(ctx, scope, id, at);
   return el('span', { 'aria-hidden': true, style: { display: 'block', width: '100%', aspectRatio: '16 / 9', borderRadius: 6, overflow: 'hidden', backgroundColor: STAGE },
     children: poster ? jsx('img', { src: poster.data_url, alt: '', style: { display: 'block', width: '100%', height: '100%', objectFit: 'cover' } }) : null });
 }
@@ -717,6 +717,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const player = useRef(null);
   const [playback, setPlayback, playbackRef] = useLive({ kind: null, time: null });
   const seek = time => {
+    player.current?.clearClip?.();
     const video = videoRef.current;
     if (!video || playbackRef.current.kind !== 'source' || !Number.isFinite(time)) return;
     try { video.currentTime = time; } catch { /* Seeking before metadata is harmless. */ }
@@ -762,6 +763,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const profile = platformOf(platforms, view);
   const shape = profile?.orientation || view.settings?.aspect || 'source';
   const kit = { ctx, scope, project, view, jobs, platforms, profile, edit, run, runAction, submit, cancel, seek, playback, setStep, open, correctWord, sound,
+    flush, playClip: range => player.current?.playRange(range),
     jobOptions, setJobOptions, silences, review, confirmed, setConfirmed, approved: canFinal(), reviewNow, reviewPending: reviewOperation.isPending, previewCurrent,
     qa: qaFor('preview'), editedAfter, watch: () => player.current?.load('preview'), exportFinal: () => run('final', {}, ['cover', 'qa']), saving };
   const kept = (view.segments || baseSegments(view)).reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0);
@@ -868,8 +870,8 @@ const ratioFor = (orientation, info) => orientation === 'portrait' ? [9, 16] : o
 
 // One poster per project; its own cache key so saves do not refetch it.
 const posterKey = (scope, id) => [`${scope[0]}-poster`, ...scope.slice(1), 'poster', id];
-function usePoster(ctx, scope, id) {
-  const query = useQuery({ queryKey: posterKey(scope, id), queryFn: () => ctx.rest(`/projects/${enc(id)}/poster`), enabled: Boolean(id), staleTime: Infinity, retry: false, refetchOnWindowFocus: false });
+function usePoster(ctx, scope, id, at = null) {
+  const query = useQuery({ queryKey: at === null ? posterKey(scope, id) : [...posterKey(scope, id), at], queryFn: () => ctx.rest(`/projects/${enc(id)}/poster${at === null ? '' : `?at=${at}`}`), enabled: Boolean(id), staleTime: Infinity, retry: false, refetchOnWindowFocus: false });
   const value = query?.data;
   return value && typeof value.data_url === 'string' && value.data_url.length < 4000000 && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value.data_url) ? value : null;
 }
@@ -965,7 +967,13 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const [duration, setDuration] = useState(null);
   const [time, setTime] = useState(null);
   const [playing, setPlaying] = useState(false);
-  const poster = usePoster(ctx, scope, project.id);
+  const poster = usePoster(ctx, scope, project.id, project.derived_from?.range ? clamp01(project.derived_from.range.start / project.source_info?.duration) : null);
+  const clipPlayback = useRef(null);
+  const startClip = target => {
+    const range = clipPlayback.current;
+    if (!range || !target) return;
+    try { target.currentTime = range.start; target.play?.()?.catch?.(failure => setError(failure)); } catch (failure) { setError(failure); }
+  };
   // A loaded render shows the zone of the profile it was rendered with (recorded in its lineage), not the current setting.
   const rendered = media && media.kind !== 'source';
   const shown = rendered ? platformOf(platforms, { settings: { platform: project.artifact_lineage?.[media.kind]?.platform || 'custom' } }) : profile;
@@ -1035,7 +1043,12 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     if (lock.current || loading.current || chosen.current || mediaRef.current?.kind === want) return;
     autoLoad(want);
   }, [project.id, want, media ? media.kind : '']);
-  if (api) api.current = { load: kind => load(kind, true), release };
+  if (api) api.current = { clearClip: () => { clipPlayback.current = null; }, load: kind => { clipPlayback.current = null; return load(kind, true); }, release, playRange: async range => {
+    if (!range || !Number.isFinite(range.start) || !Number.isFinite(range.end)) return;
+    clipPlayback.current = range;
+    if (mediaRef.current?.kind === 'source' && videoRef?.current) startClip(videoRef.current);
+    else await load('source', true);
+  } };
   const [w, h] = ratioFor(shown?.orientation || (shown?.frame ? null : view.settings?.aspect), project.source_info);
   const tall = h > w;
   const original = !media || media.kind === 'source';
@@ -1052,7 +1065,9 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     onTimeUpdate: event => {
       const target = event.currentTarget;
       let at = target.currentTime;
-      if (original && target.paused === false) {
+      if (original && clipPlayback.current && target.paused === false) {
+        if (at >= clipPlayback.current.end) { target.pause?.(); clipPlayback.current = null; }
+      } else if (original && target.paused === false) {
         const skip = removedRanges(view, total).find(([start, end]) => at >= start && at < end - 0.01);
         if (skip) {
           if (skip[1] >= total - 0.01) { try { target.pause?.(); } catch { /* Ignore. */ } }
@@ -1062,7 +1077,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
       setTime(at); onPlayback({ kind: media.kind, time: at });
     },
     onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false),
-    onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); },
+    onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); if (media.kind === 'source') startClip(event?.currentTarget); },
     onError: () => { setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); release(); } }, 'player:video') : null;
   const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' } }, 'player:poster') : null;
   const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
@@ -1118,7 +1133,63 @@ function EditStep({ kit }) {
       el('p', { style: muted, children: 'Transcription runs on the computer that runs Cutroom, with the speech model from Settings → Plugins → Cutroom.' }),
     ] })] });
   }
-  return el('div', { style: stack, children: [intro, jsx(Suggestions, { kit }, 'suggestions'), jsx(Transcript, { kit }, 'transcript')] });
+  return el('div', { style: stack, children: [intro,
+    view.derived_from?.range ? el('p', { style: muted, children: `Clip of ${clock(view.derived_from.range.start)}–${clock(view.derived_from.range.end)} from the original. Each clip has its own review and approval.` }, 'clip-range') : null,
+    view.source_info?.duration > 180 && !view.derived_from?.range ? jsx(ClipFinder, { kit }, 'clip-finder') : null,
+    jsx(Suggestions, { kit }, 'suggestions'), jsx(Transcript, { kit }, 'transcript')] });
+}
+
+function ClipFinder({ kit }) {
+  const { ctx, scope, project, view } = kit;
+  const client = useQueryClient();
+  const [platform, setPlatform] = useState('youtube_shorts');
+  const [error, setError] = useState(null);
+  const [found, setFound] = useState(null);
+  const lock = useRef(false);
+  const [busy, setBusy] = useState(false);
+  // A corrected or replaced transcript retires the list, including local results.
+  const transcript = JSON.stringify(view.transcript?.words || []);
+  const result = found?.transcript === transcript ? found.result : view.clip_candidates;
+  const act = async pick => {
+    if (lock.current) return;
+    lock.current = true; setBusy(true); setError(null);
+    try {
+      await kit.flush();
+      if (kit.saving()) throw new Error('Wait until your changes are saved, then try again.');
+      if (pick) {
+        const child = await ctx.rest(`/projects/${enc(project.id)}/clips`, { method: 'POST', body: { candidate_id: pick.id, platform } });
+        client.invalidateQueries({ queryKey: scope }); kit.open(child.id);
+      } else {
+        const data = await ctx.rest(`/projects/${enc(project.id)}/find-clips`, { method: 'POST', body: { platform }, timeoutMs: 180000 });
+        setFound({ transcript, result: data }); client.invalidateQueries({ queryKey: scope });
+      }
+    } catch (failure) { setError(failure); }
+    finally { lock.current = false; setBusy(false); }
+  };
+  const candidates = Array.isArray(result?.candidates) ? result.candidates : [];
+  return el('section', { role: 'region', 'aria-label': 'Find clips', style: panel, children: [
+    el('h2', { style: h2s, children: 'Find clips' }, 'title'),
+    el('p', { style: muted, children: 'Find short moments that start and end on whole sentences. Scores explain the opening and delivery, not whether a topic will work. Watch before picking.' }, 'intro'),
+    el('div', { style: row, children: [
+      el('label', { htmlFor: `clip-platform-${project.id}`, children: 'Make clips for' }, 'label'),
+      el('select', { id: `clip-platform-${project.id}`, name: 'clip.platform', value: platform, disabled: busy, onChange: event => setPlatform(event.target.value), style: { color: 'var(--ui-text-primary)', background: 'var(--ui-bg-editor)', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 6, padding: 6 }, children: ['youtube_shorts', 'instagram_reels', 'tiktok', 'youtube'].map(id => el('option', { value: id, children: PLATFORM_NAMES[id] }, id)) }, 'platform'),
+      jsx(Button, { disabled: busy, onClick: () => act(null), children: busy ? 'Working…' : 'Find clips' }, 'find'),
+    ] }, 'controls'),
+    busy ? el('p', { role: 'status', style: muted, children: 'Looking at the words and sound on this computer…' }, 'status') : null,
+    jsx(Notice, { error }, 'error'),
+    result && !candidates.length ? el('p', { role: 'status', style: muted, children: 'No whole-sentence clips fit this length. Check the transcript or choose another platform.' }, 'empty') : null,
+    candidates.length ? el('div', { role: 'list', 'aria-label': 'Clip candidates', style: stack, children: candidates.map(item => el('article', { role: 'listitem', style: { ...panel, padding: 10 }, children: [
+      jsx(Thumb, { ctx, scope, id: project.id, at: clamp01(item.start / project.source_info.duration) }, 'poster'),
+      el('strong', { children: `${item.rank}. ${item.hook || 'Clip'} ` }, 'hook'),
+      el('p', { style: muted, children: `${clock(item.start)}–${clock(item.end)} · ${spokenLength(item.duration)} · Score ${item.score}/100` }, 'range'),
+      el('ul', { style: { margin: 0, paddingLeft: 18, fontSize: 12 }, children: (item.reasons || []).map((reason, index) => el('li', { children: `${reason.text} (${reason.points > 0 ? '+' : ''}${reason.points})` }, index)) }, 'reasons'),
+      el('details', { children: [el('summary', { style: summaryStyle, children: 'Read the words' }, 'summary'), el('p', { style: muted, children: item.text }, 'text')] }, 'words'),
+      el('div', { style: row, children: [
+        jsx(Button, { variant: 'secondary', 'aria-label': `Play clip ${item.rank}, ${clock(item.start)} to ${clock(item.end)}`, onClick: () => kit.playClip(item), children: 'Play' }, 'play'),
+        jsx(Button, { disabled: busy || kit.saving(), onClick: () => act(item), children: 'Make clip' }, 'make'),
+      ] }, 'actions'),
+    ] }, item.id)) }, 'list') : null,
+  ] });
 }
 
 function Suggestions({ kit }) {

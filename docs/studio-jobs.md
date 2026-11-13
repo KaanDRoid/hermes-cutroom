@@ -107,6 +107,63 @@ project = studio.update(project["id"], {"settings": {
 - Punch-ins, push-ins and transitions need constant-rate video; `max_pause` works on any source.
 - `preview` and `final` results gain `pacing` (zoom per range, windows, anchors, total enlargement, cuts, transitions, warnings, rendered ranges). `qa` adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and, with `max_pause`, `pacing_max_pause`.
 
+## Clip finder and source-range projects
+
+These are synchronous project actions, not background job names. They reuse
+`cutroom_project`; the default remains three tools (`cutroom_inspect`,
+`cutroom_project`, `cutroom_job`), with no new approval action.
+
+```python
+found = studio.find_clips(project["id"], min_s=20, max_s=60,
+                          count=8, platform="youtube_shorts")
+pick = found["candidates"][0]
+clip = studio.create_clip(project["id"], "youtube_shorts",
+                          candidate_id=pick["id"])
+# Alternatively: start=137.4, end=165.1 (snapped to safe sentence boundaries).
+# Then run preview and qa on clip["id"], and let the person review and approve.
+```
+
+- `find_clips(project_id, min_s=None, max_s=None, count=None, platform=None)`:
+  minimum and maximum are finite 20–90 s, minimum ≤ maximum, count is 1–20
+  (default 8). The default maximum is 60 s for Shorts, otherwise 90 s. The
+  transcript must contain timed words. Candidates include source `start`, `end`,
+  `duration`, `first_word_id`, `last_word_id`, `hook`, bounded `text`, rank,
+  score 0–100 and reasons with signed points. `mode` distinguishes punctuation
+  from inferred pause boundaries. Local sound analysis is optional and has a
+  120 s timeout and a three-hour source cap; a missing or unmeasurable track
+  falls back to word timings. Nothing is downloaded or sent out.
+- Suggestions are saved as `clip_candidates` with a timed-word fingerprint.
+  They do not change the revision or review digest. Replacing or correcting the
+  transcript removes them; stale candidate IDs are refused.
+- `create_clip(project_id, platform, candidate_id=None, start=None, end=None,
+  name=None, final_resolution=None)`: supply either a candidate ID or both times,
+  never both. Explicit times must be finite, ordered, inside the source and
+  at most three hours; they snap to safe whole-sentence edges, must keep at
+  least 20 s, and must fit the target platform's hard limit. They are a manual
+  range selection, not limited by discovery's 90 s ceiling.
+- The child records `derived_from.range: {start, end}` in **source time**.
+  Cuts and exclusions are intersected with it, words outside it are dropped,
+  original word IDs/timestamps are retained and fillers are recomputed. Story
+  selections and program-time framing pins are cleared; settings and brand are
+  copied with the target profile. No analysis, render or approval is copied.
+  A platform version derived from a clip keeps its range. Later edits, silence
+  results and replacement transcripts cannot reopen the rest of the source.
+- The existing segment renderer and word remapper make program time start at
+  zero, keep A/V together and write captions only for this range. Each clip needs
+  its own preview, QA, review and human approval.
+- REST: `POST /projects/{id}/find-clips` accepts the discovery options;
+  `POST /projects/{id}/clips` accepts the creation options and returns 201.
+  Authentication and the existing request/exception rules apply. The same
+  names are actions on `cutroom_project`. Chat results keep a 400-character
+  excerpt per candidate plus the reasons, so a long talk does not flood chat.
+- Desktop: **Find clips** appears in Edit for sources over three minutes, but
+  not inside a clip. Each candidate has a start-frame poster, range, length,
+  score, reasons, words, **Play** and **Make clip**. Play loads/seeks the original
+  and stops at the range's end; Make clip uses the chosen platform and opens the
+  new project without approving it. Pending edits are saved first.
+
+See [F5 verification and editorial limits](creator-formats.md#f5--clip-finder).
+
 ## Platform versions (derived projects)
 
 `Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling project for another platform:

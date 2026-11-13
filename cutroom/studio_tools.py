@@ -51,6 +51,22 @@ PROJECT_ACTIONS = {
         {"project_id", "changes", "revision"},
     ),
     "review": ({"project_id"}, {"project_id"}),
+    "find_clips": (
+        {"project_id", "min_s", "max_s", "count", "platform"},
+        {"project_id"},
+    ),
+    "create_clip": (
+        {
+            "project_id",
+            "platform",
+            "candidate_id",
+            "start",
+            "end",
+            "name",
+            "final_resolution",
+        },
+        {"project_id", "platform"},
+    ),
     "derive": (
         {"project_id", "platform", "name", "final_resolution"},
         {"project_id", "platform"},
@@ -303,6 +319,25 @@ def project_handler(args, **kwargs):
 
     def perform():
         action = _arguments(args, PROJECT_ACTIONS)
+        if action == "find_clips":
+            from .clips import _bounds
+
+            _bounds(
+                args.get("min_s"),
+                args.get("max_s"),
+                args.get("count"),
+                args.get("platform"),
+            )
+        if action == "create_clip":
+            from .clips import validate_pick
+
+            validate_pick(args.get("candidate_id"), args.get("start"), args.get("end"))
+            if args["platform"] not in PLATFORMS:
+                raise ValueError("Unsupported platform")
+        if action in {"derive", "create_clip"} and args.get(
+            "final_resolution", "1080"
+        ) not in ("1080", "2160"):
+            raise ValueError("final_resolution must be '1080' or '2160'")
         if action == "derive" and args["platform"] not in PLATFORMS:
             raise ValueError(
                 "Unsupported platform; expected one of: " + ", ".join(PLATFORMS)
@@ -341,7 +376,28 @@ def project_handler(args, **kwargs):
             media = _project_media(studio, result)
             result = _summarize(result)
             return dict(result, media=media) if media else result
-        if action in ("get", "create", "update", "derive"):
+        if action == "find_clips":
+            return {
+                **result,
+                "candidates": [
+                    {
+                        key: value
+                        for key, value in item.items()
+                        if key
+                        in {"id", "rank", "start", "end", "duration", "score", "hook"}
+                    }
+                    | {
+                        "text": item.get("text", "")[:400],
+                        "reasons": [
+                            f"{r['text']} ({r['points']:+d})"
+                            for r in item.get("reasons", [])
+                        ],
+                    }
+                    for item in result.get("candidates", [])
+                ],
+                "note": "Local signals, not a topic judgement. Pick a candidate; bounds stay on sentence boundaries.",
+            }
+        if action in ("get", "create", "update", "derive", "create_clip"):
             return _summarize(result)
         if action == "review" and isinstance(result, dict) and "project" in result:
             return dict(result, project=_summarize(result.get("project")))
@@ -523,6 +579,11 @@ def definitions():
             "sibling project for another platform that copies the edit but starts "
             "unapproved at revision 1 with its own digest and the target "
             "profile's default final resolution unless final_resolution is given. "
+            "find_clips(project_id, min_s?, max_s?, count?, platform?) finds whole-sentence "
+            "20–90 s candidates with local scores and reasons (Shorts defaults to 60 s). "
+            "create_clip(project_id, platform, candidate_id? or start/end?, name?) creates "
+            "an unapproved derived project limited to that source range; typed bounds snap "
+            "to sentence boundaries. Ask the person which clip to use. "
             + APPROVAL_NOTICE
         ),
         "parameters": {
@@ -532,7 +593,16 @@ def definitions():
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "list", "get", "update", "review", "derive"],
+                    "enum": [
+                        "create",
+                        "list",
+                        "get",
+                        "update",
+                        "review",
+                        "derive",
+                        "find_clips",
+                        "create_clip",
+                    ],
                     "description": "Operation to perform",
                 },
                 "source": _string("Absolute local video path (create)"),
@@ -549,6 +619,15 @@ def definitions():
                     "description": "Final resolution of the new sibling; defaults "
                     "to the target profile's default (derive)",
                 },
+                "min_s": {"type": "number", "minimum": 20, "maximum": 90},
+                "max_s": {"type": "number", "minimum": 20, "maximum": 90},
+                "count": {"type": "integer", "minimum": 1, "maximum": 20},
+                "candidate_id": {
+                    "type": "string",
+                    "pattern": "^clip-[0-9]{1,10}-[0-9]{1,10}$",
+                },
+                "start": {"type": "number", "minimum": 0, "maximum": 10800},
+                "end": {"type": "number", "minimum": 0, "maximum": 10800},
                 "changes": changes,
                 "revision": {
                     "type": "integer",

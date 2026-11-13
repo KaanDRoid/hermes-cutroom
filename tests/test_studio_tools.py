@@ -424,7 +424,16 @@ class SchemaTests(unittest.TestCase):
             self.assertEqual(parameters["required"], ["action"])
         self.assertEqual(
             project["properties"]["action"]["enum"],
-            ["create", "list", "get", "update", "review", "derive"],
+            [
+                "create",
+                "list",
+                "get",
+                "update",
+                "review",
+                "derive",
+                "find_clips",
+                "create_clip",
+            ],
         )
         self.assertEqual(
             set(project["properties"]),
@@ -437,6 +446,12 @@ class SchemaTests(unittest.TestCase):
                 "revision",
                 "platform",
                 "final_resolution",
+                "min_s",
+                "max_s",
+                "count",
+                "candidate_id",
+                "start",
+                "end",
             },
         )
         self.assertEqual(

@@ -182,6 +182,35 @@ def derive_project(
     )
 
 
+class FindClips(RequestModel):
+    min_s: float | None = Field(default=None, ge=20, le=90, allow_inf_nan=False)
+    max_s: float | None = Field(default=None, ge=20, le=90, allow_inf_nan=False)
+    count: int | None = Field(default=None, ge=1, le=20)
+    platform: PlatformName | None = None
+
+
+class CreateClip(RequestModel):
+    platform: PlatformName
+    candidate_id: str | None = Field(
+        default=None, pattern=r"^clip-[0-9]{1,10}-[0-9]{1,10}$"
+    )
+    start: float | None = Field(default=None, ge=0, le=10800, allow_inf_nan=False)
+    end: float | None = Field(default=None, ge=0, le=10800, allow_inf_nan=False)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    final_resolution: Literal["1080", "2160"] | None = None
+
+
+@router.post("/projects/{project_id}/find-clips")
+def find_clips(project_id: ProjectId, body: FindClips, studio=Depends(get_studio)):
+    return invoke(studio.find_clips, project_id, **body.model_dump(exclude_none=True))
+
+
+@router.post("/projects/{project_id}/clips", status_code=201)
+def create_clip(project_id: ProjectId, body: CreateClip, studio=Depends(get_studio)):
+    invoke(_module("clips").validate_pick, body.candidate_id, body.start, body.end)
+    return invoke(studio.create_clip, project_id, **body.model_dump(exclude_none=True))
+
+
 @router.get("/platforms")
 def platform_profiles():
     """Sourced profile data for the Desktop selector and safe-zone overlay."""

@@ -1,5 +1,32 @@
 # Implementation status
 
+## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
+
+- Added deterministic local discovery of whole-sentence 20–90 s clips, scored
+  0–100 with signed plain-language reasons, non-overlapping picks and a temporal
+  diversity preference; Shorts defaults to at most 60 s. Optional sound and
+  existing face samples add delivery signals, with no network or new assets.
+- Selected clips become independent source-range projects. Cuts, exclusions and
+  timed words stay inside the range through later edits and transcription; a
+  clip of a clip cannot reopen its parent's padding. Captions use program time,
+  approvals are separate, and transcript changes invalidate saved suggestions.
+- Added `find_clips` / `create_clip` to `cutroom_project` (still three default
+  tools), REST routes, the Edit-step Find clips list with source posters and
+  range playback, Make clip with platform selection, and chat skill guidance.
+- Real 1063.221 s talk: tiny-model transcription in 67.59 s, discovery in 2.73 s,
+  **8 candidates**, all punctuation-bounded with no cut words and quiet-gap
+  edges (−46.16 dB or quieter). Two 1080×1920 Shorts/Reels previews rendered
+  28.762067 / 27.160479 s; QA has no failed checks (one Shorts freeze warning),
+  and measured A/V residual against the original is at most **3.25 ms**.
+  Evidence: `artifacts/f5/evidence/`; [candidate texts and editorial judgement](creator-formats.md#f5--clip-finder).
+- Local gates: **501 Python tests OK** (14 skipped without local fixtures),
+  **62/62 Desktop tests**, Ruff check/format and `node --check` pass.
+  Logs: `artifacts/f5/red.log`, `artifacts/f5/green.log`.
+- Open: native Desktop acceptance (A28/F8), recognition cleanup, and editorial
+  judgement. The highest scoring clips are not necessarily standalone arguments;
+  candidates 3, 4, 6 and 7 read better alone than the first two. Quiet-gap checks
+  are a listen-proxy, not a complete listening review. Nothing was approved or uploaded.
+
 ## November 13 — F3 pacing (branch `feat/f3-pacing`)
 
 - Added `settings.pacing`: alternating punch-ins on edit cuts, centred on the face and kept under a total enlargement limit (default 2×, zooms are reduced and reported rather than exceeding it); an optional eased push-in on long ranges; a maximum pause between kept words that rebuilds the segments; and crossfade or dip transitions built from handles so program length, captions and sync do not change. QA adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and `pacing_max_pause`; Desktop gets a Pacing group in Style; the chat skill suggests pacing for talking heads and asks first. Details: [creator formats F3](creator-formats.md#f3--pacing).
