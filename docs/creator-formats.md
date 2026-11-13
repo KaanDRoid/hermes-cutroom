@@ -628,6 +628,127 @@ Status: implemented on `feat/f6-long-form`; not yet merged into `feat/creator-fo
 - The MP4 muxer adds a chapter text track; YouTube reads chapters from the description, not from the file.
 - Native Desktop acceptance of the new controls (A28).
 
+## F7 — Local delivery packages
+
+Status: delivery-package half implemented and verified locally on 2026-11-13.
+The live-integration half is **not accepted** and remains pending owner consent.
+
+### What shipped
+
+- `cutroom/packages.py` and `Studio.package(project_id, post=None, cover_time=None)`
+  make a new `<workspace>/projects/<id>/packages/<platform>-<UTC timestamp>/`
+  folder (a numeric suffix handles collisions; earlier folders are never reused).
+  A current human approval digest **and a published final with that same digest**
+  are required. A preview alone, stale approval, changed final bytes, a custom
+  profile or invalid post text is refused before delivery files are exposed.
+- `video.mp4` is hard-linked on the same volume where possible, otherwise copied.
+  The original is never moved or written by packaging. A hard link shares bytes:
+  do not edit either linked video in place; use a copy for later edits. The
+  manifest records `video_link`. Packaging verifies the original after building.
+- Short-form packages contain `cover.jpg`, a 1080×1920 reference frame of the
+  approved final. This exact size is **Cutroom's choice**, not an upload-size
+  requirement. Instagram's cover recommendation is 420×654 (1:1.55), so crop the
+  reference in its upload screen. TikTok uses a video frame as its cover, not an
+  independent image upload; `post.txt` records the exact program timestamp to
+  select. Shorts thumbnail options depend on the account and upload surface;
+  the packaged image is a reference, not a promise the service accepts it.
+- YouTube uses the **final's F6 `thumbnail.jpg`**, not the latest preview's image;
+  it must be 16:9, at least 640 px wide and under Cutroom's conservative 2 MB cap.
+  The final's `captions.srt` is included; when subtitles were disabled for the
+  render it is regenerated locally from the kept words (an empty file means
+  there are no kept words). Saved chapters are included in the description in
+  `post.txt`. Final sidecar checksums remain attached to the final's publication,
+  so a later preview cannot silently replace its cover or subtitles.
+- `settings.post: {title, caption, hashtags: []}` is validated and stored; absent
+  text defaults to the project name/on-screen title and at most 300 characters
+  of kept transcript sentences, without a network. Hashtags default to empty.
+  `caption` is the body of a YouTube description; hashtags and chapters are
+  appended before the description is measured. Post-only saves do not increment
+  the video revision, change the review digest, discard renders or remove
+  approval. Any combined video-setting edit still invalidates approval normally.
+  This deliberately separates upload copy from the video review; each package
+  records both the chosen fields and exact composed text.
+- `post.txt` labels the text to paste, its counts and limits, cover instructions
+  and the dated source. Hashtags inside free text count too. Invalid text is not
+  silently truncated: a refusal names the field, measured value and limit.
+- `manifest.json` records every payload file's SHA-256 and byte size, project id,
+  revision, approval digest, platform, UTC creation time, Cutroom version, the
+  chosen post text, sourced limits and cover choice. The manifest cannot contain
+  its own checksum; the displayed file list includes its separately measured
+  size/hash. Checksums detect changes relative to that manifest, **not identity
+  or authenticity** if someone edits both a file and its manifest.
+- `README.txt` says **“Nothing has been posted. Upload these files yourself.”**
+  `Studio.verify_package(path)` re-hashes workspace-owned package files, reports
+  changed/missing/unlisted files, and rejects traversal/redirected folders.
+  Malformed manifests are bounded and return plain problems, not a traceback.
+- REST: `GET/PUT /projects/{id}/post`, `GET/POST /projects/{id}/packages`,
+  `POST /projects/{id}/packages/{name}/verify`. The existing `cutroom_project`
+  actions `post_text`, `package`, `packages` and `verify_package` provide chat
+  access; no extra default tool and no approval/posting action was added.
+- Desktop Export adds **Delivery package** after an approved final: editable post
+  fields, live counters tied to fields, disabled Make package when over limits,
+  returned folder/files/sizes and Check package. The requested local SDK doc was
+  absent, so no unverified host folder-opening action was invented: the folder
+  is selectable with **Copy folder path** (Ctrl+C fallback). Upload-copy typing
+  does not clear approval. Theme variables, labels, polite status updates and
+  the existing disk-plugin import constraints are preserved.
+
+### Sourced limits (checked 2026-11-13)
+
+| Platform | Enforced text limits | Source and qualification |
+|---|---|---|
+| Instagram Reels | Caption 2,200 Unicode characters, including hashtags; 30 hashtags; 20 @ mentions | [Instagram media reference](https://developers.facebook.com/documentation/instagram-platform/instagram-graph-api/reference/ig-user/media) explicitly lists these three API limits. |
+| TikTok | Caption 2,200 UTF-16 code units, including hashtags | [Content Posting API video reference](https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post) says 2,200 in UTF-16. The in-app caption limit and a separate hashtag-count limit could not be verified; this conservative API limit is used, and no hashtag-count maximum is invented. |
+| YouTube Shorts | Required title 100 characters; description 5,000 UTF-8 bytes; at most 60 hashtags across title/description | [YouTube videos resource](https://developers.google.com/youtube/data/reference/rest/v3/videos) and [YouTube hashtag help](https://support.google.com/youtube/answer/6390658). More than 60 means YouTube ignores all hashtags, so packaging refuses it. |
+| YouTube | Same title/description/hashtag rules, with chapters included in the 5,000-byte description | Same official YouTube sources. Both title and description reject `<` and `>`. |
+
+Cover references: [Instagram Reel size/aspect help](https://help.instagram.com/1038071743007909/),
+[YouTube thumbnail help](https://support.google.com/youtube/answer/72431), and
+[TikTok's video-cover timestamp](https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post).
+The checked excerpts are retained locally in `artifacts/f7/official-limits.json`;
+all numeric text rules and dated source URLs live in `cutroom/platforms.py`.
+
+### How it was verified
+
+- Test-first RED: `artifacts/f7/red.log` (missing delivery module/schema and four
+  new Desktop failures, plus the final-sidecar and malformed-manifest probes).
+  GREEN: `artifacts/f7/green.log`: **552 Python tests OK** (14 skipped),
+  **71/71 Desktop tests**, Ruff check/format and `node --check`. Tests cover stale/unapproved/missing finals,
+  platform frames, character/UTF-16/UTF-8 counts, hashtags, mentions, chapters,
+  title restrictions, post-only digest stability, hard links/copy fallback,
+  collision handling, path constraints, manifest corruption, same-length tamper,
+  file removal/addition, final-sidecar tamper after a later publication, actual
+  REST/tool execution and a real short final render.
+- `scripts/package_evidence.py` exercised Sandra's local Wikitongues recording:
+  real local transcription, a 32-second Reels preview and final, a 32-second
+  YouTube preview and final, both packages and checksum checks. The script calls
+  `Studio.review` then `Studio.approve`, the internal path used by the Studio
+  page. This is **test/evidence fixture approval**, not a claim that a person
+  watched or approved those exports.
+- Evidence: `artifacts/f7/evidence/report.json`, `NOTES.txt`, both full packages,
+  and copied cover images. Reels: 1080×1920 cover, four payload checksums;
+  YouTube: 1920×1080 thumbnail plus SRT, five payload checksums. A copy of each
+  package had one video byte flipped without changing its size; verification
+  reported a checksum mismatch while both originals and original finals stayed
+  intact. No live service was called.
+- The two cover images were opened for visual inspection. Reels preserves the
+  speaker and hands in the centre with intentional blurred fill above/below;
+  it is usable as a reference, though the person is relatively small and the
+  chosen speaking frame has an open mouth. YouTube preserves the speaker and
+  hands with a readable “Sandra” label away from the face. Neither shows broken
+  pixels, stretched geometry or clipped title text. This is not native upload
+  acceptance or an editorial approval.
+
+### Open items
+
+- **Media download, OBS recording and rclone upload remain unrun and unaccepted**,
+  pending the owner's live consent and read-back verification. Their adapters
+  were not changed, connected or exercised in this work.
+- Native Hermes Desktop interaction and per-platform upload-surface acceptance
+  remain F8/A28. Nothing in this package workflow posts anything.
+- Platform policies can change; source dates and conservative API limits are
+  explicit, and the service's current upload screen remains the final check.
+
 ## Order and branches
 
 F0 first, because every other package builds on profiles and derived projects. Then F1, F2 and F4 in parallel, then F3, F5, F6, F7 and F8. Each package is developed on its own branch and merged into `feat/creator-formats` through a pull request after the full test suite, the Desktop checks, ruff and an independent review pass. `feat/creator-formats` merges into `main` once, as 0.2.0.

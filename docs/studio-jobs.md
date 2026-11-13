@@ -339,3 +339,53 @@ The transcription branch's local suite collected **126 tests: 113 passed, 12 ski
 ### Export duration on FFmpeg 7.1 (resolved)
 
 On FFmpeg 7.1, `export_video` could report a 0.1-second MP4 for a 0.2-second, 10-fps selection because the container dropped the last frame's duration, which made `test_final_portrait_and_real_safe_area_cover` fail with `Cover time must precede end of video`. Exports from constant-frame-rate sources (`r_frame_rate` equal to `avg_frame_rate`) now request a constant output timeline at the source rate (`-fps_mode cfr -r <rate>`). Variable-frame-rate sources keep their original timestamps. `test_constant_rate_sources_keep_every_frame_duration_in_exports` covers both branches; FFmpeg 9.0 did not reproduce the original defect, so confirm on 7.1 when available.
+
+
+## Local delivery packages (F7)
+
+Packaging is a bounded, synchronous local facade operation after the render,
+not an external `publish` job. `Studio.package(project_id, post=None,
+cover_time=None)` requires a current approval digest and the same digest on the
+published final; stale approval, changed bytes and a preview-only project are
+refused. It creates a new `projects/<id>/packages/<platform>-<UTC timestamp>/`
+folder, hard-linking or copying the final without modifying it. Do not edit a
+linked video in place: it shares bytes with the final. A new copy is required
+for later editing.
+
+`settings.post` contains `{title, caption, hashtags: []}`. A **post-only** update
+keeps the video revision, approval and artifacts; post text is not in the video
+review digest. Combined video changes still invalidate approval. Every package
+records exactly which fields and composed upload text were used. Captions,
+hashtags and YouTube chapter lines are measured together, using sourced limits
+in `platforms.py`; a broken limit refuses the package with a plain error.
+
+REST:
+
+- `GET /projects/{id}/post`: saved or locally suggested text, composed fields,
+  counts, limits, chapter text and any problems. Nothing is saved.
+- `PUT /projects/{id}/post`: validate/save upload copy without video approval.
+- `POST /projects/{id}/packages`: body `{post?: {title, caption, hashtags},
+  cover_time?: seconds}`; build a package, saving supplied text only on success.
+- `GET /projects/{id}/packages`: list local package folders/files/sizes.
+- `POST /projects/{id}/packages/{name}/verify`: re-hash that package; malformed
+  manifests and missing, changed or unlisted files return a plain report.
+
+`Studio.verify_package(path)` is restricted to project package folders inside
+the workspace, including copied test packages. Paths, redirected directories,
+manifest sizes/file counts and filenames are bounded. Payload SHA-256 values
+and sizes are in `manifest.json`; a manifest cannot self-hash, and checksum
+verification is not authentication if both a file and the manifest are edited.
+The returned file list includes the manifest's separately computed size/hash.
+
+Existing `cutroom_project` actions: `post_text(project_id, post?)`,
+`package(project_id, post?, cover_time?)`, `packages(project_id)`, and
+`verify_package(project_id, package)` (a returned folder name, not an arbitrary
+path). No new default tool or approval action is exposed. Desktop Export offers
+post fields with live counters, Make package, the selectable/copyable folder
+path, files/sizes and Check package. No host folder-opening API was assumed
+without its SDK documentation.
+
+See [creator formats F7](creator-formats.md#f7--local-delivery-packages) for the
+source table, cover-upload qualifications and real evidence. Nothing is posted.
+Live media download, OBS and rclone remain pending owner consent and were not
+connected or exercised here.
