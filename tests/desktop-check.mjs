@@ -255,6 +255,10 @@ test('settings page stores defaults and new Desktop projects get them with one p
   const page = { render: () => pages[0].render() };
   let tree = draw(page);
   assert.match(text(tree), /new videos/i);
+  // Removing words relies on the transcript: say which speech model hears
+  // short words reliably before someone cuts a word that was never said.
+  assert.match(text(tree), /small.*reliabl/i);
+  assert.match(text(tree), /tiny.*(invent|miss)/i);
   type(field(tree, 'default.whisper_model'), 'C:/models/ggml.bin');
   tree = draw(page);
   radio(tree, 'Default platform', 'tiktok').props.onClick();

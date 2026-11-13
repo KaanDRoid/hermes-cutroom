@@ -65,11 +65,14 @@ def validate_transcript(data, duration=None):
     return data
 
 
-def word_segments(words, excluded_ids=None, padding=0.04, duration=None):
+def word_segments(words, excluded_ids=None, padding=0.04, duration=None, energy=None):
     """Union kept word intervals, never padding across explicitly excluded audio.
 
     Overlapping excluded timestamps take precedence over kept timestamps. The
     caller must approve exclusions; this function does not identify fillers.
+    With ``energy`` (20 ms voice levels, see ``clips.energy_profile``) an edge
+    next to a removed word that falls inside a sound is moved out of it; see
+    ``_settle_cut_edges``.
     """
     _validate_words(words, duration)
     padding = _number(padding)
@@ -115,7 +118,104 @@ def word_segments(words, excluded_ids=None, padding=0.04, duration=None):
             merged[-1]["end"] = max(end, merged[-1]["end"])
         else:
             merged.append({"start": float(start), "end": float(end)})
+    if blocked and energy:
+        merged = _settle_cut_edges(merged, words, blocked, energy, duration)
     return merged
+
+
+# A cut edge is moved at most this far, so a misjudged sound never takes a
+# whole neighbouring word with it.
+CUT_EDGE_MAX_SHIFT_S = 0.35
+# A frame counts as a pause when it is this far below the loudest frame nearby.
+CUT_EDGE_PAUSE_DB = 20.0
+# Sound quieter than this everywhere nearby is treated as silence.
+CUT_EDGE_SILENCE_DB = -45.0
+
+
+def _settle_cut_edges(intervals, words, blocked, energy, duration):
+    """Move cut edges next to removed words out of the sound they land in.
+
+    Recognisers stamp word edges up to a few hundred milliseconds off, so a
+    cut at a stamp can leave the tail of a removed word or clip the start of a
+    kept one. When an edge falls inside a sound, that sound is given to the
+    word whose stamp overlaps it most: a removed word's sound is cut away
+    whole, a kept word's sound is kept whole. Edges already in a pause, edges
+    in continuous sound and moves over ``CUT_EDGE_MAX_SHIFT_S`` keep the stamp.
+    """
+    step = energy.get("step") if isinstance(energy, dict) else None
+    levels = energy.get("db") if isinstance(energy, dict) else None
+    if not isinstance(step, (int, float)) or step <= 0 or not levels:
+        return intervals
+    step = float(step)
+    removed = []
+    for item in sorted(blocked, key=lambda w: (w["start"], w["end"])):
+        if removed and item["start"] <= removed[-1][1] + 1e-6:
+            removed[-1][1] = max(removed[-1][1], item["end"])
+        else:
+            removed.append([item["start"], item["end"]])
+    excluded = {item["id"] for item in blocked}
+    kept_words = [w for w in words if w["id"] not in excluded and w["end"] > w["start"]]
+
+    def level(index):
+        return levels[min(max(index, 0), len(levels) - 1)]
+
+    def overlap(a, b):
+        return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+
+    def settle(edge, gap, kept, side):
+        index = int(edge / step)
+        if not 0 <= index < len(levels) or kept is None:
+            return edge
+        reach = round(1.0 / step)
+        peak = max(levels[max(0, index - reach) : index + reach + 1])
+        if peak < CUT_EDGE_SILENCE_DB:
+            return edge
+        pause = peak - CUT_EDGE_PAUSE_DB
+        if level(index) <= pause:
+            return edge
+        limit = round(0.6 / step)
+        first = index
+        while first > 0 and level(first - 1) > pause:
+            first -= 1
+            if index - first > limit:
+                return edge
+        last = index
+        while last < len(levels) - 1 and level(last + 1) > pause:
+            last += 1
+            if last - index > limit:
+                return edge
+        sound = (first * step, (last + 1) * step)
+        to_removed = overlap(sound, gap)
+        to_kept = overlap(sound, (kept["start"], kept["end"]))
+        if to_removed == to_kept:
+            return edge
+        cut_away = to_removed > to_kept
+        if side == "start":
+            target = sound[1] if cut_away else sound[0]
+        else:
+            target = sound[0] if cut_away else sound[1]
+        if abs(target - edge) > CUT_EDGE_MAX_SHIFT_S:
+            return edge
+        return round(target, 3)
+
+    settled = []
+    for interval in intervals:
+        start, end = interval["start"], interval["end"]
+        inside = [w for w in kept_words if w["start"] < end and w["end"] > start]
+        for gap in removed:
+            if abs(gap[1] - start) < 1e-6 and inside:
+                start = settle(start, tuple(gap), inside[0], "start")
+            if abs(gap[0] - end) < 1e-6 and inside:
+                end = settle(end, tuple(gap), inside[-1], "end")
+        start = max(0.0, start)
+        if duration is not None:
+            end = min(float(duration), end)
+        settled.append({"start": float(start), "end": float(end)})
+    for k, interval in enumerate(settled):
+        previous = settled[k - 1]["end"] if k else 0.0
+        if interval["end"] <= interval["start"] or interval["start"] < previous:
+            return intervals
+    return settled
 
 
 def _validate_segments(segments):

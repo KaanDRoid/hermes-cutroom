@@ -2070,7 +2070,9 @@ function SettingsPage({ ctx }) {
     el('section', { 'aria-labelledby': 'cutroom-models', style: stack, children: [
       el('h3', { id: 'cutroom-models', style: h3s, children: 'Model files' }),
       el('p', { style: muted, children: 'Files on the computer that runs Cutroom. Nothing is downloaded automatically.' }),
-      path('whisper_model', 'Speech model (Whisper) file'), path('face_model', 'Face model file'), path('segmentation_model', 'Background model file'),
+      path('whisper_model', 'Speech model (Whisper) file'),
+      el('p', { style: { ...muted, marginTop: -4 }, children: 'For removing words, the small model hears short words reliably. The tiny model is faster but can invent or miss a word; listen before you remove one.' }, 'whisper-hint'),
+      path('face_model', 'Face model file'), path('segmentation_model', 'Background model file'),
     ] }, 'models'),
     el('section', { 'aria-labelledby': 'cutroom-default-platform', style: stack, children: [
       el('h3', { id: 'cutroom-default-platform', style: h3s, children: 'Default platform' }),

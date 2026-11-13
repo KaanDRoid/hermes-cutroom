@@ -329,6 +329,35 @@ Required local assets are `config.json`, `model.bin` and `tokenizer.json`. Prese
 
 On success, the validated transcript is saved in the project with review-only `transcript.fillers`, the revision advances and approval is removed. The raw inference transcript remains in the job result, and `applied_revision` links it to the project. Neither first transcription nor retranscription automatically removes filler candidates.
 
+### Where a removed word is cut
+
+Recognisers stamp word edges up to a few hundred milliseconds off. Cutting at
+the stamps can leave the tail of a removed word or clip the start of a kept
+one. When the source has sound, `speech.word_segments` reads its 20 ms voice
+levels (the same `clips.energy_profile` that clip search uses) and checks each
+edge next to a removed word:
+
+- An edge already in a pause stays where it is.
+- An edge inside a sound gives that sound to the word whose stamp overlaps it
+  most. A removed word's sound is cut away whole; a kept word's sound is kept
+  whole.
+- An edge never moves more than 0.35 s, and nothing moves inside continuous
+  sound. Without levels (no audio, or a source over three hours) the stamps
+  are used as before.
+
+The Studio keeps the levels of the last four sources in memory, so only the
+first edit of a source pays for measuring it (0.13 s for 44 s, 1.0 s for
+17 minutes).
+
+Measured on the Sandra interview (`tests/test_word_cut_edges.py` mirrors it):
+the tiny model stamped "when" at 33.34–33.84 s while the sound ran on to
+33.94 s. Cutting at the stamp left a fragment that a re-transcription heard as
+"when he was"; the settled edge moves to 34.00 s, in the pause. The same
+check also showed the limit of any edge rule: the small model hears "our
+father died when I was two", with one "when". The tiny model's second "when"
+was invented and its stamp covered "I was". Removing it removes those words,
+so the Settings page now advises the small model for editing by words.
+
 ### Replacement policy
 
 Both a new `transcribe` job and a direct `Studio.update(..., {"transcript": ...}, revision)` use the same replacement policy:

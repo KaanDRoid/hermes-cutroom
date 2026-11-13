@@ -659,14 +659,30 @@ class Studio:
         ).hexdigest()
 
     def _clip_energy(self, project):
+        """Voice levels of the source, kept for the last few sources used.
+
+        Word cuts and clip search read them on every edit; measuring a
+        three-hour source takes about ten seconds.
+        """
         from .clips import energy_profile
 
         if not project["source_info"].get("has_audio"):
             return None
+        key = (str(project["source"]), project.get("source_sha256"))
+        cache = self.__dict__.setdefault("_energy_cache", {})
+        if key in cache:
+            cache[key] = cache.pop(key)
+            return cache[key]
         try:
-            return energy_profile(project["source"], project["source_info"]["duration"])
+            levels = energy_profile(
+                project["source"], project["source_info"]["duration"]
+            )
         except (subprocess.SubprocessError, OSError, ValueError):
             return None
+        cache[key] = levels
+        while len(cache) > 4:
+            cache.pop(next(iter(cache)))
+        return levels
 
     def create_clip(
         self,
@@ -1162,6 +1178,7 @@ class Studio:
                 transcript["words"],
                 project["excluded_word_ids"],
                 duration=project["source_info"]["duration"],
+                energy=self._clip_energy(project),
             )
             segments = [
                 {

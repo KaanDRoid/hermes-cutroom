@@ -67,7 +67,7 @@ models/face_landmarker.task
 models/selfie_segmenter.tflite
 ```
 
-The tested Whisper source is `Systran/faster-whisper-tiny`. FaceLandmarker and selfie ImageSegmenter assets come from the official MediaPipe model bucket. The model configuration/setup UX and reproducible downloader remain release tasks; do not copy a private cache or redistribute model files without checking their licenses.
+The tested Whisper source is `Systran/faster-whisper-tiny`. It is fast and enough for tests, but it can invent or drop short words; for editing by words use `Systran/faster-whisper-small` (see [where a removed word is cut](studio-jobs.md#where-a-removed-word-is-cut)). FaceLandmarker and selfie ImageSegmenter assets come from the official MediaPipe model bucket. The model configuration/setup UX and reproducible downloader remain release tasks; do not copy a private cache or redistribute model files without checking their licenses.
 
 ## Hermes validation
 
