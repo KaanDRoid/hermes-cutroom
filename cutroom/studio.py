@@ -177,6 +177,10 @@ class Studio:
                 "clip_candidates",
             }
         }
+        # Upload copy is independent of video review, including post-only saves.
+        payload["settings"] = {
+            key: value for key, value in project["settings"].items() if key != "post"
+        }
         assets = {}
         settings = project["settings"]
         candidates = [
@@ -288,6 +292,7 @@ class Studio:
                     "thumbnail",
                     "subtitles_file",
                     "end_screen_s",
+                    "post",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
@@ -393,6 +398,10 @@ class Studio:
                     merged["framing_keyframes"] = validate_keyframes(
                         merged["framing_keyframes"]
                     )
+                if "post" in settings:
+                    from .packages import normalize_post
+
+                    merged["post"] = normalize_post(settings["post"])
                 updated["settings"] = merged
             if "transcript" in changes:
                 self._set_transcript(updated, changes["transcript"])
@@ -458,6 +467,9 @@ class Studio:
                             f"{program:g} s program end at "
                             + ", ".join(f"{pin['time']:g} s" for pin in late)
                         )
+            if set(changes) == {"settings"} and set(changes["settings"]) == {"post"}:
+                self._write(updated)
+                return updated
             updated["revision"] += 1
             updated["status"] = "draft"
             updated.pop("approval", None)
@@ -1943,6 +1955,15 @@ class Studio:
                 "mtime_ns": stat.st_mtime_ns,
                 **extra,
             }
+        if "final" in artifacts:
+            lineage["final"]["delivery_files"] = {
+                kind: {
+                    "path": project["artifacts"][kind],
+                    "sha256": lineage[kind]["sha256"],
+                    "size": lineage[kind]["size"],
+                }
+                for kind in artifacts
+            }
         digest = self._digest(project)
         for kind in artifacts:
             if kind == "segmented":
@@ -2103,6 +2124,291 @@ class Studio:
             ):
                 raise PermissionError("Artifact changed after publication")
         return path
+
+    def post_text(self, project_id):
+        from . import packages
+        from .longform import description_block, program_duration
+
+        project = self.get(project_id)
+        platform = self.platform(project)
+        settings = project["settings"]
+        post = settings.get("post")
+        suggested = post is None
+        if suggested:
+            post = packages.suggest_post(
+                platform,
+                project["name"],
+                settings.get("title"),
+                self._program_words(project),
+            )
+        chapters = ""
+        if platform == "youtube" and settings.get("chapters"):
+            chapters = description_block(
+                settings["chapters"], program_duration(project["segments"])
+            )
+        return {
+            "platform": platform,
+            "label": packages.post_limits(platform)["label"],
+            "post": post,
+            "suggested": suggested,
+            "limits": packages.post_limits(platform),
+            "chapters_text": chapters,
+            **packages.check_post(platform, post, chapters),
+        }
+
+    def set_post(self, project_id, post):
+        project = self.get(project_id)
+        self.update(project_id, {"settings": {"post": post}}, project["revision"])
+        return self.post_text(project_id)
+
+    def package_path(self, project_id, name):
+        from .packages import PACKAGE_NAME
+
+        if not isinstance(name, str) or not PACKAGE_NAME.fullmatch(name):
+            raise ValueError("Invalid package folder name")
+        root = self._directory(project_id) / "packages"
+        path = root / name
+        ancestors = [path, root, root.parent, root.parent.parent]
+        if any(
+            p.is_symlink() or (hasattr(p, "is_junction") and p.is_junction())
+            for p in ancestors
+        ) or not path.resolve().is_relative_to(self.root.resolve()):
+            raise PermissionError("Packages must remain inside this project workspace")
+        return path
+
+    def verify_package(self, path):
+        from . import packages
+
+        path = Path(path).absolute()
+        try:
+            relative = path.relative_to(self.root)
+            parts = relative.parts
+            if len(parts) != 4 or parts[0] != "projects" or parts[2] != "packages":
+                raise ValueError("Not a project package")
+            checked = self.package_path(parts[1], parts[3])
+            if checked.resolve() != path.resolve():
+                raise ValueError("Not a project package")
+        except ValueError as error:
+            raise PermissionError(
+                "Check only packages inside this project workspace"
+            ) from error
+        if not path.is_dir():
+            raise FileNotFoundError("Package folder is missing")
+        return packages.verify(path)
+
+    def packages(self, project_id):
+        from . import packages
+
+        self.get(project_id)
+        root = self._directory(project_id) / "packages"
+        self.package_path(project_id, "tiktok-20000101-000000")
+        if not root.exists():
+            return []
+        result = []
+        for path in sorted(
+            root.iterdir(), key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True
+        ):
+            if not packages.PACKAGE_NAME.fullmatch(path.name):
+                continue
+            path = self.package_path(project_id, path.name)
+            try:
+                result.append(packages.summary(path, packages.read_manifest(path)))
+            except (OSError, ValueError):
+                continue
+        return result
+
+    def package(self, project_id, post=None, cover_time=None):
+        """Build local delivery files only from the exact currently approved final."""
+        import shutil
+
+        from . import __version__, packages
+        from .longform import chapter_problems, default_thumbnail_time, program_duration
+        from .postproduction import _probe
+
+        with self._lock(timeout=15):
+            project = self.get(project_id)
+            self._check_source(project)
+            digest = self._digest(project)
+            if project.get("approval", {}).get("digest") != digest:
+                raise PermissionError(
+                    "Approve this exact version in Review before making a package"
+                )
+            platform = self.platform(project)
+            entry = packages._platform(platform)
+            lineage = project.get("artifact_lineage", {}).get("final") or {}
+            if lineage.get("digest") != digest or "final" not in project["artifacts"]:
+                raise PermissionError(
+                    "Export an approved final for this version before making a package"
+                )
+            final = self._validate_publication(project, "final")
+            status = self.post_text(project_id)
+            chosen = (
+                packages.normalize_post(post) if post is not None else status["post"]
+            )
+            check = packages.check_post(platform, chosen, status["chapters_text"])
+            if check["problems"]:
+                raise ValueError(" ".join(check["problems"]))
+            duration = program_duration(project["segments"])
+            if platform == "youtube":
+                problems = (
+                    chapter_problems(
+                        project["settings"].get("chapters") or [], duration
+                    )
+                    if project["settings"].get("chapters")
+                    else []
+                )
+                if problems:
+                    raise ValueError(
+                        "Fix the chapters before packaging: " + " ".join(problems)
+                    )
+            if cover_time is None:
+                cover_time = default_thumbnail_time(
+                    project.get("analysis"), project["segments"]
+                )
+            if (
+                isinstance(cover_time, bool)
+                or not isinstance(cover_time, (int, float))
+                or not math.isfinite(cover_time)
+                or not 0 <= cover_time < duration
+            ):
+                raise ValueError("Cover time must be inside the edited video")
+            info = _probe(final, 120)
+            expected = entry["frame"]["final"][
+                project["settings"].get("final_resolution") or "1080"
+            ]
+            if [info["width"], info["height"]] != expected:
+                raise ValueError(
+                    "The final video frame does not match this platform; export it again"
+                )
+            problem = self._platform_problem(project)
+            if problem:
+                raise ValueError(problem)
+            root = self._directory(project_id) / "packages"
+            # Reject redirected parents before creating anything.
+            self.package_path(project_id, platform + "-20000101-000000")
+            directory = packages.new_directory(root, platform)
+            try:
+                link = packages.place_video(final, directory / "video.mp4")
+                roles = {
+                    "video.mp4": "the approved final video",
+                    "post.txt": "the text to paste when uploading",
+                    "README.txt": "these instructions",
+                }
+                if platform == "youtube":
+                    # Resolve sidecars from the FINAL job, never a later preview.
+                    record = self.job(lineage["job_id"])
+                    assets = (record.get("result") or {}).get("artifacts") or {}
+                    for kind, name in (
+                        ("thumbnail", "thumbnail.jpg"),
+                        ("captions_srt", "captions.srt"),
+                    ):
+                        value = assets.get(kind)
+                        if value:
+                            source = self._owned(record, value)
+                            identity = (lineage.get("delivery_files") or {}).get(kind)
+                            if (
+                                not identity
+                                or source.stat().st_size != identity["size"]
+                                or file_digest(source) != identity["sha256"]
+                            ):
+                                raise PermissionError(
+                                    "Final delivery file changed or has no recorded checksum; export the final again"
+                                )
+                            side = project.get("artifact_lineage", {}).get(kind) or {}
+                            # Current publication identity when it still refers to this final.
+                            if side.get("job_id") == record["id"]:
+                                self._validate_publication(project, kind)
+                            packages.copy_file(source, directory / name)
+                        elif kind == "captions_srt":
+                            from .longform import srt_cues, write_srt
+
+                            write_srt(
+                                srt_cues(self._program_words(project)), directory / name
+                            )
+                        else:
+                            raise ValueError(
+                                "The final has no thumbnail; export it again"
+                            )
+                    width, height = packages.jpeg_size(directory / "thumbnail.jpg")
+                    if (
+                        abs(width / height - 16 / 9) > 0.01
+                        or width < 640
+                        or (directory / "thumbnail.jpg").stat().st_size > 2_000_000
+                    ):
+                        raise ValueError(
+                            "The final thumbnail must be 16:9, at least 640 pixels wide and under 2 MB"
+                        )
+                    cover = {
+                        "file": "thumbnail.jpg",
+                        "width": width,
+                        "height": height,
+                        **entry["cover"],
+                    }
+                    roles.update(
+                        {
+                            "thumbnail.jpg": "the final's YouTube thumbnail",
+                            "captions.srt": "subtitles to upload with the video",
+                        }
+                    )
+                    cover_line = "Use thumbnail.jpg as the custom thumbnail and captions.srt as subtitles."
+                else:
+                    size = (1080, 1920)
+                    made = packages.make_cover(
+                        final, cover_time, directory / "cover.jpg", size
+                    )
+                    cover = {
+                        "file": "cover.jpg",
+                        **made,
+                        "time": cover_time,
+                        "source": entry["cover"]["source"],
+                        "checked": entry["cover"]["checked"],
+                        "choice": "Cutroom 1080x1920 reference frame; see platform cover guidance",
+                    }
+                    roles["cover.jpg"] = "a 9:16 frame from the final video"
+                    cover_line = f"Cover frame at {packages.clock(cover_time)} in the final video."
+                    if platform == "tiktok":
+                        cover_line += " TikTok selects a video frame as its cover; select this time when uploading."
+                    elif platform == "instagram_reels":
+                        cover_line += " Instagram recommends 420x654; crop this 9:16 reference in the upload screen."
+                packages._write_text(
+                    directory / "post.txt",
+                    packages.post_file(platform, check, cover_line=cover_line),
+                )
+                packages._write_text(
+                    directory / "README.txt",
+                    packages.readme_file(
+                        entry["label"], roles.items(), project["name"]
+                    ),
+                )
+                manifest = packages.manifest_record(
+                    project={
+                        "id": project_id,
+                        "revision": project["revision"],
+                        "approval_digest": digest,
+                    },
+                    platform=platform,
+                    created_at=packages.created_at(),
+                    cutroom_version=__version__,
+                    video_link=link,
+                    post=chosen,
+                    posted_text=check["text"],
+                    limits=status["limits"],
+                    cover=cover,
+                    files=packages.file_entries(directory, roles),
+                )
+                packages.write_manifest(directory, manifest)
+                # Verify original and package before exposing the folder.
+                self._validate_publication(project, "final")
+                verified = packages.verify(directory)
+                if not verified["ok"]:
+                    raise RuntimeError("Package checks failed; try again")
+                if post is not None:
+                    project["settings"]["post"] = chosen
+                    self._write(project)
+                return packages.summary(directory, manifest)
+            except Exception:
+                shutil.rmtree(directory)
+                raise
 
     def poster(self, project_id, at=0.1):
         """One source frame as a JPEG data URL, cached per source hash and position.
