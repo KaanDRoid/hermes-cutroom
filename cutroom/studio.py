@@ -276,6 +276,7 @@ class Studio:
                     "voice_cleanup",
                     "framing",
                     "framing_keyframes",
+                    "pacing",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
@@ -360,6 +361,14 @@ class Studio:
                 from .reframe import validate_framing, validate_keyframes
 
                 validate_framing(merged.get("framing", "fit"))
+                if "pacing" in settings:
+                    from .pacing import validate_settings as validate_pacing
+
+                    value = validate_pacing(settings["pacing"])
+                    if value is None:
+                        merged.pop("pacing", None)
+                    else:
+                        merged["pacing"] = value
                 if "framing_keyframes" in merged:
                     # Shape only here; program length is checked after the edit.
                     merged["framing_keyframes"] = validate_keyframes(
@@ -402,7 +411,9 @@ class Studio:
                     "gaze_exclusions",
                     "transcript",
                 )
-            ):
+            ) or "pacing" in (changes.get("settings") or {}):
+                # Shortened pauses are derived from the words, so they follow
+                # every edit and every change of the pause limit.
                 self._rebuild_segments(updated)
             notes = []
             if updated["settings"].get("framing_keyframes"):
@@ -692,6 +703,15 @@ class Studio:
             segments = remainder
         if not segments:
             raise ValueError("An edit must keep at least one source interval")
+        limit = (project["settings"].get("pacing") or {}).get("max_pause")
+        words = (project.get("transcript") or {}).get("words") or []
+        if limit is not None and words:
+            from .pacing import shorten_pauses
+
+            excluded = set(project["excluded_word_ids"])
+            segments = shorten_pauses(
+                segments, [w for w in words if w["id"] not in excluded], limit
+            )
         project["segments"] = segments
 
     def _job_path(self, job_id):
@@ -1078,6 +1098,14 @@ class Studio:
                 "faces": analysis.get("face_samples", []),
                 "scene_cuts": analysis.get("scene_cuts"),
             }
+        if settings.get("pacing"):
+            from .pacing import zooming
+
+            result["pacing"] = copy.deepcopy(settings["pacing"])
+            faces = (project.get("analysis") or {}).get("face_samples")
+            if zooming(settings["pacing"]) and faces:
+                # Punch-ins centre on the face in every framing mode.
+                result["pacing_analysis"] = {"faces": faces}
         return result
 
     def _quality_settings(self, project, preset):
@@ -1085,6 +1113,14 @@ class Studio:
         render = self._render_settings(project, preset)
         render.pop("framing_analysis", None)
         render.pop("framing_keyframes", None)
+        render.pop("pacing_analysis", None)
+        if (render.get("pacing") or {}).get("max_pause") is not None:
+            excluded = set(project.get("excluded_word_ids", []))
+            render["pacing_words"] = [
+                [w["start"], w["end"]]
+                for w in (project.get("transcript") or {}).get("words", [])
+                if w["id"] not in excluded and w["end"] > w["start"]
+            ]
         if "platform" not in render:
             render.pop("title")
         render["expected_duration"] = sum(
@@ -1220,6 +1256,9 @@ class Studio:
             mix_report = (render_job.get("result") or {}).get("audio_mix")
             if mix_report is not None:
                 render["audio_mix"] = mix_report
+            pacing_report = (render_job.get("result") or {}).get("pacing")
+            if pacing_report is not None and render.get("pacing"):
+                render["pacing_report"] = pacing_report
             framing = self._render_framing(project, job["upstream"])
             if framing and framing.get("mode") in {"center_crop", "face_track"}:
                 render["framing_report"] = framing

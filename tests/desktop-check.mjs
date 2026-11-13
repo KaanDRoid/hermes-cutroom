@@ -1173,6 +1173,57 @@ test('selects reframing and adds a program-time pin from playback with a horizon
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
 });
 
+test('style: pacing saves punch-ins, shorter pauses and transitions in plain words', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { brand: {} } });
+  await ui.step('Style');
+  const press = (group, label) => nodes(role(ui.draw(), 'group', group)).find(n => n.type === 'Button' && text(n) === label).props.onClick();
+  assert.ok(nodes(ui.draw()).find(n => n.type === 'h3' && text(n) === 'Pacing'), 'Pacing heading');
+  assert.equal(field(ui.draw(), 'pacing.max_pause').props.disabled, true, 'The pause slider waits for the switch');
+  press('Punch-ins', 'On');
+  labelled(ui.draw(), 'Shorten long pauses').props.onCheckedChange(true);
+  const slider = field(ui.draw(), 'pacing.max_pause');
+  assert.equal(slider.props.type, 'range');
+  assert.equal(slider.props.disabled, false);
+  assert.match(slider.props['aria-valuetext'], /0\.6 seconds/);
+  type(slider, '0.5');
+  press('Transition', 'Crossfade');
+  assert.ok(disclosure(ui.draw(), 'More pacing options'), 'Zoom amounts live under More pacing options');
+  labelled(ui.draw(), 'Slow push-in on long shots').props.onCheckedChange(true);
+  type(field(ui.draw(), 'pacing.punch_in_zoom'), '1.2');
+  await ui.flush();
+  const pacing = ui.patches().at(-1).options.body.changes.settings.pacing;
+  assert.deepEqual({ ...pacing }, { punch_in: 'alternate', max_pause: 0.5, transition: 'crossfade', push_in: true, punch_in_zoom: 1.2 });
+  const count = ui.patches().length;
+  type(field(ui.draw(), 'pacing.punch_in_zoom'), '1.5');
+  await ui.flush();
+  assert.equal(ui.patches().length, count, 'An out-of-range zoom is not sent');
+  assert.match(text(ui.draw()), /between 1\.05 and 1\.3/);
+  type(field(ui.draw(), 'pacing.punch_in_zoom'), '');
+  labelled(ui.draw(), 'Shorten long pauses').props.onCheckedChange(false);
+  press('Transition', 'Dip to black');
+  await ui.flush();
+  const last = ui.patches().at(-1).options.body.changes.settings.pacing;
+  assert.equal(last.max_pause, null, 'Turning the switch off sends no limit');
+  assert.equal(last.punch_in_zoom, undefined, 'A blank zoom uses the default');
+  assert.equal(last.transition, 'dip');
+  for (const name of ['pacing_upscale', 'pacing_face', 'pacing_transitions', 'pacing_max_pause']) assert.ok(source.includes(`  ${name}: ['`), `${name} reads as a sentence`);
+});
+
+test('pacing undo restores the previous settings, and legacy projects send nothing', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { brand: {} } });
+  await ui.step('Style');
+  await ui.flush();
+  assert.equal(ui.patches().length, 0, 'Opening Style does not write pacing');
+  nodes(role(ui.draw(), 'group', 'Punch-ins')).find(n => n.type === 'Button' && text(n) === 'On').props.onClick();
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.pacing.punch_in, 'alternate');
+  await button(ui.draw(), 'Undo').props.onClick();
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.pacing, null, 'Undo removes pacing again');
+});
+
 test('chat card shows a compact video summary, opens the Studio and never approves', async () => {
   const module = await load();
   const entries = [];

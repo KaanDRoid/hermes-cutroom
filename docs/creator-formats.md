@@ -398,6 +398,76 @@ An independent review (`artifacts/f2/review/REVIEW.md`) found the defects below;
 - Variable-rate sources must be conformed before tracked or keyframed crops; the review probe confirmed the refusal (`artifacts/f2/review/semantics.json`), but it has no unit test yet.
 - Native Desktop acceptance (A28) is still to come.
 
+## F3 — Pacing
+
+Status: implemented on `feat/f3-pacing`; not yet merged into `feat/creator-formats`.
+
+### What shipped
+
+- **Settings.** `settings.pacing` is optional; projects without it render with the same filter graph and digest as before. Studio, the REST model and the `cutroom_project` tool apply the same rules, `null` removes it, and the stored value has every default filled in, so it is part of the review digest.
+  - `punch_in`: `off` (default) or `alternate`. `punch_in_zoom` 1.05–1.3, default 1.12.
+  - `max_upscale`: 1–4, default 2. The most the source may be enlarged in total, framing included.
+  - `push_in`: default false. `push_in_zoom` 1.02–1.15, default 1.06.
+  - `max_pause`: `null` (default) or 0.2–2 seconds.
+  - `transition`: `cut` (default), `crossfade` or `dip` (to black). `transition_duration` 0.04–0.5 s, default 0.2, rendered as a whole number of frames between 2 and 12 (6 frames at 29.97 fps).
+- **Edit cuts.** Every boundary between two kept ranges of the program is an edit cut: cuts from removed words, from manual ranges, from gaze exclusions and from shortened pauses alike. Scene cuts inside a kept range are not edit cuts.
+- **Punch-ins.** With `alternate`, the first range keeps normal framing, the second is zoomed in, the third is normal again, and so on.
+  - **Anchor.** The zoom scales the picture about the speaker's face centre, so the face keeps its place in the frame and the picture grows around it. The anchor is the median face centre of the range, taken from the Vision face samples with the same speaker choice as reframing; without samples it is the centre of the picture. Samples are used in every framing mode, not only `face_track`.
+  - **Order with framing.** The crop path is applied first, then the zoom inside the crop window. Where the zoom is constant the two are one even-pixel crop (`crop=zw:zh:x='path+ox':y='path+oy'`), so there is one resampling step. Titles, lower thirds and captions are drawn after framing and pacing, at their normal size and inside the safe zone.
+  - **Limit.** The total enlargement is the framing's own enlargement times the zoom (608×1080 to 1080×1920 is 1.78×, times 1.12 is 1.99×). A zoom that would exceed `max_upscale` is reduced to fit and the render result says so; a zoom that would fall under 1.02× is skipped and reported instead.
+  - In `fit` and `blur_fill` the zoom works on the whole decoded frame and is scaled back to the source size before the usual fit, so the bars or the blurred background stay where they were.
+- **Push-in.** On ranges of at least 4 s of uninterrupted program, the zoom eases (smoothstep) from the range's zoom to that zoom times `push_in_zoom`, about the same anchor and under the same limit. It uses FFmpeg's `perspective` filter with per-frame corners, which moves by sub-pixel steps instead of jumping whole pixels.
+- **Shorter pauses.** `max_pause` works on the segments, using word times.
+  - A pause is measured between consecutive kept words on the program timeline, so the kept tail of one range plus the kept head of the next count as one pause. Excluded words are not pause anchors; the gap they leave is measured from the kept words around it.
+  - A longer pause loses its middle: half of `max_pause` stays after the earlier word and half before the later one.
+  - Silence before the first and after the last kept word is not between words and stays.
+  - `segments` is rebuilt from `base_segments`, word exclusions and gaze exclusions every time any of them or the pause limit changes, so `null` restores the original pauses and `base_segments` is never changed. Captions, cut sounds and music ducking follow the new segments like any other edit. The program gets shorter.
+- **Transitions.** `crossfade` and `dip` use FFmpeg `xfade` (`fade` and `fadeblack`) at every edit cut.
+  - **No overlap of kept frames.** Each transition is centred on its cut and built from handles: the outgoing range continues into the footage after its end, and the incoming range starts early in the footage before its start. Every kept frame keeps the program position it has with a plain cut, the program length does not change, and caption timing and A/V sync are unaffected. A 6-frame crossfade shows three blended frames before the cut and three after.
+  - **Visible removed footage.** The handles come from footage that the edit removed. In a crossfade they are seen only while blending, at no more than about half weight; in a dip they fall in the dark half of the transition.
+  - **Short ranges.** A range gives at most its own frames to the transitions on both its sides; if a cut cannot get two frames it keeps a plain cut and the render reports it.
+  - **Sound.** Audio is not overlapped, so no removed speech becomes audible: each side of a transition cut gets a 10 ms fade, sample-exact inside the existing frame-aligned audio ranges. Sync stays exactly as for plain cuts.
+- **Rendering.** With punch-ins, push-ins or transitions, each kept range becomes its own chain: trim (with its handles), crop path for that range (a piecewise-linear expression per range, still bounded by 20,000 pieces per axis in total), zoom, scale, and one-frame timestamps; the chains are joined by `concat` or by `xfade` with offsets in whole frames. Pacing that changes the picture needs constant-rate video; variable-rate sources are refused with a message to conform them first. `max_pause` alone works on any source.
+- **Render result.** `pacing` records per range the planned zoom, zoom window, anchor and total enlargement, the cuts, the placed and skipped transitions, the face samples on zoomed frames, the rendered source ranges and any warnings. `upscale_factor` keeps describing the framing alone; `pacing.max_upscale_factor` is the largest total.
+- **QA.** Studio passes the render's pacing report (and, with `max_pause`, the kept words) into QA, which adds:
+  - `pacing_upscale`: fails if any zoomed range's window times the framing's enlargement exceeds `max_upscale`; a warning if the framing alone is so large that no zoom was possible.
+  - `pacing_face`: on zoomed frames with their own face sample, the selected face centre projected through the zoom window must be inside the safe area in at least 95 % of them. Skipped when no zoomed frame has a face sample.
+  - `pacing_transitions`: one transition of 2–12 frames at every edit cut. A cut that kept a plain cut because a range is too short is a warning; any other shortfall fails.
+  - `pacing_max_pause`: kept word times are mapped through the rendered, frame-aligned ranges; no pause between kept words may exceed `max_pause` plus one frame.
+- **QA fix found on the way.** QA validated caption times against the decoded video length, which frame alignment can make up to half a frame shorter than the edit the captions were timed against, so a caption ending with the program failed `captions`. QA now allows one frame.
+- **Desktop.** The Style step has a **Pacing** group: Punch-ins Off/On, a **Shorten long pauses** switch with a **Longest pause** slider (0.2–2 s, default 0.6), and Transition Cut / Crossfade / Dip to black. **More pacing options** holds the push-in switch, the two zoom amounts, the enlargement limit and the transition length; out-of-range numbers are refused before saving and a blank number uses the default. Changes autosave and undo as one step per run of pacing changes. QA results read as sentences.
+- **Chat.** The `edit-video` skill suggests punch-ins and a 0.6 s pause limit for short-form talking heads and asks before turning them on.
+
+### How it was verified
+
+- RED before implementation: `artifacts/f3/red.log` (new test modules could not import `cutroom.pacing`, the A/V sync cases refused the setting, two Desktop tests failed); the caption-length fix has its own RED log, `artifacts/f3/red-captions.log`. GREEN: `artifacts/f3/green.log`.
+- `tests/test_pacing.py` (20 tests): settings limits; frame counts for transitions; pauses inside a range, across an existing cut, around excluded words and over 40 words; the alternate pattern, even windows, the upscale limit with reduction and skipping, face anchoring, push-in only on long ranges and its easing; handle placement on short ranges; every QA check passing on a valid plan and failing on a broken one; bounded report validation; and real FFmpeg renders:
+  - a centre-crop punch-in measured from a luma ramp: the window of the second range is 1.2× narrower (±0.04) and centred on the same column, the first is unchanged;
+  - crossfade and dip: 60 frames and 2.000 s in both, every frame outside the six transition frames identical to the plain render's, the middle crossfade frame between both sides, the dip through black, audio and video lengths within 1 ms;
+  - a push-in of 1.15× over a 4 s range in `fit`, `blur_fill` and `center_crop`: the first frame is unzoomed, the last 1.15× (±0.04), the middle between 1.05× and 1.1× (eased), centred on the same column;
+  - a variable-rate source refused, and the caption-length tolerance.
+- `tests/test_av_sync.py` (two new cases): the flash/click source with video starting 7 ms after audio, rendered with crossfades and punch-ins on three ranges, with a 0.4 s dip, and with crossfades over twelve sub-frame cuts. Every flash/click pair keeps the source offset within 0.5 ms and audio ends with the last frame.
+- `tests/test_studio_pacing.py` (6 tests): Studio validation and removal, the digest, `max_pause` rebuilding segments and captions and being undone by `null`, render and QA settings, the REST model and tool schema, and an end-to-end `face_track` preview with punch-ins and crossfades whose QA passes `pacing_upscale`, `pacing_face`, `pacing_transitions`, `framing_frames` and `duration`.
+- `tests/desktop-check.mjs` (two new tests): the Pacing group, the slider's plain value text, refusal of an out-of-range zoom, blank-means-default, switching pauses off, undo, and sentences for the new checks.
+- Local gates: **456 Python tests OK**, 14 skipped without local models and media; **49/49 Desktop tests**; Ruff check and format clean; `node --check` passes.
+- **Real footage** (`scripts/pacing_evidence.py`, `artifacts/f3/evidence/measurements.json`): the Sandra clip (1920×1080, 29.97 fps), source 0–12 s and 14–30 s, Instagram Reels preview at 1080×1920 with `face_track`, highlight captions and `{"punch_in": "alternate", "max_pause": 0.5, "transition": "crossfade"}`, after real Studio `transcribe` (whisper-tiny, 2.3 s) and `vision` (frame step 5, 9.5 s). Preview 15.9 s, QA 7.6 s.
+  - Pauses: one of the kept-word pauses was longer than 0.5 s (0.86 s); after shortening the longest is 0.50 s, and the edit went from two to three ranges and from 28.0 s to 27.64 s. QA `pacing_max_pause` measured 0.493 s on the rendered ranges (62 words).
+  - Zoom: the middle range is zoomed 1.122× inside the 608×1080 face-tracked crop; total enlargement 1.994× against the 2× limit (`pacing_upscale` pass). `pacing_face` 57 of 57 zoomed face samples inside the safe area. `pacing_transitions` 2 of 2 cuts, 6 frames each.
+  - Independent check against a plain render of the same edit and framing: MediaPipe on every third output frame of both found the face in 91 zoomed-range frames, all inside the safe area; the face is 1.125× taller than in the plain render (requested 1.12×) and its centre moved by a median 0.17 % of the frame width. On 170 normal-range frames the ratio is 1.000.
+  - Sync against the plain render: audio offset 0 samples in all three ranges (correlation ≥ 0.9999), picture offset 0 frames (frame-difference correlation ≥ 0.998), 828 frames in both, video 27.627600 s and audio 27.627604 s.
+  - All other checks pass too (framing, captions, `caption_timing`, `caption_bounds`, `safe_zone`, `duration`, `frame_timing`); `platform_upscale` warns at 1.78×, as for every 1080p landscape source cropped to 9:16.
+  - Frames were checked by eye (`cuts-sheet.png`, `ranges-sheet.png`): in the first range the speaker is framed as in F2; the crossfade frame shows both sides at half weight; in the zoomed range her face is larger at the same place and the clasped hands are cropped lower; after the second cut the framing is normal again. Captions have the same size and position in zoomed and normal frames. Paced and plain frames of the unzoomed ranges are the same moment with the same framing.
+
+### Open items
+
+- Push-in is tested on synthetic renders but was not part of the real-footage run.
+- Transitions show removed footage at partial opacity for a few frames. A transition that never shows removed footage would have to overlap kept frames, shorten the program and shift captions; that was not chosen.
+- Audio at transition cuts is a 10 ms fade out and in, not an audio crossfade, so that removed speech never becomes audible.
+- `pacing_face` projects Vision's face samples through the plan; it does not run face detection on the output. The real-footage run did that separately.
+- Pause shortening relies on word timings. Whisper's word ends can be early or late by tens of milliseconds, so a shortened pause can cut into a breath or the tail of a word.
+- Punch-ins, push-ins and transitions need constant-rate video (`max_pause` does not).
+- Native Desktop acceptance of the new controls (A28) is still to come.
+
 ## Order and branches
 
 F0 first, because every other package builds on profiles and derived projects. Then F1, F2 and F4 in parallel, then F3, F5, F6, F7 and F8. Each package is developed on its own branch and merged into `feat/creator-formats` through a pull request after the full test suite, the Desktop checks, ruff and an independent review pass. `feat/creator-formats` merges into `main` once, as 0.2.0.

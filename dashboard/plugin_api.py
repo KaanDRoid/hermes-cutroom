@@ -115,6 +115,8 @@ class UpdateProject(RequestModel):
                 raise ValueError(f"{key} must be an object")
         if "settings" in value:
             _module("captions").validate_settings(value["settings"], allow_reset=True)
+            if "pacing" in value["settings"]:
+                _module("pacing").validate_settings(value["settings"]["pacing"])
         for key in ("segments", "gaze_exclusions", "excluded_word_ids"):
             if key in value and (
                 not isinstance(value[key], list) or len(value[key]) > 100_000

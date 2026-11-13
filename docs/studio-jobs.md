@@ -92,6 +92,21 @@ project = studio.update(project["id"], {"settings": {
 - `preview` and `final` render the cut voice (cleaned if requested), duck the music under detected speech, place the cut sound on each cut, and normalise the mix to the profile target. The result gains `audio_mix` (what was mixed and the measured ducking depth). `audio_normalization.method` says whether the gain was linear, linear after true-peak limiting, or a dynamic fallback.
 - `qa` on such a render adds `music` (measured depth against the requested depth) and `mix_loudness` (±0.5 LU, true peak).
 
+## Pacing
+
+```python
+project = studio.update(project["id"], {"settings": {
+    "pacing": {"punch_in": "alternate", "max_pause": 0.6, "transition": "crossfade"},
+}}, project["revision"])
+```
+
+- Fields and defaults: `punch_in` `off`/`alternate` (off), `punch_in_zoom` 1.05–1.3 (1.12), `max_upscale` 1–4 (2, total enlargement of the source including framing), `push_in` (false), `push_in_zoom` 1.02–1.15 (1.06, on ranges of 4 s or more), `max_pause` `null` or 0.2–2 s, `transition` `cut`/`crossfade`/`dip` (cut), `transition_duration` 0.04–0.5 s (0.2, rendered as 2–12 frames). The stored value has every default filled in; `null` removes pacing.
+- Punch-ins zoom every other kept range about the speaker's face (Vision face samples in any framing mode, else the centre), after the crop path and before captions. A zoom that would exceed `max_upscale` is reduced, or skipped below 1.02×, and the render says so.
+- `max_pause` rebuilds `segments` from `base_segments`, word exclusions and gaze exclusions: pauses between kept words longer than the limit (in program time, across cuts too) lose their middle. `base_segments` is unchanged, so `max_pause: null` restores the pauses. The program gets shorter.
+- Transitions are centred on each edit cut and built from handles outside the kept ranges, so program length, caption timing and A/V sync stay as with plain cuts; the sound gets a 10 ms fade on each side of the cut instead of an audio crossfade.
+- Punch-ins, push-ins and transitions need constant-rate video; `max_pause` works on any source.
+- `preview` and `final` results gain `pacing` (zoom per range, windows, anchors, total enlargement, cuts, transitions, warnings, rendered ranges). `qa` adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and, with `max_pause`, `pacing_max_pause`.
+
 ## Platform versions (derived projects)
 
 `Studio.derive(project_id, platform, name=None, final_resolution=None)` creates a sibling project for another platform:
