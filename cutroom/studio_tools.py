@@ -265,6 +265,21 @@ def _media(studio, job, project=None):
         render_job_id = _upstream_job(job)
         render_kind = (job.get("upstream_identity") or {}).get("kind") or "preview"
     approval = project.get("approval") or {}
+    current = False
+    approved = False
+    if (lineage.get(kind) or {}).get("job_id") == job.get("id"):
+        try:
+            # Use the same digest, lineage, containment and byte checks as REST.
+            validated = studio.artifact(project["id"], kind)
+            current = Path(validated).resolve() == path.resolve()
+            if current and approval.get("revision") == project.get("revision"):
+                approved = (
+                    bool(approval.get("digest"))
+                    and approval["digest"] == studio.review(project["id"])["digest"]
+                )
+        except (OSError, ValueError, TypeError):
+            current = False
+            approved = False
     platform = (
         result.get("platform")
         or (lineage.get(render_kind) or {}).get("platform")
@@ -279,15 +294,17 @@ def _media(studio, job, project=None):
         "duration": _number(result.get("duration")),
         "width": _number(result.get("width")),
         "height": _number(result.get("height")),
-        "current": (lineage.get(kind) or {}).get("job_id") == job.get("id"),
+        "current": current,
         "qa": _latest_qa(studio, project.get("id"), render_job_id),
-        "approved": bool(approval)
-        and approval.get("revision") == project.get("revision"),
+        "approved": approved,
     }
 
 
 def _with_media(studio, job):
     """Add ``media`` and ``display_hint``; lookup problems never hide the job."""
+    job = {
+        key: value for key, value in job.items() if key not in {"media", "display_hint"}
+    }
     try:
         media = _media(studio, job)
     except Exception:
@@ -295,7 +312,11 @@ def _with_media(studio, job):
     if media is None:
         return job
     # A displayable render must still serialise; drop non-finite numbers.
-    return _json_safe(dict(job, media=media, display_hint=DISPLAY_HINT + media["path"]))
+    result = dict(job, media=media)
+    result.pop("display_hint", None)
+    if media["current"]:
+        result["display_hint"] = DISPLAY_HINT + media["path"]
+    return _json_safe(result)
 
 
 def _project_media(studio, project):

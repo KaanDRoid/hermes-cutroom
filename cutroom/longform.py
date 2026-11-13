@@ -562,16 +562,28 @@ def srt_cues(words):
             current = []
     if current:
         groups.append(current)
+    # Co-timed zero-duration words cannot occupy separate non-overlapping cues.
+    merged = []
+    for group in groups:
+        if merged and group[0]["start"] < merged[-1][0]["start"] + 0.001:
+            merged[-1].extend(group)
+        else:
+            merged.append(group)
+    groups = merged
     cues = []
     for index, group in enumerate(groups):
         text = " ".join(w["text"] for w in group)
-        lines = (
-            _wrap(text)
-            or [
+        lines = _wrap(text)
+        if lines is None:
+            if len(text) > SUBTITLE_CHARS * SUBTITLE_LINES:
+                raise ValueError(
+                    "Subtitle text/token cannot fit losslessly in two lines; "
+                    "shorten the token or correct co-timed word timestamps"
+                )
+            lines = [
                 text[i : i + SUBTITLE_CHARS]
                 for i in range(0, len(text), SUBTITLE_CHARS)
-            ][:SUBTITLE_LINES]
-        )
+            ]
         start, end = group[0]["start"], max(w["end"] for w in group)
         following = groups[index + 1][0]["start"] if index + 1 < len(groups) else None
         if end - start < SUBTITLE_MIN_S:
@@ -609,8 +621,8 @@ def write_srt(cues, path, format="srt"):
     previous = None
     for index, cue in enumerate(cues, 1):
         start, end = _stamp(cue["start"], separator), _stamp(cue["end"], separator)
-        if start == end:
-            continue
+        if cue["end"] <= cue["start"] or start == end:
+            raise ValueError("Subtitle cue has no representable duration")
         if previous is not None and cue["start"] < previous:
             raise ValueError("Subtitle cues must not overlap")
         previous = cue["end"]
@@ -656,8 +668,22 @@ def subtitle_report(text, words, frame):
         parsed = parse_srt(text)
     except ValueError as error:
         return {"status": "fail", "problems": [str(error)]}
-    expected = srt_cues(words)
     problems = []
+    # Compare delivered characters directly with the transcript, independently
+    # of cue generation. Wrapping may insert whitespace inside a long token.
+    original = "".join(
+        re.sub(r"\s+", "", str(w.get("text", "")))
+        for w in sorted(words, key=lambda w: (w["start"], w["end"]))
+    )
+    delivered = "".join(
+        re.sub(r"\s+", "", line) for cue in parsed for line in cue["lines"]
+    )
+    if delivered != original:
+        problems.append("Delivered subtitle text differs from the original transcript")
+    try:
+        expected = srt_cues(words)
+    except ValueError as error:
+        return {"status": "fail", "problems": problems + [str(error)]}
     if len(parsed) != len(expected):
         problems.append(f"{len(parsed)} cues in the file, {len(expected)} expected")
     previous_end, worst = 0.0, 0.0

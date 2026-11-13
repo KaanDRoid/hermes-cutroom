@@ -19,6 +19,53 @@ from .project import file_digest
 _CHILD_PROCESSES = {}
 # A 480 px JPEG is tens of kilobytes; anything far larger is not a poster.
 POSTER_MAX_BYTES = 2_000_000
+THUMBNAIL_CACHE_MAX_ENTRIES = 32
+THUMBNAIL_CACHE_MAX_BYTES = 32 * 1024 * 1024
+
+
+def _cache_local(path, directory):
+    """Refuse redirected directories and entries before cache writes/removals."""
+    if directory.resolve() != directory.absolute() or path.parent != directory:
+        raise PermissionError("Thumbnail cache must remain inside the project")
+    if path.resolve() != path.absolute() or path.is_symlink():
+        raise PermissionError("Thumbnail cache entry must not be a link")
+
+
+def _prune_thumbnail_cache(directory):
+    """Evict least-recently-used pairs; caller holds the per-project lock."""
+    _cache_local(directory / "entry", directory)
+    entries = {}
+    for path in directory.iterdir():
+        if re.fullmatch(r"\.thumbnail-[a-f0-9]{32}\.jpg", path.name):
+            _cache_local(path, directory)
+            path.unlink(missing_ok=True)
+            continue
+        if not re.fullmatch(r"thumbnail-[a-f0-9]{24}\.(jpg|json)", path.name):
+            continue
+        _cache_local(path, directory)
+        if path.is_file():
+            entries.setdefault(path.stem, []).append(path)
+    ordered = []
+    total = 0
+    for files in entries.values():
+        size = sum(p.stat().st_size for p in files)
+        total += size
+        ordered.append(
+            (max(p.stat().st_mtime_ns for p in files), files[0].stem, size, files)
+        )
+    remaining = len(ordered)
+    for _, _, size, files in sorted(ordered):
+        if (
+            len(files) == 2
+            and remaining <= THUMBNAIL_CACHE_MAX_ENTRIES
+            and total <= THUMBNAIL_CACHE_MAX_BYTES
+        ):
+            continue
+        for path in files:
+            _cache_local(path, directory)
+            path.unlink(missing_ok=True)
+        remaining -= 1
+        total -= size
 
 
 class MissingAssetError(FileNotFoundError):
@@ -904,39 +951,51 @@ class Studio:
         directory = self._directory(project_id) / "posters"
         path = directory / f"thumbnail-{key}.jpg"
         info_path = path.with_suffix(".json")
-        if not (path.is_file() and info_path.is_file()):
-            self._check_source(project)
+        with self._lock("thumbnail-" + project_id, timeout=135):
+            _cache_local(path, directory)
+            _cache_local(info_path, directory)
             directory.mkdir(parents=True, exist_ok=True)
-            temporary = directory / f".{uuid.uuid4().hex}.jpg"
-            try:
-                made = make_thumbnail(
-                    source,
-                    moment,
-                    temporary,
-                    text=text,
-                    font=font,
-                    size=(1280, 720),
-                    face=face,
-                    max_bytes=POSTER_MAX_BYTES,
-                    timeout=120,
-                )
-                info_path.write_text(
-                    json.dumps({"source_size": made["source_size"]}), encoding="utf-8"
-                )
-                _replace_file(temporary, path)
-            except subprocess.TimeoutExpired as error:
-                raise RuntimeError("Making the thumbnail took too long") from error
-            except (subprocess.CalledProcessError, OSError) as error:
-                raise RuntimeError("The thumbnail could not be made") from error
-            finally:
-                temporary.unlink(missing_ok=True)
-        data = path.read_bytes()
-        if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
-            path.unlink(missing_ok=True)
-            raise RuntimeError("The cached thumbnail was unreadable; try again")
-        width, height, factor = thumbnail_size(
-            *json.loads(info_path.read_text(encoding="utf-8"))["source_size"]
-        )
+            _prune_thumbnail_cache(directory)
+            if not (path.is_file() and info_path.is_file()):
+                self._check_source(project)
+                directory.mkdir(parents=True, exist_ok=True)
+                temporary = directory / f".thumbnail-{uuid.uuid4().hex}.jpg"
+                try:
+                    made = make_thumbnail(
+                        source,
+                        moment,
+                        temporary,
+                        text=text,
+                        font=font,
+                        size=(1280, 720),
+                        face=face,
+                        max_bytes=POSTER_MAX_BYTES,
+                        timeout=120,
+                    )
+                    info_path.write_text(
+                        json.dumps({"source_size": made["source_size"]}),
+                        encoding="utf-8",
+                    )
+                    _replace_file(temporary, path)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeError("Making the thumbnail took too long") from error
+                except (subprocess.CalledProcessError, OSError) as error:
+                    raise RuntimeError("The thumbnail could not be made") from error
+                finally:
+                    _cache_local(temporary, directory)
+                    temporary.unlink(missing_ok=True)
+            data = path.read_bytes()
+            if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
+                path.unlink(missing_ok=True)
+                raise RuntimeError("The cached thumbnail was unreadable; try again")
+            width, height, factor = thumbnail_size(
+                *json.loads(info_path.read_text(encoding="utf-8"))["source_size"]
+            )
+            # Touch both halves only after successfully loading them. Read bytes
+            # while locked so another request cannot prune this response's files.
+            os.utime(path, None)
+            os.utime(info_path, None)
+            _prune_thumbnail_cache(directory)
         return {
             "mime": "image/jpeg",
             "data_url": "data:image/jpeg;base64,"
