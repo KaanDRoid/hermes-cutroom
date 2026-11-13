@@ -11,6 +11,8 @@ width) and describe the area the platform's own interface may cover.
 import copy
 
 CHECKED = "2026-11-12"
+# Long-form YouTube rules (chapters, thumbnail, end screens) were rechecked for F6.
+LONGFORM_CHECKED = "2026-11-13"
 FINAL_RESOLUTIONS = ("1080", "2160")
 
 _INSTAGRAM_REELS_HELP = "https://help.instagram.com/1038071743007909/"
@@ -33,6 +35,7 @@ _YOUTUBE_VIDEOS_API = (
 )
 _YOUTUBE_THUMBNAIL = "https://support.google.com/youtube/answer/72431"
 _YOUTUBE_END_SCREEN = "https://support.google.com/youtube/answer/6388789"
+_YOUTUBE_CHAPTERS = "https://support.google.com/youtube/answer/9884579"
 # The former support.tiktok.com "camera tools" address redirects here.
 _TIKTOK_LENGTH = "https://www.tiktok.com/support/faq_detail?id=7581821547946580492"
 _TIKTOK_IN_FEED_ADS = (
@@ -48,7 +51,7 @@ _EBU_R95 = "https://tech.ebu.ch/docs/r/r095.pdf"
 
 
 def _spec(source, **values):
-    return {**values, "source": source, "checked": CHECKED}
+    return {"checked": CHECKED, **values, "source": source}
 
 
 def _vertical_frame(source, rule):
@@ -238,20 +241,39 @@ PROFILES = {
         ),
         "end_screen": _spec(
             _YOUTUBE_END_SCREEN,
+            checked=LONGFORM_CHECKED,
             min_s=5,
             max_s=20,
-            note="End screens can cover the last 5 to 20 seconds; keep that "
-            "time free of essential text.",
+            min_video_s=25,
+            note="End screens can cover the last 5 to 20 seconds of a video of at "
+            "least 25 seconds; elements can be dragged anywhere in the frame, so "
+            "Cutroom keeps that time free of burned text.",
+        ),
+        "chapters": _spec(
+            _YOUTUBE_CHAPTERS,
+            checked=LONGFORM_CHECKED,
+            first_s=0,
+            min_count=3,
+            min_length_s=10,
+            title_chars=100,
+            note="The first timestamp starts at 00:00, at least three timestamps "
+            "in ascending order, each chapter at least 10 seconds. YouTube "
+            "publishes no title length; 100 characters is Cutroom's limit, and "
+            "the whole list must fit the 5,000-byte description.",
         ),
         "loudness": _LOUDNESS,
         "text": _spec(_YOUTUBE_VIDEOS_API, title_chars=100, description_bytes=5000),
         "cover": _spec(
             _YOUTUBE_THUMBNAIL,
+            checked=LONGFORM_CHECKED,
             width=3840,
             height=2160,
             min_width=640,
             ratio="16:9",
-            note="Recommended custom video thumbnail; make it as large as possible.",
+            max_bytes=2_000_000,
+            note="Recommended custom video thumbnail; make it as large as possible. "
+            "Uploads may be up to 2 MB from a phone and 50 MB from a computer; "
+            "Cutroom keeps thumbnails under 2 MB so both work.",
         ),
     },
 }

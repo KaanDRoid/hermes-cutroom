@@ -339,7 +339,16 @@ def project_handler(args, **kwargs):
             return [_compact(project) for project in result]
         if action == "get" and isinstance(result, dict):
             media = _project_media(studio, result)
+            longform = None
+            if (result.get("settings") or {}).get("platform") == "youtube":
+                # Chapters and their problems; lookup problems never hide the project.
+                try:
+                    longform = _json_safe(studio.longform_summary(result))
+                except Exception:
+                    longform = None
             result = _summarize(result)
+            if longform is not None:
+                result = dict(result, longform=longform)
             return dict(result, media=media) if media else result
         if action in ("get", "create", "update", "derive"):
             return _summarize(result)
@@ -466,6 +475,49 @@ def definitions():
                     "caption_style": {
                         "type": "string",
                         "enum": ["classic", "highlight", "pop", "one_word"],
+                    },
+                    "chapters": {
+                        "type": ["array", "null"],
+                        "maxItems": 100,
+                        "description": "YouTube chapters in program seconds: first at "
+                        "0, at least three, each at least 10 s. get() shows "
+                        "longform.suggested_chapters and chapter_problems; suggest, "
+                        "let the person edit the titles, then save; null removes",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["start", "title"],
+                            "properties": {
+                                "start": {"type": "number", "minimum": 0},
+                                "title": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 100,
+                                },
+                            },
+                        },
+                    },
+                    "thumbnail": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "16:9 YouTube thumbnail: frame at program "
+                        "time (omit for a face-forward frame) and optional title text",
+                        "properties": {
+                            "time": {"type": ["number", "null"], "minimum": 0},
+                            "text": {"type": ["string", "null"], "maxLength": 100},
+                        },
+                    },
+                    "subtitles_file": {
+                        "type": ["boolean", "null"],
+                        "description": "Write captions.srt next to a YouTube video "
+                        "(default true)",
+                    },
+                    "end_screen_s": {
+                        "type": ["number", "null"],
+                        "minimum": 5,
+                        "maximum": 20,
+                        "description": "Keep the last seconds free for a YouTube end "
+                        "screen; QA warns about burned text there; null turns it off",
                     },
                     "caption_highlight_color": {
                         "type": ["string", "null"],

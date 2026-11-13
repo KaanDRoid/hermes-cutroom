@@ -1461,3 +1461,121 @@ test('uses only public SDK/React imports and no renderer or polling bypasses', a
   assert.match(source, /prefers-reduced-motion/);
   assert.match(source, /focus-visible/);
 });
+
+// Long-form YouTube: chapters, thumbnail, subtitles file and end-screen space.
+const youtubeProject = (settings = {}) => ({ source_info: { duration: 200 }, base_segments: [{ start: 0, end: 200 }], segments: [{ start: 0, end: 200 }], excluded_word_ids: [],
+  settings: { platform: 'youtube', aspect: 'landscape', ...settings } });
+const longformRest = extra => async (path, options) => {
+  if (path === '/projects/p1/chapters/suggest') return { chapters: [{ start: 0, title: 'Coal plants', reason: 'start' }, { start: 62, title: 'Ocean ice', reason: 'pause' }, { start: 124, title: 'Solar power', reason: 'pause' }], problems: [], duration: 200 };
+  if (path.startsWith('/projects/p1/thumbnail-preview')) return { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 5, text: 'Simple', width: 1280, height: 720 };
+  if (extra) { const value = extra(path, options); if (value !== undefined) return value; }
+  return patchApplies(path, options);
+};
+
+test('export: YouTube chapters editor suggests, edits, validates in plain words and saves program times', async () => {
+  jobRows = [];
+  const ui = await studio(longformRest(), youtubeProject());
+  let tree = await ui.step('Export');
+  assert.ok(nodes(tree).find(n => n.type === 'h3' && text(n) === 'Chapters'), 'Chapters heading');
+  await button(tree, 'Suggest chapters').props.onClick();
+  await ui.flush();
+  assert.ok(ui.calls.some(c => c.path === '/projects/p1/chapters/suggest' && c.options?.method === 'POST'));
+  let chapters = ui.patches().at(-1).options.body.changes.settings.chapters;
+  assert.deepEqual(chapters.map(c => [c.start, c.title]), [[0, 'Coal plants'], [62, 'Ocean ice'], [124, 'Solar power']]);
+  tree = ui.draw();
+  assert.equal(field(tree, 'chapters.1.time').props.value, '1:02', 'Times read as minutes and seconds');
+  assert.equal(field(tree, 'chapters.1.title').props.value, 'Ocean ice');
+  type(field(tree, 'chapters.1.title'), 'Melting ice');
+  type(field(ui.draw(), 'chapters.2.time'), '2:10');
+  await ui.flush();
+  chapters = ui.patches().at(-1).options.body.changes.settings.chapters;
+  assert.deepEqual(chapters.map(c => [c.start, c.title]), [[0, 'Coal plants'], [62, 'Melting ice'], [130, 'Solar power']]);
+  const count = ui.patches().length;
+  type(field(ui.draw(), 'chapters.2.time'), 'soon');
+  await ui.flush();
+  assert.equal(ui.patches().length, count, 'An unreadable time is not saved');
+  assert.match(text(ui.draw()), /Write the time as minutes:seconds/);
+  await labelled(ui.draw(), 'Remove chapter 3').props.onClick();
+  await ui.flush();
+  tree = ui.draw();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.chapters.length, 2);
+  const status = role(tree, 'status', 'Chapter check');
+  assert.ok(status, 'Problems are announced');
+  assert.match(text(status), /at least three chapters/);
+  await button(tree, 'Add chapter').props.onClick();
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.chapters.length, 3);
+  type(field(ui.draw(), 'chapters.1.time'), '0:05');
+  await ui.flush();
+  assert.match(text(role(ui.draw(), 'status', 'Chapter check')), /“Coal plants” \(0:00\) is 5 s long/);
+  type(field(ui.draw(), 'chapters.0.time'), '0:03');
+  await ui.flush();
+  assert.match(text(role(ui.draw(), 'status', 'Chapter check')), /first chapter must start at 0:00/);
+});
+
+test('export: thumbnail card previews the chosen frame and text; subtitles file and end screen toggles', async () => {
+  jobRows = [];
+  const ui = await studio(longformRest(), youtubeProject());
+  let tree = await ui.step('Export');
+  assert.ok(nodes(tree).find(n => n.type === 'h3' && text(n) === 'Thumbnail'));
+  type(field(tree, 'thumbnail.text'), 'Simple');
+  type(field(ui.draw(), 'thumbnail.time'), '0:05');
+  await ui.flush();
+  assert.deepEqual({ ...ui.patches().at(-1).options.body.changes.settings.thumbnail }, { text: 'Simple', time: 5 });
+  await button(ui.draw(), 'Preview thumbnail').props.onClick();
+  tree = ui.draw();
+  const call = ui.calls.find(c => c.path.startsWith('/projects/p1/thumbnail-preview'));
+  assert.ok(call, 'The preview route is called');
+  assert.ok(nodes(tree).some(n => n.type === 'img' && n.props.src === 'data:image/jpeg;base64,AAAA' && /Thumbnail preview/.test(n.props.alt)));
+  assert.match(text(tree), /1280 × 720/);
+  type(field(ui.draw(), 'thumbnail.time'), '');
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.thumbnail.time, undefined, 'Blank time picks the frame automatically');
+  const subtitles = labelled(ui.draw(), 'Make a subtitles file (SRT)');
+  assert.equal(subtitles.props.checked, true, 'On by default for YouTube');
+  subtitles.props.onCheckedChange(false);
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.subtitles_file, false);
+  labelled(ui.draw(), 'Leave room for an end screen').props.onCheckedChange(true);
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.end_screen_s, 20);
+  const count = ui.patches().length;
+  type(field(ui.draw(), 'end_screen_s'), '30');
+  await ui.flush();
+  assert.equal(ui.patches().length, count, 'Out-of-range seconds are not sent');
+  assert.match(text(ui.draw()), /between 5 and 20 seconds/);
+  type(field(ui.draw(), 'end_screen_s'), '12');
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.end_screen_s, 12);
+  labelled(ui.draw(), 'Leave room for an end screen').props.onCheckedChange(false);
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.end_screen_s, null);
+  for (const name of ['chapters', 'subtitles_file', 'thumbnail', 'end_screen']) assert.ok(source.includes(`  ${name}: ['`), `${name} reads as a sentence`);
+});
+
+test('long-form controls appear only for YouTube projects', async () => {
+  jobRows = [];
+  const ui = await studio(longformRest(), { ...youtubeProject(), settings: { platform: 'tiktok', aspect: 'portrait' } });
+  const tree = await ui.step('Export');
+  assert.equal(nodes(tree).find(n => n.type === 'h3' && text(n) === 'Chapters'), undefined);
+  assert.equal(button(tree, 'Suggest chapters'), undefined);
+});
+
+test('the stage marks the end-screen space during the last seconds', async () => withBlobs(async () => {
+  const preview = currentPreview();
+  jobRows = preview.jobs;
+  const project = { ...youtubeProject({ end_screen_s: 10 }), ...preview.project, artifact_lineage: { preview: { job_id: 'pj', platform: 'youtube' } } };
+  const ui = await studio(async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject, project);
+  ui.draw(); await tick();
+  let tree = ui.draw();
+  const video = nodes(tree).find(n => n.type === 'video');
+  video.props.onLoadedMetadata({ currentTarget: { duration: 200 } });
+  video.props.onTimeUpdate({ currentTarget: { currentTime: 100, paused: true } });
+  tree = ui.draw();
+  assert.equal(nodes(tree).find(n => n.props?.['data-cutroom-endscreen']), undefined, 'Not before the last 10 s');
+  nodes(tree).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 195, paused: true } });
+  tree = ui.draw();
+  const zone = nodes(tree).find(n => n.props?.['data-cutroom-endscreen']);
+  assert.ok(zone, 'The end-screen space is shown');
+  assert.match(text(zone), /End screen/);
+}));

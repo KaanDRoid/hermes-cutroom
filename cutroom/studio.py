@@ -277,6 +277,10 @@ class Studio:
                     "framing",
                     "framing_keyframes",
                     "pacing",
+                    "chapters",
+                    "thumbnail",
+                    "subtitles_file",
+                    "end_screen_s",
                 }
                 if not isinstance(settings, dict) or set(settings) - keys:
                     raise ValueError("Unsupported settings")
@@ -369,6 +373,14 @@ class Studio:
                         merged.pop("pacing", None)
                     else:
                         merged["pacing"] = value
+                from .longform import normalize_settings as normalize_longform
+
+                for key, value in normalize_longform(settings).items():
+                    # Long-form YouTube settings; null restores the default.
+                    if value is None:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = value
                 if "framing_keyframes" in merged:
                     # Shape only here; program length is checked after the edit.
                     merged["framing_keyframes"] = validate_keyframes(
@@ -403,6 +415,7 @@ class Studio:
                     }
                 )
                 updated["base_segments"] = copy.deepcopy(changes["segments"])
+            notes = []
             if any(
                 key in changes
                 for key in (
@@ -414,8 +427,10 @@ class Studio:
             ) or "pacing" in (changes.get("settings") or {}):
                 # Shortened pauses are derived from the words, so they follow
                 # every edit and every change of the pause limit.
+                before = copy.deepcopy(updated["segments"])
                 self._rebuild_segments(updated)
-            notes = []
+                if "chapters" not in (changes.get("settings") or {}):
+                    notes += self._follow_chapters(updated, before)
             if updated["settings"].get("framing_keyframes"):
                 from .reframe import validate_keyframes
 
@@ -532,6 +547,196 @@ class Studio:
             if key in parent:
                 child[key] = copy.deepcopy(parent[key])
         return child
+
+    @staticmethod
+    def _follow_chapters(project, before):
+        """Keep chapters on their footage after the cut changed; plain notes."""
+        chapters = project["settings"].get("chapters")
+        if not chapters or before == project["segments"]:
+            return []
+        from .longform import follow_edit
+
+        moved, notes = follow_edit(chapters, before, project["segments"])
+        project["settings"]["chapters"] = moved
+        return notes
+
+    def _program_words(self, project):
+        """Kept words in program time for chapters and the subtitles file.
+
+        Like the caption words, plus words the recogniser timed with zero
+        length (for example "I" or "you"), placed where they start, so the
+        subtitles file keeps every kept word.
+        """
+        from .longform import source_to_program
+
+        words = self._caption_words(project)
+        excluded = set(project.get("excluded_word_ids", []))
+        segments = project["segments"]
+        for word in (project.get("transcript") or {}).get("words") or []:
+            if word["id"] in excluded or word["end"] > word["start"]:
+                continue
+            if any(s["start"] <= word["start"] < s["end"] for s in segments):
+                at = source_to_program(segments, word["start"])
+                words.append({"start": at, "end": at, "text": word["text"]})
+        return sorted(words, key=lambda w: (w["start"], w["end"]))
+
+    def suggest_chapters(self, project_id):
+        """Chapter suggestions from the transcript; nothing is saved."""
+        from .longform import chapter_problems, program_duration, suggest_chapters
+
+        project = self.get(project_id)
+        duration = program_duration(project["segments"])
+        words = self._program_words(project)
+        if not words:
+            raise ValueError("Chapters are suggested from the words; transcribe first")
+        chapters = suggest_chapters(words, duration)
+        if not chapters:
+            raise ValueError(
+                "This edit is too short for chapters; YouTube needs three of at "
+                "least 10 s each"
+            )
+        return {
+            "chapters": chapters,
+            "duration": duration,
+            "problems": chapter_problems(chapters, duration),
+            "note": "Suggestions from the transcript; check and edit the titles.",
+        }
+
+    def longform_summary(self, project):
+        """Chapters, problems and long-form settings of a YouTube project."""
+        if self.platform(project) != "youtube":
+            return None
+        from .longform import (
+            chapter_problems,
+            description_block,
+            program_duration,
+            suggest_chapters,
+        )
+
+        settings = project["settings"]
+        duration = program_duration(project["segments"])
+        chapters = settings.get("chapters") or []
+        summary = {
+            "program_duration": round(duration, 3),
+            "chapters": chapters,
+            "chapter_problems": chapter_problems(chapters, duration),
+            "description": description_block(chapters, duration) if chapters else "",
+            "subtitles_file": settings.get("subtitles_file", True),
+            "end_screen_s": settings.get("end_screen_s"),
+            "thumbnail": settings.get("thumbnail") or {},
+        }
+        if not chapters:
+            words = self._program_words(project)
+            suggested = suggest_chapters(words, duration) if words else []
+            if suggested:
+                summary["suggested_chapters"] = [
+                    {"start": c["start"], "title": c["title"]} for c in suggested
+                ]
+        return summary
+
+    def thumbnail_preview(self, project_id, time=None, text=None):
+        """A 1280x720 JPEG data URL of the thumbnail, cached per frame and text.
+
+        ``time`` is program time (None uses the saved or automatic frame) and
+        ``text`` the title (None uses the saved text). ``width`` and ``height``
+        give the size the export will make.
+        """
+        from .longform import (
+            THUMBNAIL_TEXT_CHARS,
+            _plain_text,
+            default_thumbnail_time,
+            face_box_at,
+            make_thumbnail,
+            program_duration,
+            program_to_source,
+            thumbnail_size,
+        )
+
+        project = self.get(project_id)
+        settings = project["settings"]
+        chosen = settings.get("thumbnail") or {}
+        if text is None:
+            text = chosen.get("text", "")
+        text = _plain_text(
+            text, "Thumbnail text", THUMBNAIL_TEXT_CHARS, allow_empty=True
+        )
+        duration = program_duration(project["segments"])
+        automatic = False
+        if time is None:
+            time = chosen.get("time")
+        if time is None:
+            automatic = True
+            time = default_thumbnail_time(project.get("analysis"), project["segments"])
+        if (
+            isinstance(time, bool)
+            or not isinstance(time, (int, float))
+            or not math.isfinite(time)
+            or not 0 <= time <= duration
+        ):
+            raise ValueError(
+                f"Thumbnail time must be inside the edit (0 to {duration:.1f} s)"
+            )
+        source = _local_path(project["source"], must_exist=False)
+        if not source.is_file():
+            raise MissingAssetError(
+                f"Source file is missing: {project['source']}; restore it or "
+                "import a new project"
+            )
+        moment = round(program_to_source(project["segments"], time), 3)
+        font = (settings.get("brand") or {}).get("font") or "Arial"
+        face = face_box_at(project.get("analysis"), moment)
+        key = hashlib.sha256(
+            json.dumps(
+                [project["source_sha256"], moment, text, font, face], ensure_ascii=True
+            ).encode()
+        ).hexdigest()[:24]
+        directory = self._directory(project_id) / "posters"
+        path = directory / f"thumbnail-{key}.jpg"
+        info_path = path.with_suffix(".json")
+        if not (path.is_file() and info_path.is_file()):
+            self._check_source(project)
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f".{uuid.uuid4().hex}.jpg"
+            try:
+                made = make_thumbnail(
+                    source,
+                    moment,
+                    temporary,
+                    text=text,
+                    font=font,
+                    size=(1280, 720),
+                    face=face,
+                    max_bytes=POSTER_MAX_BYTES,
+                    timeout=120,
+                )
+                info_path.write_text(
+                    json.dumps({"source_size": made["source_size"]}), encoding="utf-8"
+                )
+                _replace_file(temporary, path)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("Making the thumbnail took too long") from error
+            except (subprocess.CalledProcessError, OSError) as error:
+                raise RuntimeError("The thumbnail could not be made") from error
+            finally:
+                temporary.unlink(missing_ok=True)
+        data = path.read_bytes()
+        if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
+            path.unlink(missing_ok=True)
+            raise RuntimeError("The cached thumbnail was unreadable; try again")
+        width, height, factor = thumbnail_size(
+            *json.loads(info_path.read_text(encoding="utf-8"))["source_size"]
+        )
+        return {
+            "mime": "image/jpeg",
+            "data_url": "data:image/jpeg;base64,"
+            + base64.b64encode(data).decode("ascii"),
+            "time": time,
+            "automatic": automatic,
+            "text": text,
+            "width": width,
+            "height": height,
+            "upscaled": factor > 1.0001,
+        }
 
     def _platform_problem(self, project):
         """Why the current edit cannot be exported for its platform, if at all."""
@@ -654,6 +859,8 @@ class Studio:
             "storyboard",
             "caption",
             "package",
+            "chapters",
+            "thumbnail",
         ):
             project["artifacts"].pop(kind, None)
         return {
@@ -958,6 +1165,16 @@ class Studio:
             problem = self._platform_problem(project)
             if problem:
                 raise ValueError(problem)
+            if self.platform(project) == "youtube" and settings.get("chapters"):
+                from .longform import chapter_problems, program_duration
+
+                problems = chapter_problems(
+                    settings["chapters"], program_duration(project["segments"])
+                )
+                if problems:
+                    raise ValueError(
+                        "Fix the chapters before final export: " + " ".join(problems)
+                    )
             problem = self._story_ready(project)
             if problem:
                 raise PermissionError(problem)
@@ -1226,6 +1443,19 @@ class Studio:
                 artifacts["captions_ass"] = str(outputs / "captions.ass")
                 # QA of this render checks this exact script, by hash.
                 result["caption_script_sha256"] = file_digest(outputs / "captions.ass")
+            if self.platform(project) == "youtube":
+                # Chapters, sentence-sized SRT/VTT and a 16:9 thumbnail, next to
+                # the video; chapters are embedded into it.
+                delivered = run(
+                    "longform", self._longform_arguments(project, result, source)
+                )
+                artifacts.update(delivered.pop("artifacts"))
+                return {
+                    **result,
+                    "longform": delivered,
+                    "render_source": source,
+                    "artifacts": artifacts,
+                }
             if cues:
                 for format in ("srt", "vtt"):
                     written = write_subtitles(
@@ -1270,6 +1500,11 @@ class Studio:
                 if animated and burn
                 else (None, None)
             )
+            longform = (
+                self._longform_quality(project, job["upstream"], render, cues, burn)
+                if self.platform(project) == "youtube"
+                else None
+            )
             report = run(
                 "qa",
                 {
@@ -1278,6 +1513,7 @@ class Studio:
                     "captions": cues if burn else None,
                     **caption_extra,
                     **({"caption_script": str(script)} if script else {}),
+                    **({"longform": longform} if longform else {}),
                 },
                 timeout=3600,
             )
@@ -1290,6 +1526,67 @@ class Studio:
                 json.dump(report, stream, indent=2, allow_nan=False)
             return {**report, "artifacts": {"quality": str(path)}}
         raise ValueError("Operation is not installed: " + action)
+
+    def _longform_arguments(self, project, result, source):
+        from .longform import default_thumbnail_time, face_box_at, program_to_source
+
+        settings = project["settings"]
+        chosen = settings.get("thumbnail") or {}
+        segments = project["segments"]
+        duration = result.get("duration") or sum(
+            s["end"] - s["start"] for s in segments
+        )
+        time = chosen.get("time")
+        if time is None:
+            time = default_thumbnail_time(project.get("analysis"), segments)
+        time = max(0.0, min(time, duration - 0.05))
+        moment = program_to_source(segments, time)
+        return {
+            "video": result["output"],
+            "output_dir": str(Path(result["output"]).parent),
+            "duration": duration,
+            "chapters": settings.get("chapters") or [],
+            "words": self._program_words(project),
+            "subtitles": settings.get("subtitles_file", True),
+            "thumbnail": {
+                "source": source,
+                "time": moment,
+                "program_time": round(time, 3),
+                "face": face_box_at(project.get("analysis"), moment),
+                "text": chosen.get("text", ""),
+                "font": (settings.get("brand") or {}).get("font") or "Arial",
+            },
+        }
+
+    def _longform_quality(self, project, kind, render, cues, burn):
+        """What QA needs to check the long-form files of the ``kind`` render."""
+        settings = project["settings"]
+        lineage = project.get("artifact_lineage", {}).get(kind) or {}
+        record = self.job(lineage["job_id"]) if lineage.get("job_id") else {}
+        result = record.get("result") or {}
+        files = {}
+        for key, kind_name in (
+            ("chapters_file", "chapters"),
+            ("subtitles_file", "captions_srt"),
+            ("thumbnail", "thumbnail"),
+        ):
+            value = (result.get("artifacts") or {}).get(kind_name)
+            if value:
+                files[key] = str(self._owned(record, value))
+        words = self._program_words(project)
+        return {
+            **files,
+            "chapters": settings.get("chapters") or [],
+            "words": words,
+            "subtitles_expected": settings.get("subtitles_file", True) and bool(words),
+            "thumbnail_upscale_factor": (
+                (result.get("longform") or {}).get("thumbnail") or {}
+            ).get("upscale_factor"),
+            "end_screen_s": settings.get("end_screen_s"),
+            "burned_captions": cues if burn else [],
+            "title": render.get("title") or "",
+            "graphics": bool(settings.get("graphic")),
+        }
 
     def _render_caption_script(self, project, kind):
         """The caption script burned into the current ``kind`` render, if intact.
@@ -1507,7 +1804,11 @@ class Studio:
                         raise ValueError(
                             "Transcript audio status does not match the source"
                         )
+                before = copy.deepcopy(updated["segments"])
                 self._rebuild_segments(updated)
+                chapter_notes = self._follow_chapters(updated, before)
+                if chapter_notes:
+                    job["chapter_notes"] = chapter_notes
                 validate_plan(
                     {
                         "version": 1,
@@ -1555,6 +1856,8 @@ class Studio:
             "caption",
             "package",
             "calendar",
+            "chapters",
+            "thumbnail",
         }
         if kind not in allowed or kind not in project["artifacts"]:
             raise FileNotFoundError("Artifact is not available")

@@ -113,7 +113,7 @@ class ProfileDataTests(unittest.TestCase):
                     self.assertTrue(
                         str(block.get("source", "")).startswith("https://"), block
                     )
-                    self.assertEqual(block.get("checked"), CHECKED)
+                    self.assertIn(block.get("checked"), (CHECKED, "2026-11-13"))
 
     def test_tool_and_api_platform_lists_match_the_profiles(self):
         from cutroom import studio_tools

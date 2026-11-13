@@ -117,6 +117,7 @@ class UpdateProject(RequestModel):
             _module("captions").validate_settings(value["settings"], allow_reset=True)
             if "pacing" in value["settings"]:
                 _module("pacing").validate_settings(value["settings"]["pacing"])
+            _module("longform").normalize_settings(value["settings"])
         for key in ("segments", "gaze_exclusions", "excluded_word_ids"):
             if key in value and (
                 not isinstance(value[key], list) or len(value[key]) > 100_000
@@ -287,6 +288,8 @@ ArtifactKind = Literal[
     "qa",
     "captions",
     "subtitles",
+    "chapters",
+    "thumbnail",
 ]
 MediaKind = Literal["source", "preview", "final", "cover"]
 MEDIA_TYPES = {
@@ -301,6 +304,7 @@ MEDIA_TYPES = {
     ".srt": "text/plain",
     ".ass": "text/plain",
     ".vtt": "text/vtt",
+    ".txt": "text/plain",
 }
 
 
@@ -342,6 +346,23 @@ def project_poster(
 ):
     """A small JPEG source frame (data URL) for project cards and the player."""
     return invoke(studio.poster, project_id, at)
+
+
+@router.post("/projects/{project_id}/chapters/suggest")
+def suggest_chapters(project_id: ProjectId, studio=Depends(get_studio)):
+    """Chapter suggestions from the transcript, in program time; nothing is saved."""
+    return invoke(studio.suggest_chapters, project_id)
+
+
+@router.get("/projects/{project_id}/thumbnail-preview")
+def thumbnail_preview(
+    project_id: ProjectId,
+    time: Annotated[float | None, Query(ge=0, allow_inf_nan=False)] = None,
+    text: Annotated[str | None, Query(max_length=100)] = None,
+    studio=Depends(get_studio),
+):
+    """A 1280x720 JPEG (data URL) of the YouTube thumbnail for a frame and text."""
+    return invoke(studio.thumbnail_preview, project_id, time, text)
 
 
 @router.get("/projects/{project_id}/artifact-info/{kind}")
