@@ -38,6 +38,14 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      then use `face_track` for talking heads.
    - Music: only from audio files the person supplies, as absolute paths in
      `settings.music`. Never search for or fetch music.
+   - Pacing (`settings.pacing`) is off by default. For a short-form talking
+     head, suggest punch-ins and a 0.6 s pause limit, and ask before turning
+     them on: `{"punch_in": "alternate", "max_pause": 0.6}`. Punch-ins zoom
+     in on every other cut, centred on the face, and are lowered when they
+     would enlarge the source more than `max_upscale` (default 2x).
+     `max_pause` shortens silences between kept words, so the video gets
+     shorter. `transition` can be `cut`, `crossfade` or `dip`; `push_in: true`
+     adds a slow zoom on ranges of 4 s or more.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
    `media.path` from the completed job exactly as returned.

@@ -1,5 +1,13 @@
 # Implementation status
 
+## November 13 — F3 pacing (branch `feat/f3-pacing`)
+
+- Added `settings.pacing`: alternating punch-ins on edit cuts, centred on the face and kept under a total enlargement limit (default 2×, zooms are reduced and reported rather than exceeding it); an optional eased push-in on long ranges; a maximum pause between kept words that rebuilds the segments; and crossfade or dip transitions built from handles so program length, captions and sync do not change. QA adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and `pacing_max_pause`; Desktop gets a Pacing group in Style; the chat skill suggests pacing for talking heads and asks first. Details: [creator formats F3](creator-formats.md#f3--pacing).
+- Fixed on the way: QA's `captions` check failed a caption that ended with the program when frame alignment made the video up to half a frame shorter than the edit.
+- On real speech (Sandra clip, Reels preview with face tracking, punch-ins, 0.5 s pause limit and crossfades): longest pause 0.86 s → 0.50 s, zoom 1.12× for a total of 1.99×, the redetected face 1.125× taller in zoomed ranges and inside the safe area in every checked frame, audio and picture offsets 0 against a plain render, all pacing checks pass.
+- Local gates: **456 Python tests OK** (14 skipped without local models and media), **49/49 Desktop tests**, Ruff check and format clean. Logs: `artifacts/f3/red.log`, `artifacts/f3/green.log`.
+- Not yet done: push-in on real footage, and a native Desktop check of the new controls.
+
 ## November 13 — chat integration (branch `feat/chat-integration`)
 
 - Bundled the `cutroom:edit-video` skill (`skills/edit-video/SKILL.md`): import, transcribe with progress, propose and apply cuts, platform, captions, framing and music, preview and QA, `MEDIA:` lines, plain QA wording (`warning` means ready with notes), approval only by the person in Cutroom Studio, final, derived versions and platform limits. Older hosts without plugin skills still load the tools.
