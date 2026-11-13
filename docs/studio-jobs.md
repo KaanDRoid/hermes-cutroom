@@ -134,13 +134,16 @@ clip = studio.create_clip(project["id"], "youtube_shorts",
   falls back to word timings. Nothing is downloaded or sent out.
 - Discovery rejects workloads above explicit budgets before scoring: 30,000
   words / 1,000,000 transcript characters, 4,096 characters per sentence,
-  100,000 window visits per pass and 500,000 visits across the requested picks.
-  Invalid and too-short windows count too. Optional inputs are capped at 540,001
-  energy samples and 100,000 face samples. A cooperative 10 s search deadline
-  is checked during enumeration; optional sound decoding has its separate timeout.
-  Selection streams each pass and retains only the requested display records,
-  preserving the score/tie-break/diversity rules rather than keeping every
-  window's text and reasons. Dense timestamps may need a shorter transcript.
+  and 100,000 window visits. Invalid and too-short windows count too.
+  Optional inputs are capped at 540,001 energy samples and 100,000 face
+  samples. A cooperative 10 s search deadline is checked while windows are
+  visited and scored; optional sound decoding has its separate timeout.
+  Each window is scored once into a small tuple (score, times, sentence
+  indices); text and reasons are built only for the picked clips. The score,
+  tie-break and diversity rules are unchanged, and the picks are identical to
+  the unbounded search. A three-hour recording of short sentences (about
+  29,000 windows) finds 8 or 20 clips in under a second with a peak of about
+  8 MiB of Python allocations. Dense timestamps may need a shorter transcript.
   This is an algorithmic bound, not an OS-enforced worker memory/CPU limit.
 - Suggestions are saved as `clip_candidates` with a timed-word fingerprint.
   They do not change the revision or review digest. Replacing or correcting the

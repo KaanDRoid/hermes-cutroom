@@ -2,14 +2,15 @@
 
 ## November 13 — review fixes R01, R04, R05 and R06 (`feat/review-search-delivery`)
 
-- **R01:** clip discovery now preflights input and enumeration budgets, streams
-  exact greedy selection and materializes only picked records. Dense 1,000-word
-  timestamps are rejected before scoring instead of allocating all windows.
-  A deadline-bounded child probe measured 565,616 peak traced bytes / 0.156 s
-  for rejection; this is Python allocation evidence, not process RSS. The saved
-  2,577-word, 1063.221 s real-talk transcript returns eight candidates identical
-  in every result field to the previous implementation without optional
-  energy/faces (0.078 s new versus 0.032 s baseline in that local run).
+- **R01:** clip discovery checks input and window budgets before scoring,
+  scores each window once into a small tuple and builds text and reasons only
+  for the picked clips. Dense 1,000-word timestamps are rejected before scoring
+  (565,616 peak traced bytes, 0.156 s) instead of allocating all windows. On
+  the real 17-minute talk, a three-hour repeat of it and synthetic recordings
+  up to three hours, the picks for 1, 8 and 20 clips are identical to the
+  unbounded search. Three hours of short sentences take 0.66 s for 8 clips
+  (4.46 s when every pick rescored all windows), and 20 clips are no longer
+  refused.
 - **R04:** chat currentness uses the facade's artifact/digest/publication-byte
   validation; approval also matches the current review digest. Historical
   output never receives a `MEDIA:` handover hint. The retained real-render
