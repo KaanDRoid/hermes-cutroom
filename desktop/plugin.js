@@ -1163,9 +1163,13 @@ function EditStep({ kit }) {
   ] });
   if (!words.length) {
     const silent = view.transcript?.status === 'no_audio';
+    // Transcribed, but the voice detector heard no speech (music, ambience).
+    const noSpeech = !silent && view.transcript?.status === 'ok';
     return el('div', { style: stack, children: [intro, el('div', { style: { ...panel, alignItems: 'flex-start' }, children: [
-      el('p', { style: { margin: 0 }, children: silent ? 'This video has no sound, so there are no words to edit.' : transcribing ? `Transcribing… ${pct(transcribing.progress)}%` : 'This video has no transcript yet. Transcribe it to edit by text.' }),
-      silent ? null : jsx(Button, { disabled: Boolean(transcribing), onClick: () => kit.runAction('transcribe'), children: 'Transcribe' }),
+      el('p', { style: { margin: 0 }, children: silent ? 'This video has no sound, so there are no words to edit.' : transcribing ? `Transcribing… ${pct(transcribing.progress)}%`
+        : noSpeech ? 'No speech was found in this video, so there are no words to edit. Trim it under More tools → Cut by time. If someone does speak, transcribe again with their language code (More tools → Transcription).'
+          : 'This video has no transcript yet. Transcribe it to edit by text.' }),
+      silent ? null : jsx(Button, { disabled: Boolean(transcribing), onClick: () => kit.runAction('transcribe'), children: noSpeech ? 'Transcribe again' : 'Transcribe' }),
       el('p', { style: muted, children: 'Transcription runs on the computer that runs Cutroom. It uses the speech model from Settings → Plugins → Cutroom, or the best one in the Cutroom models folder.' }),
     ] })] });
   }

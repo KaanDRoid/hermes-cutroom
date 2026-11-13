@@ -339,6 +339,26 @@ a message naming the workspace models folder. A preview with `face_track`
 framing still needs a current face analysis; the Desktop Review step runs
 `vision`, then `preview`, then `qa` in one click when it is missing.
 
+### Music and other sound without speech
+
+Whisper invents words on music: on a real phone clip with only music it wrote
+"НАПРЯЖЁННАЯ МУЗЫКА", "Медведь", "Altyazı M.K." or "Thank you for watching!"
+depending on the language. Before transcribing, `speech.transcribe` runs the
+Silero voice detector bundled with faster-whisper (no download):
+
+- Under 0.5 s of detected speech in the whole recording: the transcript is
+  empty (`status: ok`, no words) and the model is not loaded. The Edit step
+  says no speech was found and points to Cut by time.
+- Otherwise the audio is transcribed without the detector, because filtering
+  the audio with it dropped real fillers ("you know") on a TEDx talk. Only
+  words more than 0.5 s from any detected speech are discarded. On Sandra,
+  the JFK reference and five minutes of the TEDx talk (about 1,700 words with
+  the tiny and small models) no real word was discarded.
+- Limit: an invented word inside a sound the detector takes for speech stays;
+  remove it like any other word. Segment coverage was measured as a further
+  filter and rejected: a real "Hi." over applause had 0 % coverage, while an
+  invented word had 93 %.
+
 ### Where a removed word is cut
 
 Recognisers stamp word edges up to a few hundred milliseconds off. Cutting at

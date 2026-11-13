@@ -677,6 +677,16 @@ test('host errors read as one plain sentence and stay on the step where they hap
   assert.doesNotMatch(text(await ui.step('Style')), /No speech model found/);
 });
 
+test('a video whose transcript found no speech says so and points to cutting by time', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { transcript: { status: 'ok', language: null, words: [], text: '', engine: 'faster-whisper' } });
+  const shown = text(ui.draw());
+  assert.match(shown, /No speech was found/);
+  assert.match(shown, /Cut by time/);
+  assert.doesNotMatch(shown, /has no transcript yet/);
+  assert.ok(button(ui.draw(), 'Transcribe again'), 'Transcribing again stays possible, for example with another language');
+});
+
 test('caption style cards show the same neutral sample in every project', async () => {
   jobRows = [];
   const ui = await studio(patchApplies, transcriptProject());

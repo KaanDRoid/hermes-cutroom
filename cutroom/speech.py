@@ -522,14 +522,11 @@ def transcribe(source, model_path, language=None):
     if language is not None and (not isinstance(language, str) or not language.strip()):
         raise ValueError("Language must be a language code or null")
     try:
-        from faster_whisper import WhisperModel
+        import faster_whisper
     except ImportError as error:
         raise RuntimeError(
             "Local transcription requires the optional faster-whisper package"
         ) from error
-    model = WhisperModel(
-        str(model_path), device="cpu", compute_type="int8", local_files_only=True
-    )
     import numpy as np
 
     decoded = subprocess.run(
@@ -562,12 +559,33 @@ def transcribe(source, model_path, language=None):
         shell=False,
     )
     audio = np.frombuffer(decoded.stdout, dtype="<f4").copy()
+    duration = _number(float(metadata["format"]["duration"]))
+    # Whisper invents words on music and noise. When the bundled voice
+    # detector hears no speech at all, return an empty transcript without
+    # loading the model. Speech is still transcribed without the detector
+    # (filtering the audio with it drops short words such as "you know");
+    # only words far from any detected speech are discarded afterwards.
+    spans = _speech_spans(audio)
+    if sum(end - start for start, end in spans) < NO_SPEECH_S:
+        empty = dict(
+            language=None, words=[], text="", engine="faster-whisper", status="ok"
+        )
+        return validate_transcript(empty, duration=duration)
+    model = faster_whisper.WhisperModel(
+        str(model_path), device="cpu", compute_type="int8", local_files_only=True
+    )
     segments, info = model.transcribe(audio, language=language, word_timestamps=True)
-    words, texts = [], []
+    words, texts, invented = [], [], False
     for segment in segments:
         texts.append(segment.text.strip())
         for item in segment.words or []:
             if not item.word.strip():
+                continue
+            if not any(
+                item.start < end + SPEECH_PAD_S and item.end > start - SPEECH_PAD_S
+                for start, end in spans
+            ):
+                invented = True
                 continue
             words.append(
                 dict(
@@ -581,9 +599,32 @@ def transcribe(source, model_path, language=None):
     result = dict(
         language=info.language,
         words=words,
-        text=" ".join(texts).strip(),
+        text=(
+            " ".join(word["text"] for word in words)
+            if invented
+            else " ".join(texts).strip()
+        ),
         engine="faster-whisper",
         status="ok",
     )
-    duration = _number(float(metadata["format"]["duration"]))
+    if invented and not words:
+        result["language"] = None
     return validate_transcript(result, duration=duration)
+
+
+# Less detected speech than this in the whole recording counts as none.
+NO_SPEECH_S = 0.5
+# A word must lie within this distance of detected speech to be kept. On the
+# Sandra interview, the JFK reference and five minutes of a TEDx talk (about
+# 1,700 words with the tiny and small models) no real word was further away.
+SPEECH_PAD_S = 0.5
+
+
+def _speech_spans(audio, rate=16000):
+    """(start, end) seconds of speech the bundled Silero voice detector finds."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    return [
+        (span["start"] / rate, span["end"] / rate)
+        for span in get_speech_timestamps(audio, VadOptions(), sampling_rate=rate)
+    ]
