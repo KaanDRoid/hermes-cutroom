@@ -15,6 +15,16 @@ import math
 import operator
 import re
 import subprocess
+import time
+
+# Search is synchronous: bound the input and the windows visited. Each window
+# is scored once into a small tuple; full records (text and reasons) are built
+# only for the picked clips. 100,000 visits keep a three-hour recording of
+# short sentences (about 29,000 scored windows) well inside the budget.
+SEARCH_MAX_WORDS = 30_000
+SEARCH_MAX_TEXT_CHARS = 1_000_000
+SEARCH_MAX_WINDOWS = 100_000
+SEARCH_TIMEOUT_S = 10.0
 
 DEFAULT_MIN_S = 20
 DEFAULT_MAX_S = 90
@@ -471,7 +481,7 @@ def _first_word(sentence_text):
     return "", ""
 
 
-def _evaluate(context, i, j):
+def _evaluate(context, i, j, *, details=True):
     """Score and reasons for the window of sentences i..j."""
     words = context.words
     first_sentence = context.sentences[i]
@@ -480,9 +490,12 @@ def _evaluate(context, i, j):
     start, end = context.starts[i], context.ends[j]
     duration = end - start
     reasons = []
+    score = BASE_SCORE
 
     def note(text, points):
-        if points:
+        nonlocal score
+        score += points
+        if points and details:
             reasons.append({"text": text, "points": int(points)})
 
     # Opening line.
@@ -570,7 +583,9 @@ def _evaluate(context, i, j):
     elif 25 <= duration <= SHORT_FORM_MAX_S:
         note("A good length for short videos", 3)
 
-    score = BASE_SCORE + sum(r["points"] for r in reasons)
+    score = max(0, min(100, int(round(score))))
+    if not details:
+        return score
     reasons.sort(key=lambda r: (-abs(r["points"]), r["text"]))
     return {
         "id": f"clip-{round(start * 1000)}-{round(end * 1000)}",
@@ -646,40 +661,80 @@ def find_candidates(
     """
     low, high, count = _bounds(min_s, max_s, count, platform)
     duration = _number(duration, "duration")
-    context = _Context(words or [], duration, energy, faces, platform)
-    windows = []
+    deadline = time.monotonic() + SEARCH_TIMEOUT_S
+    words = words or []
+    if (
+        len(words) > SEARCH_MAX_WORDS
+        or sum(len(w["text"]) for w in words) > SEARCH_MAX_TEXT_CHARS
+    ):
+        raise ValueError("Clip search input budget exceeded; use a shorter transcript")
+    if energy and len(energy.get("db") or []) > 540_001:
+        raise ValueError("Clip search energy budget exceeded")
+    if faces and len(faces) > 100_000:
+        raise ValueError("Clip search face budget exceeded")
+    context = _Context(words, duration, energy, faces, platform)
     total = len(context.sentences)
-    for i in range(total):
-        if not context.valid_starts[i]:
-            continue
-        for j in range(i, total):
-            length = context.ends[j] - context.starts[i]
-            if length > high + 1e-9:
-                break
-            if context.valid_ends[j] and length >= low - 1e-9:
-                windows.append(_evaluate(context, i, j))
-    windows.sort(key=lambda w: (-w["score"], w["start"], w["end"]))
+    if any(len(s["text"]) > 4096 for s in context.sentences):
+        raise ValueError("Clip search sentence text budget exceeded")
+
+    def windows():
+        # Count visits, including invalid and too-short windows, not just scores.
+        visits = 0
+        for i in range(total):
+            if not context.valid_starts[i]:
+                continue
+            for j in range(i, total):
+                visits += 1
+                if visits > SEARCH_MAX_WINDOWS:
+                    raise ValueError(
+                        "Clip search work budget exceeded; use a shorter transcript"
+                    )
+                if visits % 256 == 1 and time.monotonic() > deadline:
+                    raise ValueError(
+                        "Clip search time budget exceeded; use a shorter transcript"
+                    )
+                length = context.ends[j] - context.starts[i]
+                if length > high + 1e-9:
+                    break
+                if context.valid_ends[j] and length >= low - 1e-9:
+                    yield i, j
+
+    # Preflight the complete workload before scoring even the first candidate.
+    for _ in windows():
+        pass
+    scored = []
+    for k, (i, j) in enumerate(windows()):
+        if k % 256 == 255 and time.monotonic() > deadline:
+            raise ValueError(
+                "Clip search time budget exceeded; use a shorter transcript"
+            )
+        scored.append(
+            (
+                _evaluate(context, i, j, details=False),
+                round(context.starts[i], 3),
+                round(context.ends[j], 3),
+                i,
+                j,
+            )
+        )
     picked = []
     while len(picked) < count:
-        best, best_value = None, None
-        for window in windows:
-            if any(
-                window["start"] < p["end"] and p["start"] < window["end"]
-                for p in picked
-            ):
+        best, best_key = None, None
+        for score, start, end, i, j in scored:
+            if any(start < p["end"] and p["start"] < end for p in picked):
                 continue
-            middle = (window["start"] + window["end"]) / 2
+            middle = (start + end) / 2
             near = sum(
                 1
                 for p in picked
                 if abs((p["start"] + p["end"]) / 2 - middle) < SPREAD_S
             )
-            value = window["score"] - SPREAD_PENALTY * near
-            if best_value is None or value > best_value:
-                best, best_value = window, value
+            key = (score - SPREAD_PENALTY * near, score, -start, -end)
+            if best_key is None or key > best_key:
+                best, best_key = (i, j), key
         if best is None:
             break
-        picked.append(best)
+        picked.append(_evaluate(context, *best))
     picked.sort(key=lambda w: (-w["score"], w["start"]))
     for rank, item in enumerate(picked, 1):
         item["rank"] = rank

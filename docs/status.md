@@ -9,6 +9,44 @@
 - Sound that starts after the cut (late sound track, dropped codec priming) played early in the first range (43–57 ms). It is now placed by the requested start, with silence before its first sample.
 - Details and limits: [creator formats](creator-formats.md#frame-identity-lost-frames-and-late-sound-pre-release-review).
 
+## November 13 — review fixes R01, R04, R05 and R06 (`feat/review-search-delivery`)
+
+- **R01:** clip discovery checks input and window budgets before scoring,
+  scores each window once into a small tuple and builds text and reasons only
+  for the picked clips. Dense 1,000-word timestamps are rejected before scoring
+  (565,616 peak traced bytes, 0.156 s) instead of allocating all windows. On
+  the real 17-minute talk, a three-hour repeat of it and synthetic recordings
+  up to three hours, the picks for 1, 8 and 20 clips are identical to the
+  unbounded search. Three hours of short sentences take 0.66 s for 8 clips
+  (4.46 s when every pick rescored all windows), and 20 clips are no longer
+  refused.
+- **R04:** chat currentness uses the facade's artifact/digest/publication-byte
+  validation; approval also matches the current review digest. Historical
+  output never receives a `MEDIA:` handover hint. The retained real-render
+  music-swap repro now reports `current: false`, `approved: false`, no hint;
+  tampered/missing outputs are covered separately. Synthetic automated approval
+  in that repro is guard testing, not human-approval acceptance.
+- **R05:** subtitle text too large to fit losslessly is explicitly rejected,
+  never truncated. QA independently compares delivered text with the original
+  transcript. Co-timed zero-length words survive SRT and VTT; unrepresentable
+  cue durations are errors rather than silent skips.
+- **R06:** thumbnail cache pairs are limited to 32 entries / 32 MiB per project,
+  pruned by recency under a per-project interprocess lock covering generation
+  and reads. Tests cover byte/count limits, same/different-key concurrency,
+  recency, abandoned namespaced temporaries and refusal to unlink outside the
+  cache. Unrelated poster files are preserved.
+- Failing-first logs for each finding and the final verification are retained
+  under `artifacts/review-fixes/`: **545 Python tests OK (14 skipped)** on
+  FFmpeg/ffprobe **9.0.2**, **67/67 Desktop checks**, Ruff check/format and
+  `node --check desktop/plugin.js` pass. The original four RED logs precede
+  source fixes; later missing-file and abandoned-temporary RED logs cover the
+  additional guards. Expanded cache checks were added after the first GREEN.
+- Limits: cooperative synchronous search budgets, not an OS-isolated worker;
+  separate optional audio-analysis timeout; no global cache budget; legacy
+  anonymous poster/thumbnail temporary files are not reaped. The R02/R03
+  timeline and FFmpeg 7.1 findings are fixed separately (entry above). No
+  native Desktop, external-service or publishing acceptance is claimed.
+
 ## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
 
 - Added deterministic local discovery of whole-sentence 20–90 s clips, scored

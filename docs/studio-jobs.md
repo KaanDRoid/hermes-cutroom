@@ -132,6 +132,19 @@ clip = studio.create_clip(project["id"], "youtube_shorts",
   from inferred pause boundaries. Local sound analysis is optional and has a
   120 s timeout and a three-hour source cap; a missing or unmeasurable track
   falls back to word timings. Nothing is downloaded or sent out.
+- Discovery rejects workloads above explicit budgets before scoring: 30,000
+  words / 1,000,000 transcript characters, 4,096 characters per sentence,
+  and 100,000 window visits. Invalid and too-short windows count too.
+  Optional inputs are capped at 540,001 energy samples and 100,000 face
+  samples. A cooperative 10 s search deadline is checked while windows are
+  visited and scored; optional sound decoding has its separate timeout.
+  Each window is scored once into a small tuple (score, times, sentence
+  indices); text and reasons are built only for the picked clips. The score,
+  tie-break and diversity rules are unchanged, and the picks are identical to
+  the unbounded search. A three-hour recording of short sentences (about
+  29,000 windows) finds 8 or 20 clips in under a second with a peak of about
+  8 MiB of Python allocations. Dense timestamps may need a shorter transcript.
+  This is an algorithmic bound, not an OS-enforced worker memory/CPU limit.
 - Suggestions are saved as `clip_candidates` with a timed-word fingerprint.
   They do not change the revision or review digest. Replacing or correcting the
   transcript removes them; stale candidate IDs are refused.
@@ -178,6 +191,20 @@ project = studio.update(project["id"], {"settings": {
 
 - Only YouTube projects use these settings. `chapters` (program seconds, sorted, titles up to 100 characters), `thumbnail` (`time`, `text`), `subtitles_file` (default true) and `end_screen_s` (5–20) are optional, part of the digest, and `null` removes each.
 - `Studio.suggest_chapters(project_id)` / `POST /projects/{id}/chapters/suggest` returns suggestions with keywords and reasons; nothing is saved. `Studio.thumbnail_preview(project_id, time=None, text=None)` / `GET /projects/{id}/thumbnail-preview?time=&text=` returns a 1280×720 JPEG data URL and the size the export will make.
+- Thumbnail previews retain at most 32 frame/title pairs and 32 MiB of JPEG
+  plus JSON cache bytes per project. Least-recently-used pairs are pruned under
+  a project-specific interprocess lock, which also deduplicates simultaneous
+  generation and protects reads. Only generated cache names are removed;
+  redirected cache paths are refused. Newly namespaced abandoned thumbnail
+  temporaries are cleaned under that lock; unrelated poster files are untouched.
+  There is no workspace-wide/global budget, and legacy anonymous temporary
+  files are left alone because they may belong to a poster request.
+- Subtitle sidecars reject a token that cannot fit losslessly in two 42-character
+  lines rather than dropping its tail. Co-timed zero-length words share a cue;
+  impossible co-timed text is rejected explicitly. The writer refuses an
+  unrepresentable duration instead of silently skipping text. QA compares the
+  delivered character stream directly against original transcript text in
+  addition to cue/timing checks (layout whitespace is normalized).
 - Edits that change the cut move chapters with their footage and return notes; a final is refused while chapters break YouTube's rules (first at 0:00, at least three, each at least 10 s).
 - `preview` and `final` results gain `longform` (`chapters_embedded`, `chapter_problems`, `subtitle_cues`, `thumbnail`). `qa` adds `chapters`, `subtitles_file`, `thumbnail` and, with `end_screen_s`, `end_screen`.
 - `cutroom_project get` adds `longform` with the chapters, `chapter_problems`, the description text and, while there are none, `suggested_chapters`.
@@ -208,7 +235,7 @@ Hooks and storyboards are deterministic excerpts of the transcript. Nothing is g
 
 ## Media summaries in tool results
 
-When `cutroom_job get` (or `submit`, if the job is already complete) returns a completed `preview`, `final` or `cover` job, the result also carries `media` and `display_hint`. `cutroom_project get` adds `media` with the current `preview` and/or `final` summary when those renders exist. Hermes Desktop reads these fields to draw the Cutroom card for the `MEDIA:` line; any other surface just plays the file.
+When `cutroom_job get` (or `submit`, if the job is already complete) returns a completed `preview`, `final` or `cover` job, the result can carry `media`. Only a current, facade-validated publication gets a `display_hint`; historical files remain summaries without a handover hint. `cutroom_project get` adds `media` for linked `preview` and/or `final` renders, with currentness revalidated. Hermes Desktop reads these fields to draw the Cutroom card for the `MEDIA:` line; any other surface just plays the file.
 
 ```json
 {
@@ -240,7 +267,7 @@ When `cutroom_job get` (or `submit`, if the job is already complete) returns a c
 
 - `path` is the absolute file path exactly as published; `media` is omitted when the file is missing or the path is not absolute. No file contents are included.
 - `qa` comes from the latest completed `qa` job for that same render (for a cover, the render it was taken from), or is `null` when none exists. `status` is computed from the check statuses: `fail` if any check failed, otherwise `warning` if any check warned, otherwise `pass`. Skipped checks count only in `total`. The report's own `passed` flag is `false` on warnings, so do not use it for the summary: a `warning` result is ready with notes.
-- `approved` is true only when the project's human approval matches its current revision. `current` says whether this job's render is still the project's published one.
+- `current` requires this job's lineage, matching path and successful `Studio.artifact` validation (current digest, workspace containment and publication bytes). `approved` additionally requires human approval matching both the current revision and freshly computed review digest. Replacing reviewed music or tampering with published bytes makes both false and removes `display_hint`, even when the old file remains. A missing file or failed lookup clears any previously enriched media/hint fields.
 - Lookup problems never hide the job: the result is returned without `media`. Non-finite numbers become `null`.
 
 ## Artifact lineage and staleness

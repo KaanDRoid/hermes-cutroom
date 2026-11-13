@@ -196,6 +196,8 @@ class MediaCase(unittest.TestCase):
         }
         self.studio.get.return_value = self.project
         self.studio.jobs.return_value = []
+        self.studio.artifact.return_value = self.preview
+        self.studio.review.return_value = {"digest": "d"}
 
     def render_job(self, **changes):
         job = {
