@@ -1290,6 +1290,36 @@ const captionProject = (settings = {}) => ({ ...transcriptProject(), excluded_wo
   settings: { platform: 'instagram_reels', aspect: 'portrait', captions: true, caption_style: 'highlight', caption_highlight_color: '#112233', ...settings } });
 const captionNode = tree => nodes(tree).find(n => n.props?.['data-cutroom-caption']);
 
+test('playing the original skips removed words, like the finished video', async () => withBlobs(async () => {
+  jobRows = [];
+  const media = async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject;
+  const ui = await studio(media, captionProject());
+  ui.draw(); await tick();
+  const tree = ui.draw();
+  const video = nodes(tree).find(n => n.type === 'video');
+  const fake = { currentTime: 0.35, paused: false, duration: 12 };
+  video.props.ref.current = fake;
+  video.props.onTimeUpdate({ currentTarget: fake });
+  const removed = captionProject().transcript.words.find(w => captionProject().excluded_word_ids.includes(w.id));
+  assert.ok(fake.currentTime >= removed.end, 'Playback jumps over the removed word');
+  fake.currentTime = 0.1; fake.paused = true;
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: fake });
+  assert.equal(fake.currentTime, 0.1, 'A paused or seeking player is left where the person put it');
+}));
+
+test('the caption preview uses the rendered default highlight colour', async () => withBlobs(async () => {
+  jobRows = [];
+  const project = captionProject();
+  const settings = { ...project.settings };
+  delete settings.caption_highlight_color;
+  const media = async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject;
+  const ui = await studio(media, { ...project, settings });
+  ui.draw(); await tick();
+  nodes(ui.draw()).find(n => n.type === 'video').props.onTimeUpdate({ currentTarget: { currentTime: 0.65 } });
+  const active = nodes(captionNode(ui.draw())).find(n => n.props?.['data-active']);
+  assert.equal(active.props.style.color, '#FFCC00');
+}));
+
 test('draws an approximate live caption over the original, from words that are not removed', async () => withBlobs(async () => {
   jobRows = [];
   const media = async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? chunk(path) : selectedProject;
@@ -1361,7 +1391,12 @@ test('uses only public SDK/React imports and no renderer or polling bypasses', a
   assert.ok(imports.length > 0);
   for (const [, , specifier] of imports) assert.ok(['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'].includes(specifier));
   assert.doesNotMatch(source, /window\.|hermesDesktop|__HERMES|\beval\(|new Function|(?<!ctx\.)\bsetInterval\(|(?<!ctx\.)\bsetTimeout\(|\bfetch\(|document\./);
-  assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b|rgb\(/);
+  // One exception: the caption preview's default highlight is a video colour and must equal the burned default.
+  const captionDefault = source.match(/^const CAPTION_DEFAULT_HIGHLIGHT = '(#[0-9A-Fa-f]{6})';$/m);
+  assert.ok(captionDefault, 'The caption default is declared once');
+  const rendered = (await readFile(new URL('../cutroom/captions.py', import.meta.url), 'utf8')).match(/^DEFAULT_HIGHLIGHT = "(#[0-9A-Fa-f]{6})"/m);
+  assert.equal(captionDefault[1], rendered[1], 'Preview and render use the same default highlight');
+  assert.doesNotMatch(source.replace(captionDefault[0], ''), /#[0-9a-fA-F]{3,8}\b|rgb\(/);
   assert.doesNotMatch(source, /'progress'/, 'Themed progress bars only');
   assert.match(source, /prefers-reduced-motion/);
   assert.match(source, /focus-visible/);

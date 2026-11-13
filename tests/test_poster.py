@@ -100,7 +100,7 @@ class PosterTests(unittest.TestCase):
         data = base64.b64decode(body["data_url"][len(prefix) :])
         self.assertEqual(data[:2], b"\xff\xd8")
         self.assertEqual(jpeg_size(data), (480, 270), "Scaled to at most 480 px")
-        self.assertAlmostEqual(body["time"], 0.6, places=3, msg="30 % of duration")
+        self.assertAlmostEqual(body["time"], 0.2, places=3, msg="10 % of duration")
         cached = list((self.studio._directory(project["id"]) / "posters").glob("*.jpg"))
         self.assertEqual(len(cached), 1)
         self.assertTrue(cached[0].name.startswith(project["source_sha256"][:16]))

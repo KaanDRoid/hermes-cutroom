@@ -846,10 +846,12 @@ function Activity({ jobs, cancel, retry }) {
 const STAGE = 'color-mix(in srgb, var(--ui-base) 88%, transparent)';
 const ON_STAGE = 'var(--ui-bg-editor)';
 const AUTO_LOAD_BYTES = 67108864;
+// Same default as the burned captions (captions.DEFAULT_HIGHLIGHT); a video colour, not a theme colour.
+const CAPTION_DEFAULT_HIGHLIGHT = '#FFCC00';
 const MEDIA_CHOICES = [['source', 'Original'], ['preview', 'Preview'], ['final', 'Final']];
 const megabytes = bytes => `${Math.max(1, Math.round(bytes / 1048576))} MB`;
 const captionText = settings => (HEX.test(settings?.brand?.subtitle_color || '') ? settings.brand.subtitle_color : ON_STAGE);
-const captionAccent = settings => (HEX.test(settings?.caption_highlight_color || '') ? settings.caption_highlight_color : 'var(--ui-yellow, var(--ui-accent))');
+const captionAccent = settings => (HEX.test(settings?.caption_highlight_color || '') ? settings.caption_highlight_color : CAPTION_DEFAULT_HIGHLIGHT);
 const outline = '0 0 0.12em var(--ui-base), 0 0 0.12em var(--ui-base), 0 0.06em 0.14em var(--ui-base)';
 const ratioFor = (orientation, info) => orientation === 'portrait' ? [9, 16] : orientation === 'landscape' ? [16, 9] : orientation === 'square' ? [1, 1]
   : info?.width > 0 && info?.height > 0 ? [info.width, info.height] : [16, 9];
@@ -1037,7 +1039,18 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const seekTo = value => { const video = videoRef?.current; if (video && Number.isFinite(value)) { try { video.currentTime = value; } catch { /* Before metadata. */ } setTime(value); } };
   const player = media ? jsx('video', { ref: videoRef, src: media.url, preload: 'metadata', playsInline: true, 'aria-label': `${media.kind === 'source' ? 'Original' : media.kind === 'preview' ? 'Preview' : 'Final video'} player`,
     style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' },
-    onTimeUpdate: event => { const at = event.currentTarget.currentTime; setTime(at); onPlayback({ kind: media.kind, time: at }); },
+    onTimeUpdate: event => {
+      const target = event.currentTarget;
+      let at = target.currentTime;
+      if (original && target.paused === false) {
+        const skip = removedRanges(view, total).find(([start, end]) => at >= start && at < end - 0.01);
+        if (skip) {
+          if (skip[1] >= total - 0.01) { try { target.pause?.(); } catch { /* Ignore. */ } }
+          else { try { target.currentTime = skip[1]; at = skip[1]; } catch { /* Before metadata. */ } }
+        }
+      }
+      setTime(at); onPlayback({ kind: media.kind, time: at });
+    },
     onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false),
     onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); },
     onError: () => { setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); release(); } }, 'player:video') : null;

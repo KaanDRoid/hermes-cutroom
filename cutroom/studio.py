@@ -1539,7 +1539,7 @@ class Studio:
                 raise PermissionError("Artifact changed after publication")
         return path
 
-    def poster(self, project_id, at=0.3):
+    def poster(self, project_id, at=0.1):
         """One source frame as a JPEG data URL, cached per source hash and position.
 
         ``at`` is a share of the source duration. The cache lives in the
