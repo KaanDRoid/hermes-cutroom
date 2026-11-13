@@ -329,6 +329,16 @@ Required local assets are `config.json`, `model.bin` and `tokenizer.json`. Prese
 
 On success, the validated transcript is saved in the project with review-only `transcript.fillers`, the revision advances and approval is removed. The raw inference transcript remains in the job result, and `applied_revision` links it to the project. Neither first transcription nor retranscription automatically removes filler candidates.
 
+### Model files
+
+Jobs read the model path from the project's settings. An empty path falls back
+to the best model in `<workspace>/models`, then in `models/` beside the package
+(`setup.find_model`). Speech models are ranked large-v3, medium, small, base,
+tiny. Without any model, `transcribe`, `vision` and `segment` are refused with
+a message naming the workspace models folder. A preview with `face_track`
+framing still needs a current face analysis; the Desktop Review step runs
+`vision`, then `preview`, then `qa` in one click when it is missing.
+
 ### Where a removed word is cut
 
 Recognisers stamp word edges up to a few hundred milliseconds off. Cutting at

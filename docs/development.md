@@ -59,7 +59,7 @@ Open the generated HTML review before approving. These are the existing core com
 
 ## Native models
 
-Models are not committed or downloaded by ordinary inference. Place verified local assets at:
+Models are not committed or downloaded by ordinary inference. A project uses the model path in its settings; when that is empty, Cutroom looks in `models/` inside the Studio workspace and then in `models/` beside the package, and takes the most accurate speech model it finds (`faster-whisper-large-v3` or `whisper-large-v3`, then medium, small, base, tiny), `face_landmarker.task` and `selfie_segmenter.tflite`. A speech model folder needs `config.json`, `model.bin` and `tokenizer.json`. When nothing is found, the error names the folder to use. Place verified local assets at:
 
 ```text
 models/whisper-tiny/{config.json,model.bin,tokenizer.json,vocabulary.txt}

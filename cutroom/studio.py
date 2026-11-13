@@ -1447,8 +1447,12 @@ class Studio:
                 )
         if action in {"vision", "segment"}:
             key = "face_model" if action == "vision" else "segmentation_model"
-            model = settings.get(key)
-            if not model or not _local_path(model, must_exist=False).is_file():
+            model = self._model(settings, key)
+            if not model:
+                from .setup import missing_model_message
+
+                raise ValueError(missing_model_message(key, self.root / "models"))
+            if not _local_path(model, must_exist=False).is_file():
                 raise ValueError(
                     f"Set settings.{key} to an existing local model file; "
                     "run `cutroom setup-models` to acquire it. Nothing is downloaded automatically"
@@ -1508,7 +1512,7 @@ class Studio:
         paths = []
         if action in {"vision", "segment"}:
             key = "face_model" if action == "vision" else "segmentation_model"
-            paths.append(project["settings"].get(key))
+            paths.append(self._model(project["settings"], key))
         if upstream:
             paths.append(self._validate_publication(project, upstream))
         if action in {"preview", "final"} and project["settings"].get("use_segmented"):
@@ -1692,7 +1696,7 @@ class Studio:
         if action in {"silence", "transcribe"}:
             arguments = {"source": project["source"], **job["options"]}
             if action == "transcribe":
-                arguments["model_path"] = settings.get("whisper_model")
+                arguments["model_path"] = self._model(settings, "whisper_model")
             return invoke_worker(
                 action,
                 arguments,
@@ -1704,7 +1708,7 @@ class Studio:
                 "vision",
                 {
                     "source": project["source"],
-                    "face_model": settings["face_model"],
+                    "face_model": self._model(settings, "face_model"),
                     "frame_step": job["options"].get(
                         "frame_step", settings.get("frame_step", 1)
                     ),
@@ -1717,7 +1721,7 @@ class Studio:
                 "segment",
                 {
                     "source": project["source"],
-                    "segmentation_model": settings["segmentation_model"],
+                    "segmentation_model": self._model(settings, "segmentation_model"),
                     "output": str(outputs / "segmented.mp4"),
                     "background": settings.get("background") or None,
                     "graphic": settings.get("graphic") or None,
@@ -1978,10 +1982,30 @@ class Studio:
             return {}
         from .speech import local_model_files
 
-        return {
-            str(asset): file_digest(asset)
-            for asset in local_model_files(project["settings"].get("whisper_model"))
-        }
+        model = self._model(project["settings"], "whisper_model")
+        if not model:
+            from .setup import missing_model_message
+
+            raise ValueError(
+                missing_model_message("whisper_model", self.root / "models")
+            )
+        return {str(asset): file_digest(asset) for asset in local_model_files(model)}
+
+    def _model(self, settings, key):
+        """The project's chosen model, else the best one in a models folder.
+
+        Folders: ``models`` in the workspace, then ``models`` beside the
+        package (where ``cutroom setup-models`` puts them).
+        """
+        chosen = settings.get(key)
+        if chosen:
+            return chosen
+        from .setup import find_model
+
+        found = find_model(
+            key, [self.root / "models", Path(__file__).resolve().parents[1] / "models"]
+        )
+        return str(found) if found else None
 
     def _check_job_project(self, job):
         """Call under the state lock, both before execution and publication."""
