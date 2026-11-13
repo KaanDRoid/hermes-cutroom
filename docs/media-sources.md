@@ -38,6 +38,14 @@ curl -fL https://videos.pexels.com/video-files/1416529/1416529-uhd_3840_2160_30f
 
 - Observed SHA-256: `30513f61352bba3dde774b2da791a2ab3db76e721c795164709899ee61e781eb`.
 
+## Openly licensed test media
+
+| Local filename | Properties | Valid coverage |
+|---|---|---|
+| `roberts-tedx.webm` | 1920×1080, 1063.2 s, 29.97 fps, VP8/Vorbis, one speaker on stage | Clip finder and long-form YouTube |
+
+Climate change is simple, David Roberts at TEDxTheEvergreenStateCollege, TEDx Talks, CC BY 3.0, https://commons.wikimedia.org/wiki/File:Climate_change_is_simple_David_Roberts_at_TEDxTheEvergreenStateCollege.webm, sha1 d57f97f373fc8912b597c7d46174db5f74894994
+
 ## Model assets
 
 Local tested assets, not bundled:
