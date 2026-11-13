@@ -89,7 +89,7 @@ Status: merged into `feat/creator-formats` (pull request #12).
 ### Open items
 
 - Native Desktop acceptance of the selector, derive buttons and overlay in the real Hermes window (planned for F8 / A28).
-- Source ranges for derived projects (F5).
+- Source ranges for derived projects are implemented and verified in [F5](#f5--clip-finder).
 - The YouTube profile's cover is still a frame at the video size; a 16:9 custom thumbnail is F6.
 - `platform_upscale` needs the render's source size; reports for renders made before this field existed skip the check.
 - Characters per caption line assume a full em per character, so narrow text wraps earlier than necessary. F1 measures glyph widths when Pillow is installed.
@@ -467,6 +467,114 @@ Status: implemented on `feat/f3-pacing`; not yet merged into `feat/creator-forma
 - Pause shortening relies on word timings. Whisper's word ends can be early or late by tens of milliseconds, so a shortened pause can cut into a breath or the tail of a word.
 - Punch-ins, push-ins and transitions need constant-rate video (`max_pause` does not).
 - Native Desktop acceptance of the new controls (A28) is still to come.
+
+## F5 — Clip finder
+
+Status: implemented on `feat/f5-clip-finder`.
+
+### What shipped
+
+- **Local, explainable discovery.** `cutroom/clips.py` builds sentences from
+  punctuation and pauses, keeping common abbreviations intact. Without useful
+  punctuation it infers boundaries from unusually long gaps and splits long runs
+  at their largest gaps. In a punctuated transcript, discovery uses real sentence
+  stops at both edges, not an arbitrary pause in an unfinished sentence. Overlapping
+  word timestamps that leave no safe edge are skipped. Candidates contain whole
+  sentences, run 20–90 s (configurable within those limits), and default to eight
+  non-overlapping picks with a proximity penalty for temporal diversity. Shorts
+  defaults to at most 60 s; this is a preference, not its platform hard limit.
+- **Scores are not editorial promises.** A base score of 55 plus signed reasons,
+  clamped to 0–100: an opening question, number, strong claim, viewer address,
+  mid-thought connective or unsupported pronoun, complete ending, speaking pace,
+  long pauses, short opening and recognition confidence. Optional local sound
+  variation and existing Vision face samples add delivery signals. Sound decoding
+  has a 120 s timeout and a three-hour cap; missing audio falls back to word
+  timings. Cut points search only the gaps outside words for a quiet moment.
+  The result is deterministic for the same timed words and measurements.
+- **Source-range derivation.** `Studio.find_clips` persists suggestions outside
+  the edit digest/revision, fingerprints the timed words and rechecks before
+  publishing. A transcript replacement or correction invalidates them.
+  `Studio.create_clip` takes a candidate ID, or explicit times snapped to safe
+  sentence edges, and creates an unapproved project with `derived_from.range`
+  in source time. It intersects cuts/exclusions with that range, limits the
+  transcript without renumbering words, recomputes fillers and clears story
+  selections and program-time framing pins. Later edits cannot restore the rest
+  of the source, and deriving another platform version preserves the range.
+  Existing segment rendering and caption remapping supply program-time words
+  and synchronized sound/picture. Each child needs its own review and approval.
+- **Surfaces.** `cutroom_project` gained `find_clips` and `create_clip` actions,
+  rather than a fourth default tool. Chat gets bounded excerpts and reasons;
+  the edit-video skill offers discovery for long recordings and asks which to
+  use. REST has `POST /projects/{id}/find-clips` and `POST /projects/{id}/clips`.
+  Desktop's separate **Find clips** area appears in Edit for sources over three
+  minutes (not within a clip): start-frame posters, ranges, durations, scores,
+  reasons and words; **Play** seeks the original and stops at the range end;
+  **Make clip** chooses a platform, saves pending edits, creates and opens the
+  child without approving it. Clip Home cards use the clip's own first frame.
+
+### How it was verified
+
+- Test-first RED: `artifacts/f5/red.log`; GREEN: `artifacts/f5/green.log`.
+  Final gates: **501 Python tests OK** (14 skipped without local fixtures),
+  **62/62 Desktop tests**, Ruff check/format clean and `node --check` passes.
+  `tests/test_clips.py` covers sentence grouping, unpunctuated speech,
+  determinism, diversity, scored reasons, quiet gaps, overlapping timestamps and
+  bounded inputs. `tests/test_studio_clips.py` covers persistence, invalidation,
+  a changed transcript during discovery, child isolation, range enforcement,
+  caption remapping, platform limits and a real flash/beep render checked against
+  the source. Tool/REST/skill tests live in `tests/test_clip_surfaces.py`.
+- Desktop contract tests cover discovery, posters, independent creation, platform
+  choice, short-source visibility, source-range playback through metadata/seek/
+  automatic stop, errors, empty results and save-conflict gating. These are not
+  native Desktop-window acceptance.
+- **Real talk:** David Roberts, *Climate change is simple*, TEDx Talks,
+  1063.221 s, 1920×1080 at 29.97 fps, CC BY 3.0. Attribution and observed SHA-1
+  are in [media sources](media-sources.md#long-talk-for-clip-finder-acceptance).
+  `scripts/clips_evidence.py` used the existing local `whisper-tiny` model:
+  transcription 67.59 s, discovery 2.73 s. It found **eight candidates** below.
+  Every first word follows a punctuation-ended sentence and every last word
+  ends one; none is cut partway. Word gaps at the edges range from 0.14–1.76 s,
+  and measured cut levels are −46.16 dB or quieter (20 ms mono RMS).
+  `artifacts/f5/evidence/` holds candidates with full text, the transcript,
+  boundary measurements, source fingerprint, preview workspaces and frames.
+- **Two derived renders:** candidate 1 for `youtube_shorts` (28.762067 s),
+  candidate 2 for `instagram_reels` (27.160479 s), both 1080×1920 with highlighted
+  captions. QA has **zero failed checks**: Reels passes every check; Shorts has
+  one freeze-frame warning and a not-applicable fps
+  check. Caption timing, bounds, safe zone, sound and duration pass in both.
+- **Sync versus the original source range**, sampled twice in each output:
+  picture offset **0 frames** (pixel correlation 0.986–0.989); audio residual
+  −26 to −22 samples at 8 kHz (−3.25 to −2.75 ms, correlation 0.966–0.999).
+  Combined A/V residual is at most **3.25 ms**. The check accounts for the
+  exporter's source-frame alignment, rather than comparing two rendered edits.
+
+The texts were read, not just counted. Times below are source seconds; scores
+reflect delivery, not whether the passage works alone:
+
+| Rank | Source range | Score | Opening / editorial judgement |
+|---|---|---|---|
+| 1 | 513.08–541.84 | 91 | “What would … four degrees Celsius look like?” A clear question, but mainly setup: it stops before the answer. Not the best standalone choice. |
+| 2 | 27.84–55.00 | 86 | “Why are so few people talking about it?” Recognizable discussion of complexity, but “it” lacks a named subject and the answer is deferred. Needs context. |
+| 3 | 541.84–570.08 | 84 | “What would four degrees Celsius look like?” Includes an answer and comparison; a usable standalone passage after correcting “temperatureized” in the tiny-model transcript. |
+| 4 | 137.16–165.30 | 83 | “Why is the earth not a cold dead rock …?” Clear question and atmospheric explanation. The strongest standalone choice by this reading. |
+| 5 | 174.76–203.50 | 81 | “So scientists discovered …” Relevant explanation but a long run-on opening and an unfinished rhetorical turn. Weak as a complete standalone clip. |
+| 6 | 342.76–383.94 | 81 | “So the question is … how high …?” Names the problem and explains the two-degree benchmark. Usable with transcript cleanup despite “So”. |
+| 7 | 292.72–328.06 | 77 | “We have measured … a 0.8 degree Celsius rise …” States a measurement and explains delayed response. Usable and reasonably self-contained. |
+| 8 | 672.08–710.88 | 75 | “So if four degrees is hell on earth …” Names irreversibility, then sets up an argument it does not finish. Needs a better editorial ending. |
+
+### Open items
+
+- A punctuation boundary does not guarantee a complete argument. The scored
+  delivery heuristics rank some setup passages too highly; the person must watch
+  and choose. No topical understanding or factual verification is claimed.
+- In pause-only transcripts the boundaries are inferred, not verified grammatical
+  sentence ends. Whisper can misplace a word by tens of milliseconds. Quiet-gap
+  measurements are a listen-proxy, not a claim that someone listened to every cut.
+- Tiny-model text contains recognition errors; the review workflow must correct
+  them before delivery. The real run did not use face-presence scoring.
+- Native Desktop acceptance of this area remains A28/F8; the local SDK tests do
+  not replace that window-level check. Original playback retains the player's
+  existing 256 MiB in-memory limit. Nothing was approved, published or uploaded.
 
 ## Order and branches
 
