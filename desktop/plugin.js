@@ -171,6 +171,10 @@ const JOB_WORDS = {
 const jobWords = action => JOB_WORDS[action] || [action, action];
 const STEPS = [['edit', 'Edit'], ['style', 'Style'], ['sound', 'Sound'], ['review', 'Review'], ['export', 'Export']];
 const CAPTION_STYLES = [['off', 'Off', 'No captions on the video'], ['classic', 'Classic', 'Full lines'], ['highlight', 'Highlight', 'The spoken word lights up'], ['pop', 'Pop', 'Each word pops in'], ['one_word', 'One word', 'One large word at a time']];
+const TRANSITIONS = [['cut', 'Cut'], ['crossfade', 'Crossfade'], ['dip', 'Dip to black']];
+const PACING_KEYS = ['punch_in', 'punch_in_zoom', 'max_upscale', 'push_in', 'push_in_zoom', 'max_pause', 'transition', 'transition_duration'];
+// [low, high, label] for the numbers under More pacing options; blank uses the backend default.
+const PACING_BOUNDS = { punch_in_zoom: [1.05, 1.3, 'Punch-in zoom'], push_in_zoom: [1.02, 1.15, 'Push-in zoom'], max_upscale: [1, 4, 'Most enlargement'], transition_duration: [0.04, 0.5, 'Transition length'] };
 const FRAMINGS = [['fit', 'Fit', 'Whole picture, bars around it'], ['blur_fill', 'Blur fill', 'Whole picture on a soft background'], ['center_crop', 'Center crop', 'Fills the frame from the middle'], ['face_track', 'Face track', 'Follows the speaker']];
 const PLATFORM_NAMES = { custom: 'Custom', instagram_reels: 'Instagram Reels', youtube_shorts: 'YouTube Shorts', tiktok: 'TikTok', youtube: 'YouTube' };
 const ratioOf = shape => ({ portrait: '9:16', landscape: '16:9', square: '1:1' }[shape] || 'Original');
@@ -195,6 +199,10 @@ const CHECK_TEXT = {
   framing_smoothness: ['The crop moves smoothly', 'The crop moves faster than it should in places.'],
   framing_face_safe_zone: ['The face stays in the safe area', 'The face leaves the safe area in some frames, or no face was found to check.'],
   framing_face_coverage: ['A face is found through most of the video', 'A face was found in less than half of the video, so the crop may stay in the centre.'],
+  pacing_upscale: ['Zooms stay within the sharpness limit', 'A zoom enlarges the picture more than allowed, or the framing already enlarges it so much that zooms were left out.'],
+  pacing_face: ['Zoomed shots keep the face in the safe area', 'In some zoomed shots the face sits outside the safe area.'],
+  pacing_transitions: ['Every cut has its transition', 'Some cuts kept a plain cut because a piece of the edit is very short.'],
+  pacing_max_pause: ['No pause is longer than you chose', 'Some pauses are longer than the limit you set.'],
 };
 const STATUS_MARK = { pass: ['✓', 'OK'], warning: ['!', 'Note'], fail: ['✕', 'Problem'], skip: ['–', 'Not checked'] };
 
@@ -383,7 +391,7 @@ const soundSpec = (group, item) => {
 };
 const TOP_DEFAULTS = { excluded_word_ids: [], gaze_exclusions: [], brief: '', voice: 'neutral' };
 const SETTING_DEFAULTS = { platform: 'custom', caption_style: 'classic', captions: false, framing: 'fit', voice_cleanup: 'off', music: null, cut_sfx: null, caption_highlight_color: null, caption_word_y: null,
-  framing_keyframes: [], aspect: 'source', brand: {}, title: '', normalize_audio: false, use_segmented: false, final_resolution: '1080' };
+  framing_keyframes: [], pacing: null, aspect: 'source', brand: {}, title: '', normalize_audio: false, use_segmented: false, final_resolution: '1080' };
 
 // The values an undo sends back; null when a change cannot be undone.
 function previousOf(changes, view) {
@@ -1141,7 +1149,53 @@ function StyleStep({ kit }) {
       ] }) : null,
       el('p', { style: muted, children: 'Cropping enlarges the picture, so a small source can look softer. The Review step tells you when that happens.' }),
     ] }),
+    jsx(PacingGroup, { kit }),
     jsx(Disclosure, { title: 'Create versions for other platforms', children: jsx(PlatformVersions, { kit }) }),
+  ] });
+}
+
+function PacingGroup({ kit }) {
+  const { view, edit } = kit;
+  const pacing = view.settings?.pacing || {};
+  // One undo step for a run of pacing changes; the whole object is sent each time.
+  const set = (changes, label) => {
+    const next = {};
+    for (const key of PACING_KEYS) if (pacing[key] !== undefined) next[key] = pacing[key];
+    for (const [key, value] of Object.entries(changes)) { if (value === undefined) delete next[key]; else next[key] = value; }
+    edit({ settings: { pacing: next } }, label, 'pacing');
+  };
+  const shorten = Number.isFinite(pacing.max_pause);
+  const pause = shorten ? pacing.max_pause : 0.6;
+  const number = key => value => {
+    const [low, high, label] = PACING_BOUNDS[key];
+    if (value === '') { set({ [key]: undefined }, label); return undefined; }
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < low || parsed > high) return `${label} must be between ${low} and ${high}`;
+    set({ [key]: parsed }, label);
+    return undefined;
+  };
+  return el('section', { 'aria-labelledby': 'cutroom-pacing', style: stack, children: [
+    el('h3', { id: 'cutroom-pacing', style: h3s, children: 'Pacing' }),
+    jsx(Choice, { label: 'Punch-ins', value: pacing.punch_in === 'alternate' ? 'alternate' : 'off', options: [['off', 'Off'], ['alternate', 'On']], onChange: value => set({ punch_in: value }, 'Punch-ins') }),
+    el('p', { style: muted, children: 'On: every other cut zooms in a little, centred on the face, so jump cuts look intended. Cutroom lowers a zoom rather than enlarge the picture too much.' }),
+    el('label', { style: { ...row, fontSize: 13 }, children: [jsx(Tick, { 'aria-label': 'Shorten long pauses', checked: shorten, onCheckedChange: checked => set({ max_pause: checked === true ? pause : null }, 'Shorten long pauses') }), 'Shorten long pauses'] }),
+    el('label', { style: { ...row, fontSize: 12 }, children: [
+      el('span', { children: 'Longest pause' }),
+      jsx('input', { type: 'range', name: 'pacing.max_pause', 'aria-label': 'Longest pause', 'aria-valuetext': `${pause} seconds`, min: 0.2, max: 2, step: 0.1, value: pause, disabled: !shorten,
+        onChange: event => set({ max_pause: Number(event.target.value) }, 'Longest pause'), style: { flex: '1 1 160px', accentColor: 'var(--ui-accent)' } }),
+      el('strong', { children: `${pause} s` }),
+    ] }),
+    el('p', { style: muted, children: 'Silences between words longer than this are cut down to it. Captions and sound stay in step.' }),
+    jsx(Choice, { label: 'Transition', value: pacing.transition || 'cut', options: TRANSITIONS, onChange: value => set({ transition: value }, 'Transition') }),
+    jsx(Disclosure, { title: 'More pacing options', children: [
+      el('label', { style: { ...row, fontSize: 13 }, children: [jsx(Tick, { 'aria-label': 'Slow push-in on long shots', checked: pacing.push_in === true, onCheckedChange: checked => set({ push_in: checked === true }, 'Push-in') }), 'Slow push-in on long shots (4 s or more)'] }, 'push'),
+      el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 }, children: [
+        jsx(Field, { label: 'Punch-in zoom (1.05–1.3; blank = 1.12)', name: 'pacing.punch_in_zoom', type: 'number', value: pacing.punch_in_zoom, onCommit: number('punch_in_zoom') }, 'punch'),
+        jsx(Field, { label: 'Push-in zoom (1.02–1.15; blank = 1.06)', name: 'pacing.push_in_zoom', type: 'number', value: pacing.push_in_zoom, onCommit: number('push_in_zoom') }, 'push-zoom'),
+        jsx(Field, { label: 'Most enlargement of the source (1–4×; blank = 2)', name: 'pacing.max_upscale', type: 'number', value: pacing.max_upscale, onCommit: number('max_upscale') }, 'limit'),
+        jsx(Field, { label: 'Transition length, s (0.04–0.5; blank = 0.2)', name: 'pacing.transition_duration', type: 'number', value: pacing.transition_duration, onCommit: number('transition_duration') }, 'length'),
+      ] }, 'numbers'),
+    ] }),
   ] });
 }
 

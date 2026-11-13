@@ -12,10 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
-    from . import audio, platforms, reframe
+    from . import audio, pacing, platforms, reframe
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
-    from cutroom import audio, platforms, reframe
+    from cutroom import audio, pacing, platforms, reframe
     from cutroom.childenv import child_env
 
 
@@ -304,6 +304,10 @@ def _settings(settings):
         "framing_keyframes",
         "framing_analysis",
         "framing_report",
+        "pacing",
+        "pacing_analysis",
+        "pacing_report",
+        "pacing_words",
     }
     if settings is None:
         settings = {}
@@ -386,6 +390,23 @@ def _settings(settings):
         reframe.validate_analysis(result["framing_analysis"])
     if "framing_report" in result:
         reframe.validate_report(result["framing_report"])
+    result["pacing"] = pacing.validate_settings(result.get("pacing"))
+    if result.get("pacing_analysis") is not None:
+        analysis = result["pacing_analysis"]
+        if not isinstance(analysis, dict) or set(analysis) != {"faces"}:
+            raise ValueError("pacing_analysis needs faces only")
+        reframe.validate_analysis({"faces": analysis["faces"], "scene_cuts": []})
+    if result.get("pacing_report") is not None:
+        pacing.validate_report(result["pacing_report"])
+    words = result.get("pacing_words")
+    if words is not None:
+        if not isinstance(words, list) or len(words) > pacing.MAX_WORDS:
+            raise ValueError("pacing_words must be a bounded list")
+        for pair in words:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("pacing_words entries are [start, end]")
+            _number(pair[0], 0)
+            _number(pair[1], 0)
     return result
 
 
@@ -975,6 +996,126 @@ def _audio_ranges(ranges, rate, start_time=None, sample_rate=48000):
     return result
 
 
+def _sar_text(video):
+    try:
+        numerator, denominator = str(video.get("sample_aspect_ratio") or "1:1").split(
+            ":"
+        )
+        if int(numerator) > 0 and int(denominator) > 0:
+            return f"{int(numerator)}/{int(denominator)}"
+    except ValueError:
+        pass
+    return "1"
+
+
+def _pacing_zone(settings):
+    """Safe area for face checks: the platform zone, at least the brand margin."""
+    margin = settings["brand"]["safe_margin"]
+    entry = platforms.profile(settings.get("platform", "custom"))
+    zone = entry["safe_zone"]
+    if zone:
+        return {
+            side: max(zone[side], margin) for side in ("left", "right", "top", "bottom")
+        }
+    return {side: margin for side in ("left", "right", "top", "bottom")}
+
+
+def _pacing_planner(info, ranges, rate, settings):
+    """Pacing plan factory; the frame size and crop path are known only later.
+
+    Kept frames per range follow the same frame-aligned edges as the trims.
+    Variable-rate sources (max_pause only) are planned at their nominal rate.
+    """
+    origin = Fraction(str(_timeline(info)[1]))
+    fps = Fraction(rate) if rate else Fraction(str(_frame_rate(info) or 30))
+    firsts, counts = [], []
+    for start, end in ranges:
+        first = max(0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2)))
+        stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
+        firsts.append(first)
+        counts.append(max(1, stop - first))
+    last_frame = int((Fraction(str(info["duration"])) - origin) * fps)
+    video = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    grid = [info["width"], info["height"]]
+    if _quarter_turn(video):
+        grid.reverse()
+    choice = settings["pacing"]
+    faces = (settings.get("pacing_analysis") or {}).get("faces") or []
+
+    def build(mode, width, height, framing_report, cuts_only=False):
+        common = dict(
+            counts=counts,
+            firsts=firsts,
+            fps=float(fps),
+            last_frame=last_frame,
+            zone=_pacing_zone(settings),
+        )
+        if cuts_only:
+            return pacing.plan(
+                choice,
+                window=tuple(grid),
+                base_upscale=1.0,
+                output_box=[0, 0, 1, 1],
+                **common,
+            )
+        if framing_report is not None:
+            cw, ch = framing_report["crop"]
+            sw, sh = framing_report["source"]
+            xs, ys = framing_report["x"], framing_report["y"]
+
+            def offsets(index):
+                # Matches crop's even-pixel rounding of the planned position.
+                return int(xs[index]) // 2 * 2, int(ys[index]) // 2 * 2
+
+            scaffold = pacing.plan(
+                {**choice, "punch_in": "off", "push_in": False},
+                window=(cw, ch),
+                base_upscale=1.0,
+                output_box=[0, 0, 1, 1],
+                **common,
+            )
+            points = pacing.face_points(
+                faces, scaffold["ranges"], float(fps), (sw, sh), offsets
+            )
+            report = pacing.plan(
+                choice,
+                window=(cw, ch),
+                base_upscale=max(width / cw, height / ch),
+                output_box=[0, 0, 1, 1],
+                faces=points,
+                **{**common, "zone": framing_report["zone"]},
+            )
+        else:
+            source_video = _source_video(info)
+            _, base = reframe.content_upscale(source_video, width, height, mode)
+            cw, ch = _content_size(info["display_aspect_ratio"], width, height)
+            box = [(width - cw) / 2 / width, (height - ch) / 2 / height]
+            box += [cw / width, ch / height]
+            scaffold = pacing.plan(
+                {**choice, "punch_in": "off", "push_in": False},
+                window=tuple(grid),
+                base_upscale=1.0,
+                output_box=box,
+                **common,
+            )
+            points = pacing.face_points(faces, scaffold["ranges"], float(fps), grid)
+            report = pacing.plan(
+                choice,
+                window=tuple(grid),
+                base_upscale=base,
+                output_box=box,
+                faces=points,
+                **common,
+            )
+        report["source_ranges"] = [[start, end] for start, end in ranges]
+        report["max_pause"] = choice["max_pause"]
+        return report
+
+    return build
+
+
 def export_video(
     source,
     segments,
@@ -1019,10 +1160,24 @@ def export_video(
     constant_rate = bool(
         rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0"
     )
+    pacing_settings = settings["pacing"]
+    paced = pacing.video_active(pacing_settings)
+    if paced and not constant_rate:
+        raise ValueError(
+            "Punch-ins, push-ins and transitions require constant-rate media; "
+            "conform variable-rate sources first"
+        )
     if constant_rate:
         ranges = _frame_aligned(ranges, rate, info["duration"], _timeline(info)[1])
         if not ranges:
             raise ValueError("Segments are shorter than one video frame")
+    pacing_plan = (
+        _pacing_planner(info, ranges, rate if constant_rate else None, settings)
+        if pacing_settings is not None
+        else None
+    )
+    # Audio fades need the cut plan before the trims are written.
+    early_plan = pacing_plan(None, None, None, None, cuts_only=True) if paced else None
     # Loudness processing can extend the tail; never let audio outlast the cut.
     program = sum(end - start for start, end in ranges)
     audio_stream = next(
@@ -1043,10 +1198,11 @@ def export_video(
     for index, ((start, end), (sound_start, sound_end, samples)) in enumerate(
         zip(ranges, sound_ranges)
     ):
-        graph.append(
-            f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
-        )
-        labels.append(f"[v{index}]")
+        if not paced:
+            graph.append(
+                f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
+            )
+            labels.append(f"[v{index}]")
         if info["has_audio"]:
             trim = (
                 f"[0:a:0]atrim=start={sound_start}:end={sound_end},asetpts=PTS-STARTPTS"
@@ -1055,6 +1211,10 @@ def export_video(
                 # Exact length; a joint concat would pad audio to the video's
                 # container timestamps, which are often rounded to milliseconds.
                 trim += f",apad,atrim=end_sample={samples}"
+                if paced:
+                    trim += pacing.audio_fades(
+                        index, len(ranges), samples, sample_rate, early_plan
+                    )
             trim += f"[a{index}]"
             graph.append(trim)
             if not constant_rate:
@@ -1062,7 +1222,8 @@ def export_video(
             audio_graph.append(trim)
             audio_labels.append(f"[a{index}]")
     if constant_rate:
-        graph.append("".join(labels) + f"concat=n={len(ranges)}:v=1:a=0[joined]")
+        if not paced:
+            graph.append("".join(labels) + f"concat=n={len(ranges)}:v=1:a=0[joined]")
         if info["has_audio"]:
             graph.append(
                 "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
@@ -1131,24 +1292,53 @@ def export_video(
             framing_report = reframe.prepare_path(
                 source, info, ranges, settings, width, height
             )
-            xexpr, xp = reframe.path_expression(
-                framing_report["x"], framing_report["resets"]
-            )
-            yexpr, yp = reframe.path_expression(
-                framing_report["y"], framing_report["resets"]
-            )
-            framing_report["expression_pieces"] = [xp, yp]
             crop_w, crop_h = framing_report["crop"]
             display_w, display_h = framing_report["source"]
             square = abs(_sample_aspect(video_stream) - 1) <= 1e-6
             # Anamorphic sources are first resampled to square display pixels.
-            filters = (
+            prefilters = (
                 [] if square else [f"scale={display_w}:{display_h}", "setsar=1"]
-            ) + [
-                f"crop={crop_w}:{crop_h}:x='{xexpr}':y='{yexpr}'",
-                f"scale={width}:{height}",
-                "setsar=1",
-            ]
+            )
+            if paced:
+                # Each range carries its own crop and zoom; see pacing.build_graph.
+                filters = ["null"]
+            else:
+                xexpr, xp = reframe.path_expression(
+                    framing_report["x"], framing_report["resets"]
+                )
+                yexpr, yp = reframe.path_expression(
+                    framing_report["y"], framing_report["resets"]
+                )
+                framing_report["expression_pieces"] = [xp, yp]
+                filters = prefilters + [
+                    f"crop={crop_w}:{crop_h}:x='{xexpr}':y='{yexpr}'",
+                    f"scale={width}:{height}",
+                    "setsar=1",
+                ]
+        pacing_report = None
+        if pacing_plan is not None:
+            pacing_report = pacing_plan(mode, width, height, framing_report)
+            if paced:
+                cropped = framing_report is not None
+                lines, pieces = pacing.build_graph(
+                    pacing_report,
+                    rate=rate,
+                    origin=_timeline(info)[1],
+                    out_size=(width, height) if cropped else pacing_report["window"],
+                    crop={
+                        "x": framing_report["x"],
+                        "y": framing_report["y"],
+                        "resets": framing_report["resets"],
+                        "size": framing_report["crop"],
+                    }
+                    if cropped
+                    else None,
+                    prefilters=prefilters if cropped else (),
+                    sar="1" if cropped else _sar_text(video_stream),
+                )
+                graph.extend(lines)
+                if cropped:
+                    framing_report["expression_pieces"] = pieces
         brand = settings["brand"]
         if settings["title"] or settings["lower_third"] or captions:
             _font(directory, brand["font"])
@@ -1425,6 +1615,8 @@ def export_video(
         if script_output is not None and captions:
             os.link(directory / "captions.ass", script_output)
     extra = {"audio_mix": mix_report} if mix_report else {}
+    if pacing_report is not None:
+        extra["pacing"] = pacing_report
     if layout is not None:
         extra.update(
             {
@@ -1951,6 +2143,13 @@ def quality_report(
             len(points) if deltas is not None else None,
             report_upscale=entry is None,
         )
+    if settings.get("pacing"):
+        pacing.quality_checks(
+            add,
+            settings.get("pacing_report"),
+            settings["pacing"],
+            settings.get("pacing_words"),
+        )
     if entry is not None:
         _platform_fps(add, entry, info, settings, deltas)
     if not info["has_audio"]:
@@ -2120,7 +2319,9 @@ def quality_report(
             layout = platform_layout(
                 settings, info["width"], info["height"], captions=bool(captions)
             )
-        valid = _captions(captions, info["duration"])
+        # Frame-aligned renders can end up to half a frame before the edited
+        # length the cues were timed against; allow one frame.
+        valid = _captions(captions, info["duration"] + 1 / (_frame_rate(info) or 30))
         brand = settings["brand"]
         size = brand["subtitle_size"] * min(info["width"], info["height"]) / 1080
         available = info["width"] * (1 - 2 * brand["safe_margin"])

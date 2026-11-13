@@ -231,6 +231,31 @@ class AudioVideoSyncTests(unittest.TestCase):
             with self.subTest(name):
                 self.check(name, settings, segments, minimum=10)
 
+    def test_transitions_and_punch_ins_keep_the_source_offset(self):
+        # Transitions are built from handles, so every kept frame stays where a
+        # plain cut puts it and the sound is not shifted.
+        for name, pacing in (
+            ("crossfade.mp4", {"transition": "crossfade", "punch_in": "alternate"}),
+            ("dip.mp4", {"transition": "dip", "transition_duration": 0.4}),
+        ):
+            with self.subTest(name):
+                self.check(name, {"pacing": pacing}, minimum=11)
+
+    def test_many_cuts_with_crossfades_do_not_drift(self):
+        segments = [
+            {
+                "start": round(index * 1.6 + 0.0123 * index, 6),
+                "end": round(index * 1.6 + 0.0123 * index + 1.2, 6),
+            }
+            for index in range(12)
+        ]
+        self.check(
+            "many-crossfade.mp4",
+            {"pacing": {"transition": "crossfade", "punch_in": "alternate"}},
+            segments,
+            minimum=9,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

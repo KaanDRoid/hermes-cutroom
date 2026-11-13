@@ -404,8 +404,65 @@ def definitions():
         "properties": {
             "settings": {
                 "type": "object",
-                "description": "Render/model settings; settings.music is an optional local audio object (path, volume_db, fade_in, fade_out, duck, duck_db, loop, start_offset, source_note); settings.cut_sfx takes path and volume_db; assets are hashed into approval. settings.voice_cleanup is off/light/strong.",
+                "description": "Render/model settings; settings.music is an optional local audio object (path, volume_db, fade_in, fade_out, duck, duck_db, loop, start_offset, source_note); settings.cut_sfx takes path and volume_db; assets are hashed into approval. settings.voice_cleanup is off/light/strong. settings.pacing sets punch-ins, push-ins, the longest pause and transitions; null removes it.",
                 "properties": {
+                    "pacing": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "Pacing for short-form edits; ask the person "
+                        "before turning it on. Defaults: punch_in off, cut transition, "
+                        "no pause limit",
+                        "properties": {
+                            "punch_in": {
+                                "type": "string",
+                                "enum": ["off", "alternate"],
+                                "description": "alternate: every other edit cut "
+                                "zooms in on the face",
+                            },
+                            "punch_in_zoom": {
+                                "type": "number",
+                                "minimum": 1.05,
+                                "maximum": 1.3,
+                                "description": "Punch-in zoom, default 1.12",
+                            },
+                            "max_upscale": {
+                                "type": "number",
+                                "minimum": 1,
+                                "maximum": 4,
+                                "description": "Most total enlargement of the source "
+                                "including framing, default 2; larger zooms are reduced",
+                            },
+                            "push_in": {
+                                "type": "boolean",
+                                "description": "Slow eased push-in over ranges of 4 s "
+                                "or more",
+                            },
+                            "push_in_zoom": {
+                                "type": "number",
+                                "minimum": 1.02,
+                                "maximum": 1.15,
+                                "description": "Push-in end zoom, default 1.06",
+                            },
+                            "max_pause": {
+                                "type": ["number", "null"],
+                                "minimum": 0.2,
+                                "maximum": 2,
+                                "description": "Shorten pauses between kept words "
+                                "to this many seconds; null keeps pauses",
+                            },
+                            "transition": {
+                                "type": "string",
+                                "enum": ["cut", "crossfade", "dip"],
+                            },
+                            "transition_duration": {
+                                "type": "number",
+                                "minimum": 0.04,
+                                "maximum": 0.5,
+                                "description": "Seconds, default 0.2; rendered as "
+                                "2 to 12 frames",
+                            },
+                        },
+                    },
                     "caption_style": {
                         "type": "string",
                         "enum": ["classic", "highlight", "pop", "one_word"],
