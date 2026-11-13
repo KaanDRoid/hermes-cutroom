@@ -2,10 +2,11 @@
 
 ## November 12 — F4 music, cut sounds and voice clean-up (branch `feat/f4-music-voice`)
 
-- Added optional local music (ducking, fades, loop, offset, source note), a cut sound and voice clean-up presets. Files are hashed into the digest. When linear loudness gain would exceed the true-peak limit, Cutroom limits peaks first and labels the method honestly. QA compares measured ducking with the request. Desktop gets audio controls. Details: [creator formats F4](creator-formats.md#f4--music-cut-sounds-and-voice-clean-up).
+- Added optional local music (ducking, fades, loop, offset, source note), a cut sound and voice clean-up presets. Files are hashed into the digest. When linear loudness gain would exceed the true-peak limit, Cutroom limits peaks first and labels the method honestly; every normalised export is measured after encoding and re-limited if it is over −1 dBTP. QA compares the render-stage ducking measurement with the request. Desktop gets audio controls. Details: [creator formats F4](creator-formats.md#f4--music-cut-sounds-and-voice-clean-up).
 - Fixed in every constant-frame-rate export: audio ran half a frame plus the video start offset behind the picture, drifted about 0.4 ms per cut on millisecond-timestamped sources, and could end before the last frame. A flash/click test now holds sync within 0.5 ms across twelve cuts.
-- On real speech (Sandra clip, 24 s Reels preview), the mix measured −14.1 LUFS and −1.3 dBTP, 15.75 dB of ducking measured on the delivered file, and sync within one sample.
-- Local gates: **284 Python tests OK** (14 skipped without local models and media), **22/22 Desktop tests**, Ruff clean.
+- On real speech (Sandra clip, 24 s Reels preview), the mix measured −14.1 LUFS and −1.3 dBTP, 15.75 dB of ducking measured on the delivered file by the evidence script (QA reports the render-stage stem figure, 15.95 dB), and sync within one sample. Re-run after the review fixes with the same figures (`artifacts/f4/evidence-fix/`).
+- Review fixes on the same branch: a piecewise ducking envelope bounded by the render timeout (30 min with 750 speech runs in 0.14 s; the review measured about 4.5 s of CPU per program second at 300 runs), loops that repeat the segment from `start_offset`, short unlooped music that fades out where it ends, deliveries kept at or under −1 dBTP after encoding with QA warning above it, the `music` check labelled as render-stage evidence, and relative audio paths refused. Details: [creator formats F4, review fixes](creator-formats.md#review-fixes-1).
+- Local gates: **297 Python tests OK** (14 skipped without local models and media), **22/22 Desktop tests**, Ruff check and format clean. Before the review fixes the suite had 285 tests.
 
 ## November 12 — F0 platform profiles (merged, pull request #12)
 
