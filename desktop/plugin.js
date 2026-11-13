@@ -33,6 +33,12 @@ const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 const pct = value => Math.round(clamp01(value) * 100);
 const percent = value => `${+(value * 100).toFixed(2)}%`;
 const round3 = value => Math.round(value * 1000) / 1000;
+// The two strongest plus points and every penalty, in one short line.
+const clipReasonLine = (reasons = []) => {
+  const plus = reasons.filter(r => r.points > 0).sort((a, b) => b.points - a.points).slice(0, 2);
+  const minus = reasons.filter(r => r.points < 0);
+  return [...plus.map(r => r.text), ...minus.map(r => `${r.text} (${r.points})`)].join(' · ');
+};
 // 180 -> '3 min', 90 -> '1 min 30 s', 45 -> '45 s'.
 const spokenLength = seconds => { const m = Math.floor(seconds / 60), s = Math.round(seconds % 60); return m ? `${m} min${s ? ` ${s} s` : ''}` : `${s} s`; };
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
@@ -1194,16 +1200,20 @@ function ClipFinder({ kit }) {
     busy ? el('p', { role: 'status', style: muted, children: 'Looking at the words and sound on this computer…' }, 'status') : null,
     jsx(Notice, { error }, 'error'),
     result && !candidates.length ? el('p', { role: 'status', style: muted, children: 'No whole-sentence clips fit this length. Check the transcript or choose another platform.' }, 'empty') : null,
-    candidates.length ? el('div', { role: 'list', 'aria-label': 'Clip candidates', style: stack, children: candidates.map(item => el('article', { role: 'listitem', style: { ...panel, padding: 10 }, children: [
+    candidates.length ? el('div', { role: 'list', 'aria-label': 'Clip candidates', style: stack, children: candidates.map(item => el('article', { role: 'listitem', style: { ...panel, padding: 10, display: 'grid', gridTemplateColumns: 'minmax(96px, 30%) 1fr', gap: 10, alignItems: 'start' }, children: [
       jsx(Thumb, { ctx, scope, id: project.id, at: clamp01(item.start / project.source_info.duration) }, 'poster'),
-      el('strong', { children: `${item.rank}. ${item.hook || 'Clip'} ` }, 'hook'),
-      el('p', { style: muted, children: `${clock(item.start)}–${clock(item.end)} · ${spokenLength(item.duration)} · Score ${item.score}/100` }, 'range'),
-      el('ul', { style: { margin: 0, paddingLeft: 18, fontSize: 12 }, children: (item.reasons || []).map((reason, index) => el('li', { children: `${reason.text} (${reason.points > 0 ? '+' : ''}${reason.points})` }, index)) }, 'reasons'),
-      el('details', { children: [el('summary', { style: summaryStyle, children: 'Read the words' }, 'summary'), el('p', { style: muted, children: item.text }, 'text')] }, 'words'),
-      el('div', { style: row, children: [
-        jsx(Button, { variant: 'secondary', 'aria-label': `Play clip ${item.rank}, ${clock(item.start)} to ${clock(item.end)}`, onClick: () => kit.playClip(item), children: 'Play' }, 'play'),
-        jsx(Button, { disabled: busy || kit.saving(), onClick: () => act(item), children: 'Make clip' }, 'make'),
-      ] }, 'actions'),
+      el('div', { style: { display: 'grid', gap: 4, minWidth: 0 }, children: [
+        el('strong', { children: `${item.rank}. ${item.hook || 'Clip'}` }, 'hook'),
+        el('span', { style: muted, children: `${clock(item.start)}–${clock(item.end)} · ${spokenLength(item.duration)} · Score ${item.score}/100` }, 'range'),
+        el('span', { 'data-clip-reasons': true, style: { fontSize: 12 }, children: clipReasonLine(item.reasons) }, 'reasons'),
+        el('details', { children: [el('summary', { style: summaryStyle, children: 'Why this score' }, 'summary'),
+          el('ul', { style: { margin: '4px 0 0', paddingLeft: 18, fontSize: 12 }, children: (item.reasons || []).map((reason, index) => el('li', { children: `${reason.text} (${reason.points > 0 ? '+' : ''}${reason.points})` }, index)) }, 'all')] }, 'why'),
+        el('details', { children: [el('summary', { style: summaryStyle, children: 'Read the words' }, 'summary'), el('p', { style: { ...muted, margin: '4px 0 0' }, children: item.text }, 'text')] }, 'words'),
+        el('div', { style: row, children: [
+          jsx(Button, { variant: 'secondary', 'aria-label': `Play clip ${item.rank}, ${clock(item.start)} to ${clock(item.end)}`, onClick: () => kit.playClip(item), children: 'Play' }, 'play'),
+          jsx(Button, { disabled: busy || kit.saving(), onClick: () => act(item), children: 'Make clip' }, 'make'),
+        ] }, 'actions'),
+      ] }, 'details'),
     ] }, item.id)) }, 'list') : null,
   ] });
 }

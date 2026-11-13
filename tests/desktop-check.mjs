@@ -1452,6 +1452,40 @@ const clipCandidates = { settings: { min_s: 20, max_s: 60, count: 8, platform: '
   { id: 'clip-600000-655000', rank: 2, start: 600, end: 655, duration: 55, score: 61, hook: 'Here is the truth.', text: 'Here is the truth.', reasons: [{ text: 'Steady speaking pace', points: 6 }] },
 ] };
 
+test('clip cards stay compact: a small poster beside the text, two strongest reasons and every penalty, the rest folded', async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,CCCC', time: 12 };
+  const ui = await studio(async (path, options) => {
+    if (path.endsWith('/find-clips')) { selectedProject = { ...selectedProject, clip_candidates: clipCandidates }; return clipCandidates; }
+    if (path.endsWith('/clips')) return { ...selectedProject, id: 'clip-child', revision: 1, derived_from: { project_id: 'p1', revision: 7, range: { start: 12, end: 48 } } };
+    return selectedProject;
+  }, longTalk());
+  let tree = ui.draw();
+  const finder = role(tree, 'region', 'Find clips');
+  assert.ok(finder, 'A labelled Find clips area on the Edit step');
+  assert.match(text(finder), /sentence/i, 'Says clips start and end on whole sentences');
+  await button(finder, 'Find clips').props.onClick();
+  const call = ui.calls.find(c => c.path === '/projects/p1/find-clips');
+  assert.deepEqual(call.options, { method: 'POST', body: { platform: 'youtube_shorts' }, timeoutMs: 180000 });
+  assert.ok(invalidations.length >= 1);
+  tree = ui.draw();
+  const list = role(tree, 'list', 'Clip candidates');
+  assert.ok(list, 'Candidates are a list');
+  const items = nodes(list).filter(n => n.props?.role === 'listitem');
+  assert.equal(items.length, 2);
+  const card = items[0];
+  const fold = nodes(card).find(n => n.type === 'details' && /Why this score/.test(text(n)));
+  assert.ok(fold, 'All reasons sit under Why this score');
+  const outside = nodes(card).filter(n => n.type === 'li' && !nodes(fold).includes(n));
+  assert.equal(outside.length, 0, 'No long bullet list outside the fold');
+  const line = nodes(card).find(n => n.props?.['data-clip-reasons']);
+  assert.ok(line, 'One short reasons line');
+  assert.match(text(line), /Opens with a question/);
+  assert.match(text(line), /Starts mid-thought/, 'Penalties stay visible');
+  const grid = nodes(card).find(n => n.type === 'article');
+  assert.equal(grid.props.style.display, 'grid');
+});
+
 test('long videos offer Find clips; candidates show poster, range, score and reasons, and Make clip opens the new project', async () => {
   jobRows = [];
   posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,CCCC', time: 12 };
