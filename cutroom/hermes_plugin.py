@@ -121,7 +121,51 @@ def _handler(function, keys):
     return handle
 
 
+LEGACY_TOOLS_ENV = "CUTROOM_LEGACY_TOOLS"
+LEGACY_TOOLS_SETTING = "legacy_tools"
+SKILL_NAME = "edit-video"
+SKILL_DESCRIPTION = (
+    "Edit a local video from chat: import, transcribe, cut, caption, frame, "
+    "preview, check and hand over for approval in Cutroom Studio."
+)
+_TRUE = {"1", "true", "yes", "on"}
+
+
+def _skill_path():
+    return Path(__file__).resolve().parents[1] / "skills" / SKILL_NAME / "SKILL.md"
+
+
+def legacy_tools_enabled(ctx=None):
+    """The older plan tools are opt-in: env CUTROOM_LEGACY_TOOLS or plugin setting."""
+    if os.environ.get(LEGACY_TOOLS_ENV, "").strip().lower() in _TRUE:
+        return True
+    reader = getattr(ctx, "get_config", None)
+    if not callable(reader):
+        return False
+    try:
+        value = reader(LEGACY_TOOLS_SETTING, False)
+    except Exception:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE
+    return value is True
+
+
+def _register_skill(ctx):
+    register_skill = getattr(ctx, "register_skill", None)
+    if not callable(register_skill):
+        return  # Older hosts have no plugin skills; the tools still work.
+    path = _skill_path()
+    if path.is_file():
+        register_skill(SKILL_NAME, path, description=SKILL_DESCRIPTION)
+
+
+LEGACY = frozenset({"cutroom_draft", "cutroom_review", "cutroom_render"})
+
+
 def register(ctx):
+    _register_skill(ctx)
+    legacy = legacy_tools_enabled(ctx)
     definitions = [
         (
             "cutroom_inspect",
@@ -173,6 +217,8 @@ def register(ctx):
         ),
     ]
     for name, description, function, properties, required in definitions:
+        if name in LEGACY and not legacy:
+            continue
         schema = {
             "name": name,
             "description": description,

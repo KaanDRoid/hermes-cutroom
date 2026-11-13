@@ -5,18 +5,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cutroom.hermes_plugin import register
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = {
-    "cutroom_inspect",
-    "cutroom_draft",
-    "cutroom_review",
-    "cutroom_render",
-    "cutroom_project",
-    "cutroom_job",
-}
+TOOLS = {"cutroom_inspect", "cutroom_project", "cutroom_job"}
+LEGACY = {"cutroom_draft", "cutroom_review", "cutroom_render"}
 
 REGISTER_PROBE = r"""
 import json, os, subprocess, sys
@@ -54,10 +49,15 @@ class Context:
 
 
 class PluginTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"CUTROOM_LEGACY_TOOLS": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_tools_register_with_schemas_and_json_errors(self):
         ctx = Context()
         register(ctx)
-        self.assertEqual(set(ctx.tools), TOOLS)
+        self.assertEqual(set(ctx.tools), TOOLS | LEGACY)
         for name, tool in ctx.tools.items():
             with self.subTest(tool=name):
                 self.assertEqual(tool["toolset"], "cutroom")
@@ -86,8 +86,13 @@ class PluginTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as workspace:
             cwd = Path(workspace) / "cwd"
             cwd.mkdir()
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key != "CUTROOM_LEGACY_TOOLS"
+            }
             env = dict(
-                os.environ,
+                env,
                 PYTHONPATH=str(ROOT),
                 PYTHONDONTWRITEBYTECODE="1",
                 CUTROOM_WORKSPACE=str(Path(workspace) / "studio"),

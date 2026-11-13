@@ -1,5 +1,14 @@
 # Implementation status
 
+## November 13 — chat integration (branch `feat/chat-integration`)
+
+- Bundled the `cutroom:edit-video` skill (`skills/edit-video/SKILL.md`): import, transcribe with progress, propose and apply cuts, platform, captions, framing and music, preview and QA, `MEDIA:` lines, plain QA wording (`warning` means ready with notes), approval only by the person in Cutroom Studio, final, derived versions and platform limits. Older hosts without plugin skills still load the tools.
+- Completed `preview`, `final` and `cover` jobs from `cutroom_job` now carry a bounded `media` summary (path, kind, project, platform, duration, size, QA status from check statuses, approval) and a `display_hint`; `cutroom_project get` summarises the current preview and final. Details: [media summaries](studio-jobs.md#media-summaries-in-tool-results).
+- Chat now gets `cutroom_inspect`, `cutroom_project` and `cutroom_job` by default. The older plan tools (`cutroom_draft`, `cutroom_review`, `cutroom_render`) stay in the CLI and are offered in chat only with the plugin setting `legacy_tools: true` or `CUTROOM_LEGACY_TOOLS=1`. `plugin.yaml` declares the default set and the setting.
+- The `cutroom_project` and `cutroom_job` descriptions now state the step order and that only a person approves, in Cutroom Studio.
+- Local gates without inherited `PYTHONPATH`: **398 Python tests OK** (14 skipped without local models and media), **27/27 Desktop tests**, Ruff check and format clean, `hermes plugins validate` passed (declared tools match registrations). Logs: `artifacts/chat/red.log`, `artifacts/chat/green.log`, `artifacts/chat/validate.log`.
+- Not yet done: a native Desktop check of the card with a live chat session.
+
 ## November 12 — F1 animated captions (branch `feat/f1-animated-captions`)
 
 - Added `caption_style` (`classic`, `highlight`, `pop`, `one_word`), `caption_highlight_color` and `caption_word_y`, with per-word ASS events timed in whole frames and a glyph-measured two-line layout inside the safe zone at no less than the BBC reading size. Studio publishes the burned script as the `captions_ass` artifact, QA adds `caption_timing` and `caption_bounds`, Desktop gets style controls, and YouTube delivery uses SRT/VTT sidecars first. Details: [creator formats F1](creator-formats.md#f1--animated-word-captions).

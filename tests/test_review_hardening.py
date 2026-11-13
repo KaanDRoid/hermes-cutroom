@@ -316,7 +316,10 @@ class LegacyToolConfinementTests(unittest.TestCase):
         self.outside = self.root / "outside"
         self.outside.mkdir()
         self.source = make_video(self.root / "in.mp4")
-        patcher = patch.dict(os.environ, {"CUTROOM_WORKSPACE": str(self.workspace)})
+        patcher = patch.dict(
+            os.environ,
+            {"CUTROOM_WORKSPACE": str(self.workspace), "CUTROOM_LEGACY_TOOLS": "1"},
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         self.tools = {}

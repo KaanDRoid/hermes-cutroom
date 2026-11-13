@@ -94,18 +94,51 @@ hermes plugins validate /absolute/path/hermes-cutroom --install-deps
 
 For local development, link this directory as `<active-HERMES_HOME>/plugins/cutroom`, then explicitly enable `cutroom` using `hermes plugins enable cutroom`. Installing/enabling modifies the active profile; this checkout does not do that automatically.
 
+By default chat gets three tools:
+
 | Tool | Behavior |
 | --- | --- |
 | `cutroom_inspect` | Read media dimensions, duration and audio availability |
+| `cutroom_project` | Create, list, read, update, review and derive platform versions of Studio projects (no approval) |
+| `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs; completed previews, finals and covers carry a `media` summary |
+
+The older plan-file tools are hidden from chat unless you opt in, because they overlap with the Studio tools. They stay available in the `python -m cutroom` CLI. To offer them in chat as well, set the plugin setting `legacy_tools: true` (`plugins.entries.cutroom.settings.legacy_tools` in the Hermes config) or start Hermes with `CUTROOM_LEGACY_TOOLS=1`:
+
+| Tool (opt-in) | Behavior |
+| --- | --- |
 | `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review in a new directory inside the Cutroom workspace |
 | `cutroom_review` | Regenerate review and digest after plan edits; refuses plans outside the workspace and any `review.html` Cutroom did not write |
 | `cutroom_render` | Render an approved plan inside the workspace; reject stale approval and existing output |
-| `cutroom_project` | Create, list, read, update, review and derive platform versions of Studio projects (no approval) |
-| `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs |
+
+The plugin also bundles the skill `cutroom:edit-video` (`skills/edit-video/SKILL.md`), which sets out the chat workflow. Hosts without plugin skills still load the tools.
 
 Agent tools write only inside the Cutroom workspace (`CUTROOM_WORKSPACE`, otherwise Hermes' plugin data directory for `cutroom`); the legacy plan tools use its `plans/` subdirectory. The user-run `python -m cutroom` CLI keeps writing where you point it.
 
 There is deliberately **no approval tool**. Show the draft to the user and let them confirm locally. Receipts are an accidental-stale-render guard, **not** an authenticated approval mechanism: another program with filesystem access can write receipts. Do not describe them as a security sandbox.
+
+## Using Cutroom from chat
+
+Ask for the edit in plain words and give a local path. The `cutroom:edit-video` skill walks through import, transcription, cuts, platform, captions, framing, preview and QA, then hands approval to you in Cutroom Studio. Nothing is uploaded or published.
+
+Example conversation:
+
+> **You:** Turn C:/Videos/talk.mp4 into an Instagram Reel with highlighted captions.
+>
+> **Hermes:** Imported "talk" (4:12). Transcribing, 40 %… done. I suggest cutting 14 pauses over 0.6 s, the repeated intro and the aside about parking (about 1:05 in total), which brings it to 2:41. Apply these cuts?
+>
+> **You:** Yes, but keep the parking joke.
+>
+> **Hermes:** Done: Reels format, highlighted captions, blurred background to fill the vertical frame. Here is the preview:
+>
+> `MEDIA:C:\Users\you\AppData\Local\hermes\plugins\cutroom\jobs\…\outputs\preview.mp4`
+>
+> It is ready with one note: the picture was enlarged from a smaller source, so it may look slightly softer. Anything to change? When you are happy, review and approve it in Cutroom Studio, and I will export the final.
+>
+> **You:** I approved it in Studio. Also make a YouTube Shorts version.
+>
+> **Hermes:** Final exported (`MEDIA:…\final.mp4`). I created a Shorts version; it starts unapproved, so it needs its own preview and approval.
+
+In Hermes Desktop the `MEDIA:` line becomes a Cutroom card with the player, QA status and buttons to open the project in Studio. Other surfaces show their standard player for the same file. Only you can approve, and only in Cutroom Studio or the local REST API; the chat tools cannot approve and the final export is refused if the edit changed after approval.
 
 ## Editing semantics
 

@@ -4,11 +4,16 @@ description: Local video editing with reviewable timelines, background jobs and 
 author: Kaan
 license: MIT
 requires_hermes: ">=0.23.0"
+# Default tool surface. The older plan tools (cutroom_draft, cutroom_review,
+# cutroom_render) stay in the CLI; set legacy_tools: true (or the environment
+# variable CUTROOM_LEGACY_TOOLS=1) to also offer them in chat.
 provides_tools:
   - cutroom_inspect
-  - cutroom_draft
-  - cutroom_review
-  - cutroom_render
   - cutroom_project
   - cutroom_job
 provides_hooks: []
+config_schema:
+  legacy_tools:
+    type: bool
+    default: false
+    description: Also register the older plan tools (cutroom_draft, cutroom_review, cutroom_render) for chat.
