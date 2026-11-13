@@ -190,6 +190,11 @@ const CHECK_TEXT = {
   platform_duration: ['The length fits the platform', 'The video is longer than the platform recommends.'], platform_frame: ['The frame size fits the platform'],
   platform_fps: ['The frame rate fits the platform'], platform_loudness: ['Loudness fits the platform', 'The sound is louder or quieter than the platform expects.'],
   platform_upscale: ['Picture sharpness', 'The picture is enlarged from a smaller source, so it may look slightly softer.'],
+  framing_upscale: ['Picture sharpness', 'The picture is enlarged from a smaller source, so it may look slightly softer.'],
+  framing_frames: ['Every frame of the crop is in place'],
+  framing_smoothness: ['The crop moves smoothly', 'The crop moves faster than it should in places.'],
+  framing_face_safe_zone: ['The face stays in the safe area', 'The face leaves the safe area in some frames, or no face was found to check.'],
+  framing_face_coverage: ['A face is found through most of the video', 'A face was found in less than half of the video, so the crop may stay in the centre.'],
 };
 const STATUS_MARK = { pass: ['✓', 'OK'], warning: ['!', 'Note'], fail: ['✕', 'Problem'], skip: ['–', 'Not checked'] };
 
@@ -233,8 +238,10 @@ function defaultSettings(defaults) {
   const settings = {};
   for (const key of ['whisper_model', 'face_model', 'segmentation_model']) if (typeof defaults[key] === 'string' && defaults[key].trim()) settings[key] = defaults[key].trim();
   if (defaults.platform && defaults.platform !== 'custom' && defaults.platform in PLATFORM_NAMES) settings.platform = defaults.platform;
-  if (defaults.caption_style === 'off') settings.captions = false;
-  else if (CAPTION_STYLES.some(([value]) => value === defaults.caption_style)) { settings.caption_style = defaults.caption_style; settings.captions = true; }
+  // Highlighted word captions are the default for new videos until the person picks another style.
+  const style = defaults.caption_style || 'highlight';
+  if (style === 'off') settings.captions = false;
+  else if (CAPTION_STYLES.some(([value]) => value === style)) { settings.caption_style = style; settings.captions = true; }
   // Long-form YouTube delivers sidecar captions; burn-in stays opt-in.
   if (settings.platform === 'youtube') settings.captions = false;
   return Object.keys(settings).length ? settings : null;
@@ -1046,10 +1053,10 @@ function Transcript({ kit }) {
           onMouseDown: event => { if (!event?.shiftKey) drag.current = { start: index, moved: false }; },
           onMouseEnter: () => { if (drag.current && index !== drag.current.start) { drag.current.moved = true; setAnchor(drag.current.start); setFocus(index); } },
           onClick: event => pick(index, event), onDoubleClick: () => setFixing(word.id),
-          style: { marginRight: '0.3em', padding: '1px 2px', borderRadius: 3, cursor: 'pointer', textDecoration: removed ? 'line-through' : current ? 'underline' : 'none', textDecorationColor: current ? 'var(--ui-accent)' : undefined,
+          style: { padding: '1px 2px', borderRadius: 3, cursor: 'pointer', textDecoration: removed ? 'line-through' : current ? 'underline' : 'none', textDecorationColor: current ? 'var(--ui-accent)' : undefined,
             color: removed ? 'var(--ui-text-tertiary)' : 'inherit', outline: selected ? '1px solid var(--ui-accent)' : 'none', background: selected ? 'color-mix(in srgb, var(--ui-accent) 22%, transparent)' : 'transparent' },
           children: word.text }, `word:${word.id}`);
-      }) }, 'words'),
+      }).flatMap((node, index) => (index ? [' ', node] : [node])) }, 'words'),
   ] });
 }
 
@@ -1212,11 +1219,8 @@ function SoundStep({ kit }) {
   ] });
 }
 
-function CheckList({ checks }) {
-  const list = (Array.isArray(checks) ? checks : []).filter(check => check && typeof check === 'object');
-  const order = { fail: 0, warning: 1, pass: 2, skip: 3 };
-  const sorted = [...list].sort((a, b) => (order[a.status] ?? 2) - (order[b.status] ?? 2));
-  return el('ul', { 'aria-label': 'Checks', style: { listStyle: 'none', margin: 0, padding: 0, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 }, children: sorted.map((check, index) => {
+function CheckRows({ label, items }) {
+  return el('ul', { 'aria-label': label, style: { listStyle: 'none', margin: 0, padding: 0, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 }, children: items.map((check, index) => {
     const [title, note] = CHECK_TEXT[check.name] || [String(check.name || 'Check')];
     const [mark, word] = STATUS_MARK[check.status] || ['?', String(check.status || 'Unknown')];
     const explain = check.status === 'warning' ? note || 'Worth a look before you approve.' : check.status === 'fail' ? note || 'This needs fixing before export.' : '';
@@ -1225,6 +1229,23 @@ function CheckList({ checks }) {
       el('span', { style: { ...stack, gap: 2 }, children: [el('span', { style: { fontSize: 13 }, children: `${title} — ${word}` }), explain ? el('span', { style: muted, children: explain }) : null] }),
     ] }, `check:${check.name}:${index}`);
   }) });
+}
+
+function CheckList({ checks }) {
+  const list = (Array.isArray(checks) ? checks : []).filter(check => check && typeof check === 'object');
+  const order = { fail: 0, warning: 1, pass: 2, skip: 3 };
+  const sorted = [...list].sort((a, b) => (order[a.status] ?? 2) - (order[b.status] ?? 2));
+  const attention = sorted.filter(check => check.status === 'fail' || check.status === 'warning');
+  const rest = sorted.filter(check => check.status !== 'fail' && check.status !== 'warning');
+  const passed = rest.filter(check => check.status === 'pass').length;
+  const summary = `${plural(passed, 'check')} passed${rest.length > passed ? `, ${rest.length - passed} not checked` : ''}`;
+  return el('div', { style: stack, children: [
+    attention.length ? jsx(CheckRows, { label: 'Checks needing a look', items: attention }, 'attention') : null,
+    rest.length ? el('details', { children: [
+      el('summary', { style: { cursor: 'pointer', fontSize: 13 }, children: summary }, 'summary'),
+      el('div', { style: { marginTop: 8 }, children: jsx(CheckRows, { label: 'Checks', items: rest }) }, 'rows'),
+    ] }, 'rest') : null,
+  ] });
 }
 
 function ReviewStep({ kit }) {
@@ -1485,7 +1506,7 @@ function SettingsPage({ ctx }) {
     ] }, 'platform'),
     el('section', { 'aria-labelledby': 'cutroom-default-captions', style: stack, children: [
       el('h3', { id: 'cutroom-default-captions', style: h3s, children: 'Default caption style' }),
-      jsx(RadioCards, { label: 'Default caption style', value: values.caption_style || 'off', min: 120, onChange: value => set('caption_style', value), options: CAPTION_STYLES.map(([value, title, detail]) => ({ key: `default-style:${value}`, value, title, detail })) }),
+      jsx(RadioCards, { label: 'Default caption style', value: values.caption_style || 'highlight', min: 120, onChange: value => set('caption_style', value), options: CAPTION_STYLES.map(([value, title, detail]) => ({ key: `default-style:${value}`, value, title, detail })) }),
     ] }, 'captions'),
   ] });
 }

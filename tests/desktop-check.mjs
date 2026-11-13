@@ -211,7 +211,9 @@ test('home imports a local path, lists recent projects in plain words and scopes
   await button(tree, 'Import video').props.onClick();
   assert.equal(calls[0].path, '/projects');
   assert.deepEqual(calls[0].options.body, { source: 'C:/raw/demo.mp4' });
-  assert.ok(!calls.some(c => c.options?.method === 'PATCH'), 'No saved defaults, no extra patch');
+  const patches = calls.filter(c => c.options?.method === 'PATCH');
+  assert.equal(patches.length, 1, 'Without saved defaults, one patch applies the default caption style');
+  assert.deepEqual(patches[0].options.body.changes, { settings: { caption_style: 'highlight', captions: true } });
   tree = draw(route);
   assert.equal(field(tree, 'project.name').props.value, 'Local demo');
   assert.ok(queries.some(q => q.queryKey.includes('default') && q.queryKey.includes('project') && q.queryKey.includes('p1')));
@@ -265,6 +267,55 @@ test('settings page stores defaults and new Desktop projects get them with one p
   assert.equal(patches.length, 1);
   assert.equal(patches[0].path, '/projects/n1');
   assert.deepEqual(patches[0].options.body, { revision: 1, changes: { settings: { whisper_model: 'C:/models/ggml.bin', platform: 'tiktok', caption_style: 'highlight', captions: true } } });
+});
+
+test('the transcript wraps: words are separated by spaces, not only by margins', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, transcriptProject());
+  const list = role(ui.draw(), 'listbox', 'Transcript');
+  const kids = [list.props.children].flat(Infinity).filter(kid => kid !== null && kid !== undefined && kid !== false);
+  const words = kids.filter(kid => kid?.props?.role === 'option');
+  assert.ok(words.length > 2);
+  for (let index = 1; index < kids.length; index++) {
+    if (kids[index]?.props?.role === 'option' && kids[index - 1]?.props?.role === 'option') assert.fail('Adjacent word spans without a space cannot wrap onto a new line');
+  }
+});
+
+test('a new install defaults to highlighted captions, the agreed default for short videos', async () => {
+  hookStores.clear(); jobRows = []; projectRows = [];
+  const stored = {};
+  const storage = { get: (key, fallback) => key in stored ? stored[key] : fallback, set: (key, value) => { stored[key] = value; } };
+  const pages = [], registrations = [], calls = [];
+  (await load()).default.register({ register: entry => registrations.push(entry), registerSettingsPage: page => pages.push(page), storage,
+    rest: async (path, options) => { calls.push({ path, options }); return path === '/projects' ? { id: 'n2', name: 'New', revision: 1, settings: {}, artifacts: {} } : { id: 'n2', revision: 2 }; } });
+  assert.equal(radio(draw({ render: () => pages[0].render() }), 'Default caption style', 'highlight').props['aria-checked'], true);
+  const route = registrations.find(r => r.area === sdk.ROUTES_AREA);
+  type(field(draw(route), 'source'), 'C:/raw/new.mp4');
+  await button(draw(route), 'Import video').props.onClick();
+  const patch = calls.find(c => c.options?.method === 'PATCH');
+  assert.deepEqual(patch.options.body.changes.settings, { caption_style: 'highlight', captions: true });
+});
+
+test('review: reframing checks read as sentences and passed checks fold away', async () => {
+  const checks = [
+    { name: 'platform_upscale', status: 'warning', detail: {} },
+    { name: 'framing_frames', status: 'pass' }, { name: 'framing_smoothness', status: 'pass' },
+    { name: 'framing_face_safe_zone', status: 'pass' }, { name: 'framing_face_coverage', status: 'pass' },
+    { name: 'decode', status: 'pass' },
+  ];
+  const preview = currentPreview(7, [qaJob(checks)]);
+  jobRows = preview.jobs;
+  const ui = await studio(async () => selectedProject, preview.project);
+  await ui.step('Review');
+  await tick();
+  const tree = ui.draw();
+  const passed = disclosure(tree, '5 checks passed');
+  for (const sentence of ['The crop moves smoothly', 'The face stays in the safe area']) assert.match(text(passed), new RegExp(sentence));
+  assert.doesNotMatch(text(passed), /framing_/, 'No raw check names for known checks; raw names stay under Details');
+  assert.ok(passed, 'Passed checks sit in a disclosure');
+  assert.match(text(passed), /The crop moves smoothly/);
+  const notes = role(tree, 'list', 'Checks needing a look') || nodes(tree).find(n => n.type === 'ul' && n.props['aria-label'] === 'Checks needing a look');
+  assert.ok(notes && /enlarged from a smaller source/.test(text(notes)), 'Notes stay visible');
 });
 
 test('autosave waits for a pause, sends one revision-checked patch and shows the save state', async () => {
