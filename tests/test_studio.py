@@ -88,6 +88,14 @@ class StudioTests(unittest.TestCase):
             self.assertEqual(reopened["revision"], 1)
             self.assertEqual(reopened["segments"], [{"start": 0.0, "end": 4.0}])
             self.assertEqual(studio.list()[0]["id"], project["id"])
+            # The list carries the save time for display; it is not project data.
+            listed = studio.list()[0]
+            self.assertIsInstance(listed["modified_at"], float)
+            self.assertNotIn("modified_at", reopened)
+            self.assertEqual(
+                studio.review(project["id"])["digest"],
+                studio.review(project["id"])["digest"],
+            )
             self.assertEqual(reopened["source_sha256"], project["source_sha256"])
             with self.assertRaises(ValueError):
                 studio.get("../escape")

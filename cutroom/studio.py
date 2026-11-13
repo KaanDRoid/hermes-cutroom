@@ -1523,14 +1523,21 @@ class Studio:
         return path
 
     def list(self):
+        """Projects plus ``modified_at``, the last save time for display only."""
         directory = self.root / "projects"
         if not directory.is_dir():
             return []
-        return [
-            self.get(path.name)
-            for path in sorted(directory.iterdir())
-            if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)
-        ]
+        projects = []
+        for path in sorted(directory.iterdir()):
+            if not (path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)):
+                continue
+            project = self.get(path.name)
+            try:
+                modified = (path / "studio.json").stat().st_mtime
+            except OSError:
+                modified = None
+            projects.append({**project, "modified_at": modified})
+        return projects
 
 
 _STUDIOS = {}
