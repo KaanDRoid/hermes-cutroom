@@ -258,7 +258,31 @@ Each audio range now:
 - lasts exactly as many samples as its frames, counted cumulatively so rounding cannot add up,
 - and is joined separately from the video.
 
-The plain and mixed paths share the same audio ranges. Variable-frame-rate sources keep the previous path.
+The plain and mixed paths share the same audio ranges.
+
+### Frame identity, lost frames and late sound (pre-release review)
+
+An independent review before release, and the work on its findings, found five timing defects. Each fix has a test that failed first (`tests/test_av_sync.py`, `tests/test_frame_timeline.py`, `tests/test_reframe.py`).
+
+- **Kept frames are counted, not rebuilt from times.** `_frame_aligned` returns the first source frame and the frame count of every range. The video trims (`trim=start_frame/end_frame`), the sound ranges, the pacing plan and the crop planner all use that list. Before, each step rebuilt frame numbers from six-decimal time edges, and video and sound used different origins when a stream started before zero. On FFmpeg 7.1 a WebM whose sound starts 7 ms before the picture lost those 7 ms. Measured with one decoder (FFmpeg 9.0.2) on the review's fixture: source −6.937 ms, 7.1 render −6.934 ms, 9.0.2 render −6.938 ms.
+- **Transitions on FFmpeg 7.1.** `setpts=N` left the frame rate unset (`1/0`), which `xfade` refuses on 7.1. Every pacing branch now ends with `fps=<rate>`.
+- **Lost frames.** A header can report a constant rate while frames were dropped during recording. Frame-numbered trims then shift everything after the gap: a 10-frame gap moved the picture 333 ms against the sound. Cutroom now reads the video packet timestamps (no decoding; 0.3–0.5 s for the 17-minute talk) and uses frame-numbered trims only when every frame sits on the nominal grid.
+- **Time-placed video.** All other sources (lost frames, irregular phone timing) keep each frame at its source time:
+  - A range starts at its first real frame and lasts a whole number of output frames, following the running total. The sound starts at that same frame.
+  - The picture is put on the output grid with `fps` after the crops, so the crop path still counts the kept frames. It holds exactly as many frames as the sound lasts.
+  - The output rate is measured from the frames (mean spacing without gaps, snapped to a standard rate within 2 %). Headers of such files often report 120/1, 90000/1 or nothing.
+  - Before, these sources went through a joint `concat` that padded the sound at every cut: 7.4 ms behind after one cut, 30 ms after 12, growing with each cut. Now the error is at most 0.5 ms with lost frames (12 cuts) and under half an output frame for irregular frame times, and it does not grow.
+  - Punch-ins, push-ins and transitions still need evenly spaced frames and are refused otherwise.
+- **Sound that starts after the cut.** Each sound range was rebased on its first decoded sample. When the sound starts after the picture (50 ms in the test), or a decoder drops codec priming (Opus on 7.1), the first range played early by that amount (43–57 ms). Sound is now placed by the requested start, and the gap before the first sample becomes silence (`aresample=<rate>:async=1:first_pts=0`). The rate is pinned: without it, `loudnorm` pulled the segments to 192 kHz and the exact sample counts cut three quarters of the sound.
+- **Crop QA.** When a render repeats frames across lost frames, `framing_frames` compares the decoded count with the `output_frames` the render reports.
+
+Verified: the full suite of 539 tests (14 skipped) passes on FFmpeg 7.1.1 and on 9.0.2. The 7.1.1 binaries are the Gyan essentials build used by the review; the publisher's checksum could not be found, and the review records the local SHA-256. Real footage (Sandra, 1,318 frames; the 17-minute talk, 31,863 frames; the portrait clip) is evenly spaced and takes the frame-numbered path on both versions.
+
+Limits:
+
+- Time-placed video evaluates one `select`/`setpts` expression per frame across all cuts. Hundreds of cuts on a long, unevenly timed source will render more slowly.
+- Irregular frame times stay within half an output frame. That is the limit of any constant-rate output.
+- Only the Gyan 7.1.1 essentials build on Windows was tested; other 7.x builds and Linux were not.
 
 ### How it was verified
 

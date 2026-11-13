@@ -571,6 +571,26 @@ class QualityTests(unittest.TestCase):
         report["face_frames"] = report["face_frames"][:-3]
         self.assertEqual(self.checks(report)["framing_frames"]["status"], "fail")
 
+    def test_output_frames_are_expected_in_the_decoded_count(self):
+        # Time-placed video repeats a frame across lost source frames; the crop
+        # path covers the kept frames and the repeats copy cropped frames.
+        report = json.loads(json.dumps(self.result["framing"]))
+        report["frames"] -= 4
+        for axis in ("x", "y"):
+            report[axis] = report[axis][:-4]
+        report["face_frames"] = [
+            f for f in report["face_frames"] if f[0] < report["frames"]
+        ]
+        report["resets"] = [r for r in report["resets"] if r < report["frames"]]
+        report["output_frames"] = report["frames"] + 4
+        self.assertEqual(self.checks(report)["framing_frames"]["status"], "pass")
+        report["output_frames"] = report["frames"] + 3
+        self.assertEqual(self.checks(report)["framing_frames"]["status"], "fail")
+        for bad in (0, -1, 1.5, True, reframe.MAX_FRAMES + 1):
+            report["output_frames"] = bad
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                reframe.validate_report(report)
+
     def test_face_track_reports_without_faces_warn_instead_of_skipping(self):
         report = json.loads(json.dumps(self.result["framing"]))
         report["face_frames"] = []

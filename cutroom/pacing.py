@@ -375,13 +375,9 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
     numerator, _, denominator = rate.partition("/")
     num, den = int(numerator), int(denominator or 1)
     fps = Fraction(num, den)
-    origin = Fraction(str(float(origin or 0)))
     ranges = report["ranges"]
     by_frame = {t["frame"]: t for t in report["transitions"]}
     lines, lengths, pieces = [], [], [0, 0]
-
-    def edge(frame):
-        return round(max(0.0, float(origin + (frame - Fraction(1, 2)) / fps)), 6)
 
     for k, item in enumerate(ranges):
         start, count = item["start_frame"], item["frames"]
@@ -393,7 +389,10 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
         )
         first = item["source_first"] - hb
         stop = item["source_first"] + count + ha
-        chain = [f"trim=start={edge(first)}:end={edge(stop)}", "setpts=PTS-STARTPTS"]
+        chain = [
+            f"trim=start_frame={first}:end_frame={stop}",
+            "setpts=PTS-STARTPTS",
+        ]
         chain += list(prefilters)
         zoomed = max(item["zoom"]) > 1.0
         box = item["window"]
@@ -424,7 +423,7 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
             chain.append(_perspective(item, report["window"], hb))
         if crop is not None or zoomed:
             chain.append(f"scale={out_size[0]}:{out_size[1]}")
-        chain += [f"setsar={sar}", f"settb={den}/{num}", "setpts=N"]
+        chain += [f"setsar={sar}", f"settb={den}/{num}", "setpts=N", f"fps={rate}"]
         lines.append("[0:v:0]" + ",".join(chain) + f"[p{k}]")
         lengths.append(hb + count + ha)
     if max(pieces) > reframe.MAX_PIECES:
@@ -456,7 +455,8 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
                 total += lengths[k] - step["frames"]
             else:
                 lines.append(
-                    f"{label}[p{k}]concat=n=2:v=1:a=0,settb={den}/{num},setpts=N{target}"
+                    f"{label}[p{k}]concat=n=2:v=1:a=0,settb={den}/{num},"
+                    f"setpts=N,fps={rate}{target}"
                 )
                 total += lengths[k]
             label = target

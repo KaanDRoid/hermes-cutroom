@@ -927,17 +927,73 @@ def _timeline(info):
     return base, max(0.0, (base if video is None else video) - base)
 
 
-def _frame_aligned(ranges, rate, source_duration, start_time=None):
-    """Snap kept ranges to whole source frames without cumulative drift.
+def _video_frame_times(source, base, timeout=300):
+    """Sorted video frame times on the filter timeline, or None if unreadable.
 
-    Each trimmed range otherwise rounds to whole frames independently and the
-    concat filter pads audio to match, so many cuts lengthen the program. Frame
-    counts follow the rounded running total, keeping the output within half a
-    frame of the requested duration. Boundaries sit halfway between frame
-    timestamps so small container jitter cannot change which frames are kept.
-    Ranges shorter than one frame at their position are dropped. Times are in
-    FFmpeg's filter timeline (see `_timeline`); `start_time` is the video's
-    offset into it, not the container's absolute start.
+    Packet timestamps are read without decoding. Packets the demuxer marks as
+    discarded (edit lists) never reach the filters and are left out.
+    """
+    try:
+        result = _run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts,flags:stream=time_base",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=timeout,
+        )
+        data = json.loads(result.stdout)
+        unit = Fraction(data["streams"][0]["time_base"])
+        origin = Fraction(str(base))
+        times = sorted(
+            int(packet["pts"]) * unit - origin
+            for packet in data.get("packets", [])
+            if str(packet.get("pts", "N/A")).lstrip("-").isdigit()
+            and "D" not in str(packet.get("flags", ""))
+        )
+    except (
+        subprocess.SubprocessError,
+        OSError,
+        ValueError,
+        KeyError,
+        IndexError,
+        ZeroDivisionError,
+    ):
+        return None
+    return times or None
+
+
+def _evenly_spaced(times, rate):
+    """True when every frame sits on the nominal grid: no gaps, no repeats.
+
+    Frame-indexed trims assume frame n is shown at origin + n / rate. A header
+    can report a constant rate while frames were lost during recording (the
+    timestamps then jump); such sources use time-based placement instead.
+    """
+    if not times:
+        return False
+    fps = Fraction(rate)
+    first = times[0]
+    return all(round((time - first) * fps) == index for index, time in enumerate(times))
+
+
+def _frame_aligned(ranges, rate, source_duration, start_time=None):
+    """Return canonical (first source frame, kept frame count) per range.
+
+    Counts follow the rounded running duration, avoiding cumulative per-cut
+    drift. Dropped sub-frame ranges still contribute to that budget. The video
+    origin is in FFmpeg's normalized filter timeline, not absolute stream time.
+    Time edges may be derived from this plan, but must never be used to recover
+    frame identities: their six-decimal serialization is lossy.
     """
     numerator, _, denominator = rate.partition("/")
     fps = Fraction(int(numerator), int(denominator or 1))
@@ -956,14 +1012,22 @@ def _frame_aligned(ranges, rate, source_duration, start_time=None):
             continue
         emitted += stop - first
 
-        def edge(frame):
-            return max(0.0, float(origin + (frame - Fraction(1, 2)) / fps))
-
-        aligned.append((round(edge(first), 6), round(edge(stop), 6)))
+        aligned.append((first, stop - first))
     return aligned
 
 
-def _audio_ranges(ranges, rate, start_time=None, sample_rate=48000):
+def _frame_edges(frames, rate, origin):
+    """Half-frame time edges for time-based consumers, never a frame identity."""
+    fps = Fraction(rate)
+    origin = Fraction(str(origin))
+
+    def edge(frame):
+        return round(max(0.0, float(origin + (frame - Fraction(1, 2)) / fps)), 6)
+
+    return [(edge(first), edge(first + count)) for first, count in frames]
+
+
+def _audio_ranges(frames, rate, start_time=None, sample_rate=48000):
     """Audio intervals that start at each range's first kept video frame.
 
     Frame-aligned video ranges begin half a frame before their first frame, and
@@ -980,10 +1044,9 @@ def _audio_ranges(ranges, rate, start_time=None, sample_rate=48000):
     except ValueError:
         origin = Fraction(0)
     result, total, emitted = [], Fraction(0), 0
-    for start, end in ranges:
-        first = max(0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2)))
-        stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
-        total += (stop - first) / fps
+    for first, count in frames:
+        stop = first + count
+        total += count / fps
         samples = round(total * sample_rate) - emitted
         emitted += samples
         result.append(
@@ -994,6 +1057,125 @@ def _audio_ranges(ranges, rate, start_time=None, sample_rate=48000):
             )
         )
     return result
+
+
+def _timed_ranges(ranges, rate, times, sample_rate=48000):
+    """Frame-anchored ranges for video whose frames are not evenly spaced.
+
+    Frames are not re-numbered; each keeps its source time. A range starts at
+    its first real frame and lasts a whole number of output frames, following
+    the rounded running duration as on the constant-rate path, so cuts cannot
+    accumulate drift. The sound starts at that same frame and has exactly the
+    range's length. Frames on their own grid (lost frames leave gaps but do not
+    move the rest) therefore land exactly on output frames; truly irregular
+    frames land within half a frame. Returns (start, end, sound start, sound
+    end, samples, program offset, first frame) for the ranges that keep a frame.
+    Without frame times or a usable rate, ranges start at the cut instead.
+    """
+    import bisect
+
+    fps = Fraction(rate) if rate else None
+    result, total, frames_out, samples_out = [], Fraction(0), 0, 0
+    for start, end in ranges:
+        low, high = Fraction(str(start)), Fraction(str(end))
+        total += high - low
+        if fps is None or not times:
+            first, count = low, None
+            length = high - low
+        else:
+            index = bisect.bisect_left(times, low)
+            first = times[index] if index < len(times) else None
+            count = round(total * fps) - frames_out
+            if first is None or first >= high or count <= 0:
+                continue  # No frame to show; its time still counts in the budget.
+            length = count / fps
+        offset = (
+            Fraction(frames_out) / fps
+            if count is not None
+            else Fraction(samples_out, sample_rate)
+        )
+        if count is not None:
+            frames_out += count
+            stop = Fraction(frames_out) / fps
+        else:
+            stop = total
+        samples = round(stop * sample_rate) - samples_out
+        samples_out += samples
+        result.append(
+            (
+                start,
+                end,
+                round(float(first), 6),
+                round(float(first + length), 6),
+                samples,
+                offset,
+                first,
+            )
+        )
+    return result
+
+
+STANDARD_RATES = tuple(
+    Fraction(value)
+    for value in (
+        "24000/1001",
+        "24",
+        "25",
+        "30000/1001",
+        "30",
+        "48",
+        "50",
+        "60000/1001",
+        "60",
+        "100",
+        "120000/1001",
+        "120",
+    )
+)
+
+
+def _timed_rate(video, times=None):
+    """Output rate for time-placed frames.
+
+    Measured from the real frames and snapped to a standard rate within 2 %;
+    headers of unevenly timed files often report a timebase guess (120/1,
+    90000/1) or nothing. The median spacing finds lost frames (gaps over 1.5
+    of it); the rate is the mean over all other spacings, so millisecond
+    timestamps (33, 34, 33 ms at 29.97 fps) do not bias it. Without frame times
+    the header is used when it is plausible.
+    """
+    if times and len(times) >= 3:
+        gaps = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+        regular = [gap for gap in gaps if gap <= gaps[len(gaps) // 2] * Fraction(3, 2)]
+        if regular:
+            measured = len(regular) / sum(regular)
+            nearest = min(STANDARD_RATES, key=lambda rate: abs(rate - measured) / rate)
+            if abs(nearest - measured) / nearest <= Fraction(2, 100):
+                return f"{nearest.numerator}/{nearest.denominator}"
+            if 1 <= measured <= 120:
+                rate = measured.limit_denominator(1001)
+                return f"{rate.numerator}/{rate.denominator}"
+    for key in ("r_frame_rate", "avg_frame_rate"):
+        try:
+            rate = Fraction(str(video.get(key) or "0/0"))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if 1 <= rate <= 120:
+            return f"{rate.numerator}/{rate.denominator}"
+    return None
+
+
+def _timed_video(ranges):
+    """One select/setpts chain that keeps each frame at its source-time offset."""
+    keep, place = [], []
+    for start, end, _, _, _, offset, first in ranges:
+        # select names the frame time t; setpts names it T. The window is the
+        # cut itself, as in the crop planner, so joined frame numbers agree.
+        inside = f"gte({{t}},{start:.6f})*lt({{t}},{end:.6f})"
+        keep.append(inside.format(t="t"))
+        shift = float(offset - first)
+        place.append(f"{inside.format(t='T')}*(T{shift:+.9f})")
+    return f"select='{'+'.join(keep)}',setpts='({'+'.join(place)})/TB'"
 
 
 def _sar_text(video):
@@ -1020,20 +1202,26 @@ def _pacing_zone(settings):
     return {side: margin for side in ("left", "right", "top", "bottom")}
 
 
-def _pacing_planner(info, ranges, rate, settings):
+def _pacing_planner(info, ranges, rate, settings, frames=None):
     """Pacing plan factory; the frame size and crop path are known only later.
 
-    Kept frames per range follow the same frame-aligned edges as the trims.
+    Canonical source indices/counts are shared with the video trims and audio.
     Variable-rate sources (max_pause only) are planned at their nominal rate.
     """
     origin = Fraction(str(_timeline(info)[1]))
     fps = Fraction(rate) if rate else Fraction(str(_frame_rate(info) or 30))
     firsts, counts = [], []
-    for start, end in ranges:
-        first = max(0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2)))
-        stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
-        firsts.append(first)
-        counts.append(max(1, stop - first))
+    if frames is not None:
+        firsts = [first for first, _ in frames]
+        counts = [count for _, count in frames]
+    else:
+        for start, end in ranges:
+            first = max(
+                0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2))
+            )
+            stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
+            firsts.append(first)
+            counts.append(max(1, stop - first))
     last_frame = int((Fraction(str(info["duration"])) - origin) * fps)
     video = next(
         (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
@@ -1160,6 +1348,11 @@ def export_video(
     constant_rate = bool(
         rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0"
     )
+    frame_times = _video_frame_times(
+        source, _timeline(info)[0], timeout=settings["timeout"]
+    )
+    if constant_rate:
+        constant_rate = _evenly_spaced(frame_times, rate)
     pacing_settings = settings["pacing"]
     paced = pacing.video_active(pacing_settings)
     if paced and not constant_rate:
@@ -1167,12 +1360,15 @@ def export_video(
             "Punch-ins, push-ins and transitions require constant-rate media; "
             "conform variable-rate sources first"
         )
+    frames = None
+    origin = _timeline(info)[1]
     if constant_rate:
-        ranges = _frame_aligned(ranges, rate, info["duration"], _timeline(info)[1])
+        frames = _frame_aligned(ranges, rate, info["duration"], origin)
+        ranges = _frame_edges(frames, rate, origin)
         if not ranges:
             raise ValueError("Segments are shorter than one video frame")
     pacing_plan = (
-        _pacing_planner(info, ranges, rate if constant_rate else None, settings)
+        _pacing_planner(info, ranges, rate if constant_rate else None, settings, frames)
         if pacing_settings is not None
         else None
     )
@@ -1187,25 +1383,46 @@ def export_video(
         sample_rate = int(audio_stream.get("sample_rate") or 48000)
     except ValueError:
         sample_rate = 48000
+    timed = timed_rate = None
+    if not constant_rate:
+        timed_rate = _timed_rate(video_stream, frame_times)
+        timed = _timed_ranges(ranges, timed_rate, frame_times, sample_rate)
+        if not timed:
+            raise ValueError("Segments are shorter than one video frame")
+        # Only cuts that keep a frame are rendered, as on the constant-rate path.
+        ranges = [(item[0], item[1]) for item in timed]
     sound_ranges = (
-        _audio_ranges(ranges, rate, video_stream.get("start_time"), sample_rate)
+        _audio_ranges(frames, rate, origin, sample_rate)
         if constant_rate
-        else [(start, end, None) for start, end in ranges]
+        else [(item[2], item[3], item[4]) for item in timed]
     )
-    if constant_rate:
-        # The kept frames, not the half-frame edges (the first edge is clamped at 0).
-        program = sum(samples for _, _, samples in sound_ranges) / sample_rate
+    # The kept frames (or exact source times), not the half-frame edges.
+    program = sum(samples for _, _, samples in sound_ranges) / sample_rate
     for index, ((start, end), (sound_start, sound_end, samples)) in enumerate(
         zip(ranges, sound_ranges)
     ):
         if not paced:
-            graph.append(
-                f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
-            )
-            labels.append(f"[v{index}]")
+            if frames is not None:
+                first, count = frames[index]
+                timebase = 1 / Fraction(rate)
+                trim_video = (
+                    f"trim=start_frame={first}:end_frame={first + count},"
+                    f"settb={timebase.numerator}/{timebase.denominator},setpts=N"
+                )
+                graph.append(f"[0:v:0]{trim_video}[v{index}]")
+                labels.append(f"[v{index}]")
         if info["has_audio"]:
+            # Place sound by the requested start, not by its first sample: when
+            # the sound starts after the cut (it begins after the picture, or a
+            # decoder drops codec priming), rebasing on the first sample would
+            # pull it early. The gap before that sample becomes silence. The
+            # rate is pinned: unpinned, aresample takes the rate a later filter
+            # asks for (loudnorm works at 192 kHz) and the sample counts below
+            # would cut a quarter of the sound.
             trim = (
-                f"[0:a:0]atrim=start={sound_start}:end={sound_end},asetpts=PTS-STARTPTS"
+                f"[0:a:0]atrim=start={sound_start}:end={sound_end},"
+                f"asetpts=PTS-{sound_start}/TB,"
+                f"aresample={sample_rate}:async=1:first_pts=0"
             )
             if samples is not None:
                 # Exact length; a joint concat would pad audio to the video's
@@ -1217,8 +1434,6 @@ def export_video(
                     )
             trim += f"[a{index}]"
             graph.append(trim)
-            if not constant_rate:
-                labels.append(f"[a{index}]")
             audio_graph.append(trim)
             audio_labels.append(f"[a{index}]")
     if constant_rate:
@@ -1229,11 +1444,11 @@ def export_video(
                 "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
             )
     else:
-        graph.append(
-            "".join(labels)
-            + f"concat=n={len(ranges)}:v=1:a={int(info['has_audio'])}[joined]"
-            + ("[audio]" if info["has_audio"] else "")
-        )
+        graph.append(f"[0:v:0]{_timed_video(timed)}[joined]")
+        if info["has_audio"]:
+            graph.append(
+                "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
+            )
     if info["has_audio"]:
         audio_graph.append(
             "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
@@ -1290,7 +1505,7 @@ def export_video(
             filters = ["null"]
         elif mode in {"center_crop", "face_track"}:
             framing_report = reframe.prepare_path(
-                source, info, ranges, settings, width, height
+                source, info, ranges, settings, width, height, frame_ranges=frames
             )
             crop_w, crop_h = framing_report["crop"]
             display_w, display_h = framing_report["source"]
@@ -1523,6 +1738,22 @@ def export_video(
             graph.append(None)
         elif has_audio:
             normalization_method = "disabled"
+        if timed is not None and timed_rate:
+            # Frames carry their source times; place each on the nearest slot
+            # of the output grid here, after crops that count joined frames.
+            # The encoder would otherwise round and push colliding frames. The
+            # picture then holds exactly as many frames as the sound lasts.
+            output_rate = timed_rate
+            output_frames = round(
+                Fraction(sum(item[4] for item in timed), sample_rate)
+                * Fraction(output_rate)
+            )
+            filters.append(
+                f"fps={output_rate},tpad=stop_mode=clone:stop=2,"
+                f"trim=end_frame={output_frames}"
+            )
+            if framing_report is not None:
+                framing_report["output_frames"] = output_frames
         graph.append(
             ("[framed]" if mode == "blur_fill" else "[joined]")
             + ",".join(filters)

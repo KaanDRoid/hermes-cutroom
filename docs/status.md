@@ -1,5 +1,14 @@
 # Implementation status
 
+## November 13 — Timing fixes from the pre-release review (branch `feat/review-timeline`)
+
+- FFmpeg 7.1: crossfade and dip transitions failed (`xfade` refused an unset frame rate), and a WebM whose sound starts before the picture lost 7 ms of sync. Both are fixed; the full suite passes on 7.1.1 and 9.0.2 (539 tests, 14 skipped).
+- Kept frames are now one list of source frame numbers shared by the video trims, sound, pacing and crops, instead of being rebuilt from rounded times.
+- Sources whose header claims a constant rate but which lost frames during recording were shifted after the gap (333 ms for 10 frames). They are now detected from packet timestamps and placed by time.
+- Time-placed sources (lost frames, irregular timing) drifted with every cut (30 ms after 12 cuts). They now start each range at its first real frame with a whole number of output frames: at most 0.5 ms with lost frames, under half a frame for irregular timing, without growth.
+- Sound that starts after the cut (late sound track, dropped codec priming) played early in the first range (43–57 ms). It is now placed by the requested start, with silence before its first sample.
+- Details and limits: [creator formats](creator-formats.md#frame-identity-lost-frames-and-late-sound-pre-release-review).
+
 ## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
 
 - Added deterministic local discovery of whole-sentence 20–90 s clips, scored
