@@ -33,6 +33,8 @@ const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 const pct = value => Math.round(clamp01(value) * 100);
 const percent = value => `${+(value * 100).toFixed(2)}%`;
 const round3 = value => Math.round(value * 1000) / 1000;
+// 180 -> '3 min', 90 -> '1 min 30 s', 45 -> '45 s'.
+const spokenLength = seconds => { const m = Math.floor(seconds / 60), s = Math.round(seconds % 60); return m ? `${m} min${s ? ` ${s} s` : ''}` : `${s} s`; };
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
 const newest = list => [...list].sort((a, b) => (b.completed_at || b.created_at || 0) - (a.completed_at || a.created_at || 0));
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -1235,7 +1237,9 @@ function StyleStep({ kit }) {
     if (!fixed) return 'Custom: the frame follows the shape below. No platform limits are checked.';
     const final = selected.frame.final[resolution] || [];
     const limit = selected.max_duration_s?.value;
-    return `${selected.label}: video size ${final.join(' × ')} · ${limit ? `up to ${limit} s` : 'no length limit'} · text kept clear of the app\u2019s buttons.`;
+    const best = selected.recommended_max_s?.value;
+    const length = limit ? `up to ${spokenLength(limit)}${best && best < limit ? `, best under ${spokenLength(best)}` : ''}` : 'no length limit';
+    return `${selected.label}: video size ${final.join(' × ')} · ${length} · text kept clear of the app\u2019s buttons.`;
   };
   const captionValue = settings.captions === true ? settings.caption_style || 'classic' : 'off';
   const colour = HEX.test(settings.caption_highlight_color || '') ? settings.caption_highlight_color : null;

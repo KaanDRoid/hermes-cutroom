@@ -28,7 +28,7 @@ const zone = (top, bottom, left, right) => ({ top, bottom, left, right, source: 
 const frames = portrait => ({ preview: portrait ? [1080, 1920] : [1920, 1080], final: portrait ? { 1080: [1080, 1920], 2160: [2160, 3840] } : { 1080: [1920, 1080], 2160: [3840, 2160] }, default_final: '1080' });
 const platformRows = [
   { name: 'custom', label: 'Custom', short_label: 'Custom', orientation: null, frame: null, safe_zone: null },
-  { name: 'instagram_reels', label: 'Instagram Reels', short_label: 'Reels', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.14, 0.35, 0.06, 0.06), max_duration_s: { value: 1200 } },
+  { name: 'instagram_reels', label: 'Instagram Reels', short_label: 'Reels', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.14, 0.35, 0.06, 0.06), max_duration_s: { value: 1200 }, recommended_max_s: { value: 180 } },
   { name: 'youtube_shorts', label: 'YouTube Shorts', short_label: 'Shorts', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.15, 0.35, 0.05, 0.18), max_duration_s: { value: 180 } },
   { name: 'tiktok', label: 'TikTok', short_label: 'TikTok', orientation: 'portrait', frame: frames(true), safe_zone: zone(0.13, 0.35, 0.12, 0.28), max_duration_s: { value: 3600 } },
   { name: 'youtube', label: 'YouTube', short_label: 'YouTube', orientation: 'landscape', frame: frames(false), safe_zone: zone(0.05, 0.05, 0.05, 0.05), max_duration_s: { value: null } },
@@ -269,6 +269,15 @@ test('settings page stores defaults and new Desktop projects get them with one p
   assert.equal(patches.length, 1);
   assert.equal(patches[0].path, '/projects/n1');
   assert.deepEqual(patches[0].options.body, { revision: 1, changes: { settings: { whisper_model: 'C:/models/ggml.bin', platform: 'tiktok', caption_style: 'highlight', captions: true } } });
+});
+
+test('platform length limits read in minutes, with the recommended length', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'instagram_reels', aspect: 'portrait', brand: {} } });
+  await ui.step('Style');
+  const all = text(ui.draw());
+  assert.match(all, /up to 20 min, best under 3 min/);
+  assert.doesNotMatch(all, /1200 s/);
 });
 
 test('the transcript wraps: words are separated by spaces, not only by margins', async () => {
@@ -906,7 +915,7 @@ test('chooses a platform card and final size, with keyboard arrows in the radio 
   radio(tree, 'Platform', 'youtube_shorts').props.onClick();
   tree = ui.draw();
   assert.match(text(tree), /1080 × 1920/);
-  assert.match(text(tree), /180 s/);
+  assert.match(text(tree), /up to 3 min/);
   radio(tree, 'Final size', '2160').props.onClick();
   await ui.flush();
   const saved = ui.patches().at(-1).options.body.changes.settings;
