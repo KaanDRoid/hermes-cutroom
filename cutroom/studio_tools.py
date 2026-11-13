@@ -51,6 +51,10 @@ PROJECT_ACTIONS = {
         {"project_id", "changes", "revision"},
     ),
     "review": ({"project_id"}, {"project_id"}),
+    "post_text": ({"project_id", "post"}, {"project_id"}),
+    "package": ({"project_id", "post", "cover_time"}, {"project_id"}),
+    "packages": ({"project_id"}, {"project_id"}),
+    "verify_package": ({"project_id", "package"}, {"project_id", "package"}),
     "find_clips": (
         {"project_id", "min_s", "max_s", "count", "platform"},
         {"project_id"},
@@ -340,6 +344,17 @@ def project_handler(args, **kwargs):
 
     def perform():
         action = _arguments(args, PROJECT_ACTIONS)
+        if "post" in args:
+            from .packages import normalize_post
+
+            normalize_post(args["post"])
+        if action == "verify_package":
+            from .packages import PACKAGE_NAME
+
+            if not isinstance(args["package"], str) or not PACKAGE_NAME.fullmatch(
+                args["package"]
+            ):
+                raise ValueError("Invalid package folder name")
         if action == "find_clips":
             from .clips import _bounds
 
@@ -390,7 +405,14 @@ def project_handler(args, **kwargs):
                 raise ValueError("revision must be a positive integer")
         values = {key: value for key, value in args.items() if key != "action"}
         studio = get_studio()
-        result = getattr(studio, action)(**values)
+        if action == "verify_package":
+            result = studio.verify_package(
+                studio.package_path(args["project_id"], args["package"])
+            )
+        elif action == "post_text" and "post" in args:
+            result = studio.set_post(args["project_id"], args["post"])
+        else:
+            result = getattr(studio, action)(**values)
         if action == "list":
             return [_compact(project) for project in result]
         if action == "get" and isinstance(result, dict):
@@ -549,6 +571,10 @@ def definitions():
                             },
                         },
                     },
+                    "post": {
+                        "type": "object",
+                        "description": "Upload text only: title, caption, hashtags (array). Not part of video approval.",
+                    },
                     "caption_style": {
                         "type": "string",
                         "enum": ["classic", "highlight", "pop", "one_word"],
@@ -657,6 +683,7 @@ def definitions():
             "create_clip(project_id, platform, candidate_id? or start/end?, name?) creates "
             "an unapproved derived project limited to that source range; typed bounds snap "
             "to sentence boundaries. Ask the person which clip to use. "
+            + " post_text(project_id, post?) reads or saves upload copy; package(project_id, post?, cover_time?) makes local delivery files from a current approved final; packages(project_id) lists them; verify_package(project_id, package) checks checksums. Nothing is posted; never claim it was posted. "
             + APPROVAL_NOTICE
         ),
         "parameters": {
@@ -675,9 +702,30 @@ def definitions():
                         "derive",
                         "find_clips",
                         "create_clip",
+                        "post_text",
+                        "package",
+                        "packages",
+                        "verify_package",
                     ],
                     "description": "Operation to perform",
                 },
+                "post": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string", "maxLength": 1000},
+                        "caption": {"type": "string", "maxLength": 20000},
+                        "hashtags": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "items": {"type": "string", "maxLength": 100},
+                        },
+                    },
+                },
+                "cover_time": {"type": "number", "minimum": 0},
+                "package": _string(
+                    "Package folder name (verify_package); never an arbitrary path"
+                ),
                 "source": _string("Absolute local video path (create)"),
                 "name": _string("Optional project name (create, derive)"),
                 "project_id": _string("Project id (get, update, review, derive)"),

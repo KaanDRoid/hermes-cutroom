@@ -473,3 +473,45 @@ def artifact_chunk(
         "mime": mime,
         "version": current,
     }
+
+
+class PostText(RequestModel):
+    title: str = Field(default="", max_length=1000)
+    caption: str = Field(default="", max_length=20000)
+    hashtags: list[str] = Field(default_factory=list, max_length=100)
+
+
+class MakePackage(RequestModel):
+    post: PostText | None = None
+    cover_time: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+@router.get("/projects/{project_id}/post")
+def post_text(project_id: ProjectId, studio=Depends(get_studio)):
+    return invoke(studio.post_text, project_id)
+
+
+@router.put("/projects/{project_id}/post")
+def set_post(project_id: ProjectId, body: PostText, studio=Depends(get_studio)):
+    return invoke(studio.set_post, project_id, body.model_dump())
+
+
+@router.get("/projects/{project_id}/packages")
+def list_packages(project_id: ProjectId, studio=Depends(get_studio)):
+    return invoke(studio.packages, project_id)
+
+
+@router.post("/projects/{project_id}/packages", status_code=201)
+def make_package(project_id: ProjectId, body: MakePackage, studio=Depends(get_studio)):
+    return invoke(
+        studio.package,
+        project_id,
+        post=body.post.model_dump() if body.post else None,
+        cover_time=body.cover_time,
+    )
+
+
+@router.post("/projects/{project_id}/packages/{name}/verify")
+def verify_package(project_id: ProjectId, name: str, studio=Depends(get_studio)):
+    path = invoke(studio.package_path, project_id, name)
+    return invoke(studio.verify_package, path)

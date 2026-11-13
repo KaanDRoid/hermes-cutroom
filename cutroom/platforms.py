@@ -13,6 +13,8 @@ import copy
 CHECKED = "2026-11-12"
 # Long-form YouTube rules (chapters, thumbnail, end screens) were rechecked for F6.
 LONGFORM_CHECKED = "2026-11-13"
+# Post text limits were rechecked on the cited pages for F7 delivery packages.
+TEXT_CHECKED = "2026-11-13"
 FINAL_RESOLUTIONS = ("1080", "2160")
 
 _INSTAGRAM_REELS_HELP = "https://help.instagram.com/1038071743007909/"
@@ -36,6 +38,7 @@ _YOUTUBE_VIDEOS_API = (
 _YOUTUBE_THUMBNAIL = "https://support.google.com/youtube/answer/72431"
 _YOUTUBE_END_SCREEN = "https://support.google.com/youtube/answer/6388789"
 _YOUTUBE_CHAPTERS = "https://support.google.com/youtube/answer/9884579"
+_YOUTUBE_HASHTAGS = "https://support.google.com/youtube/answer/6390658"
 # The former support.tiktok.com "camera tools" address redirects here.
 _TIKTOK_LENGTH = "https://www.tiktok.com/support/faq_detail?id=7581821547946580492"
 _TIKTOK_IN_FEED_ADS = (
@@ -122,7 +125,14 @@ PROFILES = {
             "the top 14 %, bottom 35 % and 6 % on each side.",
         ),
         "loudness": _LOUDNESS,
-        "text": _spec(_INSTAGRAM_MEDIA_API, caption_chars=2200, hashtags=30),
+        "text": _spec(
+            _INSTAGRAM_MEDIA_API,
+            checked=TEXT_CHECKED,
+            caption_chars=2200,
+            hashtags=30,
+            mentions=20,
+            note="Maximum 2,200 characters, 30 hashtags and 20 @ tags per caption.",
+        ),
         "cover": _spec(
             _INSTAGRAM_REELS_HELP,
             width=420,
@@ -158,7 +168,18 @@ PROFILES = {
             "separate figure for ordinary Shorts.",
         ),
         "loudness": _LOUDNESS,
-        "text": _spec(_YOUTUBE_VIDEOS_API, title_chars=100, description_bytes=5000),
+        "text": _spec(
+            _YOUTUBE_VIDEOS_API,
+            checked=TEXT_CHECKED,
+            title_chars=100,
+            description_bytes=5000,
+            forbidden="<>",
+            hashtags=60,
+            hashtags_source=_YOUTUBE_HASHTAGS,
+            note="Title at most 100 characters and description at most 5,000 "
+            "bytes, neither containing < or >. With more than 60 hashtags YouTube "
+            "ignores every hashtag on the video (YouTube Help).",
+        ),
         "cover": _spec(
             _YOUTUBE_THUMBNAIL,
             width=2160,
@@ -200,9 +221,12 @@ PROFILES = {
         "loudness": _LOUDNESS,
         "text": _spec(
             _TIKTOK_POST_API,
+            checked=TEXT_CHECKED,
             caption_chars=2200,
+            hashtags=None,
             note="Video caption limit of the Content Posting API, counted in "
-            "UTF-16 code units. TikTok does not publish an in-app limit.",
+            "UTF-16 code units. TikTok does not publish an in-app limit or a "
+            "hashtag limit.",
         ),
         "cover": _spec(
             _TIKTOK_POST_API,
@@ -262,7 +286,18 @@ PROFILES = {
             "the whole list must fit the 5,000-byte description.",
         ),
         "loudness": _LOUDNESS,
-        "text": _spec(_YOUTUBE_VIDEOS_API, title_chars=100, description_bytes=5000),
+        "text": _spec(
+            _YOUTUBE_VIDEOS_API,
+            checked=TEXT_CHECKED,
+            title_chars=100,
+            description_bytes=5000,
+            forbidden="<>",
+            hashtags=60,
+            hashtags_source=_YOUTUBE_HASHTAGS,
+            note="Title at most 100 characters and description at most 5,000 "
+            "bytes, neither containing < or >. With more than 60 hashtags YouTube "
+            "ignores every hashtag on the video (YouTube Help).",
+        ),
         "cover": _spec(
             _YOUTUBE_THUMBNAIL,
             checked=LONGFORM_CHECKED,

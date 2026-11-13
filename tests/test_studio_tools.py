@@ -433,6 +433,10 @@ class SchemaTests(unittest.TestCase):
                 "derive",
                 "find_clips",
                 "create_clip",
+                "post_text",
+                "package",
+                "packages",
+                "verify_package",
             ],
         )
         self.assertEqual(
@@ -452,6 +456,9 @@ class SchemaTests(unittest.TestCase):
                 "candidate_id",
                 "start",
                 "end",
+                "post",
+                "cover_time",
+                "package",
             },
         )
         self.assertEqual(

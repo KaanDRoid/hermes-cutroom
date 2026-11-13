@@ -781,7 +781,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const next = STEPS[index + 1];
   const stepNode = { edit: EditStep, style: StyleStep, sound: SoundStep, review: ReviewStep, export: ExportStep }[step] || EditStep;
   const saveText = { pending: 'Saving…', saving: 'Saving…', error: "Couldn't save" }[save.state] || '✓ Saved';
-  return el('div', { 'aria-label': 'Project editing workspace', onChangeCapture: event => { if (!event?.target?.closest?.('[data-cutroom-confirm]')) clearApproval(); }, onKeyDown, style: { ...stack, gap: 12 }, children: [
+  return el('div', { 'aria-label': 'Project editing workspace', onChangeCapture: event => { if (!event?.target?.closest?.('[data-cutroom-confirm], [data-cutroom-post]')) clearApproval(); }, onKeyDown, style: { ...stack, gap: 12 }, children: [
     el('header', { style: { ...row, justifyContent: 'space-between', paddingBottom: 8, borderBottom: '1px solid var(--ui-stroke-secondary)' }, children: [
       el('div', { style: { ...row, flex: '1 1 360px' }, children: [
         jsx(Button, { variant: 'ghost', 'aria-label': 'Back to projects', onClick: leave, children: '‹ Projects' }),
@@ -1596,6 +1596,96 @@ function ReviewStep({ kit }) {
   ] });
 }
 
+function DeliveryPackage({ kit }) {
+  const { ctx, project, approved } = kit;
+  const [status, setStatus] = useState(null);
+  const [post, setPost] = useState(null);
+  const [tags, setTags] = useState('');
+  const [result, setResult] = useState(null);
+  const [check, setCheck] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [copied, setCopied] = useState(false);
+  const eligible = approved && Boolean(project.artifacts?.final) && kit.profile?.name !== 'custom';
+  useEffect(() => {
+    let live = true;
+    if (eligible) Promise.all([ctx.rest(`/projects/${enc(project.id)}/post`), ctx.rest(`/projects/${enc(project.id)}/packages`)]).then(([data, list]) => {
+      if (!live || !data?.limits || !data?.post) return;
+      setStatus(data); setPost(data.post); setTags((data.post.hashtags || []).join(' '));
+      if (Array.isArray(list) && list.length) setResult(list[0]);
+    }, failure => { if (live) setError(failure); });
+    return () => { live = false; };
+  }, [eligible, project.id, project.revision]);
+  if (!eligible) return el('p', { style: muted, children: 'After you approve and export the final video, you can make a delivery package here. Choose a platform profile first.' });
+  const limits = status?.limits;
+  const splitTags = value => { const seen = new Set(); return value.trim().split(/\s+/).filter(Boolean).map(tag => tag.startsWith('#') ? tag : `#${tag}`).filter(tag => { const key = tag.toLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; }); };
+  const chosen = { ...(post || { title: '', caption: '', hashtags: [] }), hashtags: splitTags(tags) };
+  const youtube = limits?.fields?.includes('description');
+  const main = youtube ? 'description' : 'caption';
+  const text = [chosen.caption.trim(), ...(youtube ? [status?.chapters_text?.trim() || ''] : []), chosen.hashtags.join(' ')].filter(Boolean).join('\n\n');
+  const count = (value, unit) => unit === 'bytes' ? new TextEncoder().encode(value).length : unit === 'utf16' ? value.length : Array.from(value).length;
+  const problems = [];
+  const counter = (name, value) => {
+    const rule = limits?.[name];
+    if (!rule) return null;
+    const used = count(value, rule.unit), over = used - rule.max;
+    if (over > 0) problems.push(`${name}: ${over.toLocaleString('en-US')} too many`);
+    return `${used.toLocaleString('en-US')} / ${rule.max.toLocaleString('en-US')} ${rule.unit === 'bytes' ? 'bytes' : rule.unit === 'utf16' ? 'UTF-16 units' : 'characters'}${over > 0 ? ` — ${over.toLocaleString('en-US')} too many` : ''}`;
+  };
+  const mainCounter = counter(main, text);
+  const titleCounter = youtube ? counter('title', chosen.title) : null;
+  if (youtube && !chosen.title.trim()) problems.push('YouTube needs a title.');
+  if (youtube && /[<>]/.test(chosen.title + text)) problems.push('YouTube title and description cannot contain < or >.');
+  const tagCount = ((youtube ? chosen.title + '\n' : '') + text).match(/(?<![\p{L}\p{N}_&])#[\p{L}\p{N}_]+/gu)?.length || 0;
+  if (limits?.hashtags && tagCount > limits.hashtags.max) problems.push(`Use at most ${limits.hashtags.max} hashtags.`);
+  const mentions = text.match(/(?<![\w@])@[\w.]+/g)?.length || 0;
+  if (limits?.mentions && mentions > limits.mentions.max) problems.push(`Use at most ${limits.mentions.max} @ mentions.`);
+  if (chosen.hashtags.some(tag => !/^#[\p{L}\p{N}_]{1,99}$/u.test(tag))) problems.push('Use one word per hashtag, without < or >.');
+  const make = async () => {
+    if (busy || problems.length || !status) return;
+    setBusy(true); setError(null); setCheck(null);
+    try {
+      const made = await ctx.rest(`/projects/${enc(project.id)}/packages`, { method: 'POST', body: { post: chosen } });
+      if (!made?.name || !Array.isArray(made.files)) throw new Error('The package result could not be read.');
+      setResult(made);
+    } catch (failure) { setError(failure); } finally { setBusy(false); }
+  };
+  const verify = async () => {
+    setBusy(true); setError(null);
+    try { setCheck(await ctx.rest(`/projects/${enc(project.id)}/packages/${enc(result.name)}/verify`, { method: 'POST' })); }
+    catch (failure) { setError(failure); } finally { setBusy(false); }
+  };
+  const bytes = size => size >= 1048576 ? `${(size / 1048576).toFixed(1)} MB` : size >= 1024 ? `${(size / 1024).toFixed(1)} KB` : `${size} bytes`;
+  const input = (label, name, value, onChange, counterText, multiline = false) => el('label', { style: { ...stack, gap: 4 }, children: [
+    el('span', { style: { fontSize: 13 }, children: label }),
+    jsx(multiline ? Textarea : Input, { name: `post.${name}`, value, disabled: busy, 'aria-label': label, 'aria-describedby': `cutroom-post-${name}-count`, onChange: event => onChange(event.target.value) }),
+    el('span', { id: `cutroom-post-${name}-count`, 'aria-live': 'polite', style: muted, children: counterText || '' }),
+  ] }, name);
+  return el('section', { 'aria-labelledby': 'cutroom-package', 'data-cutroom-post': true, style: panel, children: [
+    el('h3', { id: 'cutroom-package', style: h3s, children: 'Delivery package' }),
+    el('p', { style: muted, children: 'A local folder with the approved video, cover, post text and checksums. Nothing is posted. Post text does not change video approval; every package records the exact copy used.' }),
+    status && post ? el('div', { style: stack, children: [
+      youtube ? input('Post title', 'title', chosen.title, value => setPost({ ...chosen, title: value }), titleCounter) : null,
+      input(youtube ? 'Description' : 'Post caption', 'caption', chosen.caption, value => setPost({ ...chosen, caption: value }), mainCounter, true),
+      input('Hashtags (space separated)', 'hashtags', tags, setTags, `${tagCount}${limits.hashtags ? ` / ${limits.hashtags.max}` : ''} hashtags${!limits.hashtags ? ' — no verified platform count limit; included in the caption limit' : ''}`),
+      youtube && status.chapters_text ? el('p', { style: muted, children: 'The chapter list is included in the description counter and in post.txt.' }) : null,
+      limits.note ? el('p', { style: muted, children: limits.note }) : null,
+      ...problems.map((problem, index) => el('p', { role: 'alert', style: alertStyle, children: problem }, `post-problem:${index}`)),
+    ] }) : el('p', { role: 'status', style: muted, children: 'Loading post text…' }),
+    jsx(Button, { disabled: busy || !status || problems.length > 0 || kit.saving(), onClick: make, children: busy ? 'Working…' : 'Make package' }),
+    result ? el('div', { style: stack, children: [
+      el('p', { style: muted, children: result.name }),
+      el('p', { role: 'status', style: muted, children: result.notice || 'Nothing has been posted. Upload these files yourself.' }),
+      el('label', { style: stack, children: [el('span', { style: muted, children: 'Package folder' }), jsx(Input, { readOnly: true, value: result.directory, 'aria-label': 'Package folder', onFocus: event => event.target.select?.() })] }),
+      jsx(Button, { variant: 'secondary', onClick: async () => { try { if (!globalThis.navigator?.clipboard?.writeText) throw new Error('Select the folder path and copy it with Ctrl+C.'); await globalThis.navigator.clipboard.writeText(result.directory); setCopied(true); } catch (failure) { setError(failure); } }, children: copied ? 'Copied folder path' : 'Copy folder path' }),
+      el('ul', { style: { ...muted, paddingLeft: 18 }, children: result.files.map(file => el('li', { children: `${file.name} — ${bytes(file.size)}` }, file.name)) }),
+      jsx(Button, { variant: 'secondary', disabled: busy, onClick: verify, children: 'Check package' }),
+      check ? el('div', { role: 'status', 'aria-live': 'polite', style: stack, children: check.ok ? `All ${check.checked} files match the checksums.` : (check.problems || []).map((problem, i) => el('p', { style: alertStyle, children: `${problem.file}: ${problem.problem}` }, `check:${i}`)) }) : null,
+    ] }) : null,
+    jsx(Notice, { error }),
+  ] });
+}
+
 function ExportStep({ kit }) {
   const { ctx, project, jobs, approved } = kit;
   const [error, setError] = useState(null);
@@ -1619,6 +1709,7 @@ function ExportStep({ kit }) {
       jsx(Disclosure, { title: 'More files', children: jsx(Button, { variant: 'ghost', disabled: !project.artifacts?.preview, onClick: () => download('preview'), children: 'Download preview' }) }),
       el('p', { style: muted, children: 'Nothing is uploaded or posted. Files are saved where you choose.' }),
     ] }),
+    jsx(DeliveryPackage, { kit }, 'delivery-package'),
     jsx(Notice, { error }),
   ] });
 }

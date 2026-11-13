@@ -22,6 +22,8 @@ See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md
 6. Human review and approval of the exact digest in the Desktop Studio page.
 7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, upscaling, loudness and safe zone for platform projects).
 
+**Delivery package** in Export makes a local per-platform folder from an approved final with video, cover, bounded post text and verifiable checksums; nothing is posted.
+
 Every job is bound to the project revision and its input files. Edits revoke approval and unlink stale renders; published files carry SHA-256 lineage.
 
 ## Platform formats

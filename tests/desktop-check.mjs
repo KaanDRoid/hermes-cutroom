@@ -1744,3 +1744,103 @@ test('the stage marks the end-screen space during the last seconds', async () =>
   assert.ok(zone, 'The end-screen space is shown');
   assert.match(text(zone), /End screen/);
 }));
+
+// Delivery packages (F7): post text with live counters, Make package, the folder and Check package.
+const packageResult = { name: 'instagram_reels-20261113-101500', directory: 'C:/ws/projects/p1/packages/instagram_reels-20261113-101500', platform: 'instagram_reels', posted: false,
+  notice: 'Nothing has been posted. Upload these files yourself.',
+  files: [{ name: 'README.txt', size: 512, sha256: 'a'.repeat(64) }, { name: 'cover.jpg', size: 204800, sha256: 'b'.repeat(64) }, { name: 'post.txt', size: 300, sha256: 'c'.repeat(64) }, { name: 'video.mp4', size: 5242880, sha256: 'd'.repeat(64) }] };
+const postStatus = (platform = 'instagram_reels') => ({ platform, label: platform === 'youtube' ? 'YouTube' : 'Instagram Reels', suggested: true, problems: [], chapters_text: platform === 'youtube' ? '0:00 Intro\n0:12 Waves\n0:24 End\n' : '',
+  post: { title: 'Demo', caption: 'Hello', hashtags: [] },
+  limits: platform === 'youtube'
+    ? { fields: ['title', 'description'], title: { max: 100, unit: 'characters', required: true }, description: { max: 5000, unit: 'bytes' }, hashtags: { max: 60 }, mentions: null, forbidden: '<>' }
+    : { fields: ['caption'], caption: { max: 2200, unit: 'characters' }, hashtags: { max: 30 }, mentions: { max: 20 }, forbidden: '' } });
+const approvedFinal = (platform = 'instagram_reels') => {
+  jobRows = [{ id: 'pj', action: 'preview', status: 'completed', revision: 7, progress: 1 }, { id: 'fj', action: 'final', status: 'completed', revision: 7, progress: 1 }];
+  return { status: 'approved', approval: { digest: 'e'.repeat(64), revision: 7 }, settings: { platform, aspect: platform === 'youtube' ? 'landscape' : 'portrait' },
+    artifacts: { preview: 'preview.mp4', final: 'final.mp4' }, artifact_lineage: { preview: { job_id: 'pj', platform }, final: { job_id: 'fj', platform } } };
+};
+const packageRest = (platform = 'instagram_reels', extra = () => undefined) => async (path, options) => {
+  const handled = extra(path, options);
+  if (handled !== undefined) return handled;
+  if (path.endsWith('/review')) return { digest: 'e'.repeat(64), project: selectedProject, notice: '' };
+  if (path.endsWith('/post')) return postStatus(platform);
+  if (path.endsWith('/packages') && options?.method === 'POST') return packageResult;
+  if (path.endsWith('/packages')) return [];
+  if (path.endsWith('/verify')) return { ok: true, checked: 4, problems: [] };
+  return selectedProject;
+};
+const packageCard = tree => nodes(tree).find(n => n.props?.['aria-labelledby'] === 'cutroom-package');
+
+test('delivery package: post text with live counters, then Make package and Check package', async () => {
+  const ui = await studio(packageRest(), approvedFinal());
+  await ui.step('Export'); await tick(); ui.draw(); await tick();
+  let tree = ui.draw();
+  const card = packageCard(tree);
+  assert.ok(card, 'The delivery package card is shown after approval and export');
+  assert.ok(card.props['data-cutroom-post'], 'Typing post text does not clear the approval');
+  assert.match(text(card), /Nothing is posted/);
+  assert.equal(field(tree, 'post.caption').props.value, 'Hello');
+  assert.match(text(tree), /5 \/ 2,200 characters/);
+  type(field(tree, 'post.caption'), 'x'.repeat(2201));
+  tree = ui.draw();
+  assert.match(text(tree), /2,201 \/ 2,200 characters/);
+  assert.match(text(tree), /1 too many/);
+  assert.equal(button(tree, 'Make package').props.disabled, true, 'Text over a limit cannot be packaged');
+  type(field(ui.draw(), 'post.caption'), 'Waves all day.');
+  type(field(ui.draw(), 'post.hashtags'), 'ocean #sea');
+  tree = ui.draw();
+  assert.match(text(tree), /2 \/ 30 hashtags/);
+  const counter = nodes(tree).find(n => n.props?.id === 'cutroom-post-caption-count');
+  assert.ok(counter && field(tree, 'post.caption').props['aria-describedby'].includes('cutroom-post-caption-count'), 'Counters are tied to their fields');
+  await button(tree, 'Make package').props.onClick();
+  const made = ui.calls.find(c => c.path === '/projects/p1/packages' && c.options?.method === 'POST');
+  assert.deepEqual(made.options.body, { post: { title: 'Demo', caption: 'Waves all day.', hashtags: ['#ocean', '#sea'] } });
+  tree = ui.draw();
+  assert.match(text(tree), /instagram_reels-20261113-101500/);
+  assert.match(text(tree), /video\.mp4/);
+  assert.match(text(tree), /5\.0 MB/);
+  assert.match(text(tree), /Nothing has been posted\. Upload these files yourself\./);
+  await button(tree, 'Check package').props.onClick();
+  assert.ok(ui.calls.some(c => c.path === '/projects/p1/packages/instagram_reels-20261113-101500/verify' && c.options?.method === 'POST'));
+  assert.match(text(ui.draw()), /All 4 files match/);
+  // The approval survives typing in the package card.
+  const workspace = nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Project editing workspace');
+  workspace.props.onChangeCapture({ target: { closest: selector => (selector.includes('data-cutroom-post') ? {} : null) } });
+  assert.ok(button(ui.draw(), 'Make package'), 'Still approved');
+});
+
+test('delivery package: a changed file is reported in plain words', async () => {
+  const ui = await studio(packageRest('instagram_reels', path => (path.endsWith('/packages') ? [packageResult] : path.endsWith('/verify') ? { ok: false, checked: 4, problems: [{ file: 'video.mp4', problem: 'contents changed (checksum differs)' }] } : undefined)), approvedFinal());
+  await ui.step('Export'); await tick(); ui.draw(); await tick();
+  const tree = ui.draw();
+  assert.match(text(tree), /instagram_reels-20261113-101500/, 'The latest package is listed');
+  await button(tree, 'Check package').props.onClick();
+  assert.match(text(ui.draw()), /video\.mp4: contents changed/);
+});
+
+test('delivery package: YouTube asks for a title and counts the description in bytes with chapters', async () => {
+  const ui = await studio(packageRest('youtube'), approvedFinal('youtube'));
+  await ui.step('Export'); await tick(); ui.draw(); await tick();
+  let tree = ui.draw();
+  assert.ok(field(tree, 'post.title'));
+  assert.match(text(tree), /4 \/ 100 characters/);
+  // "Hello", a blank line and three chapter lines: 5 + 2 + 30 bytes.
+  assert.match(text(tree), /37 \/ 5,000 bytes/);
+  type(field(tree, 'post.caption'), '\u00e9'.repeat(10));
+  assert.match(text(ui.draw()), /52 \/ 5,000 bytes/);
+  type(field(ui.draw(), 'post.title'), 'A <b> title');
+  tree = ui.draw();
+  assert.match(text(tree), /cannot contain < or >/);
+  assert.equal(button(tree, 'Make package').props.disabled, true);
+  type(field(ui.draw(), 'post.title'), '');
+  assert.equal(button(ui.draw(), 'Make package').props.disabled, true, 'YouTube needs a title');
+});
+
+test('delivery package waits for an approved, exported final', async () => {
+  jobRows = currentPreview().jobs;
+  const ui = await studio(packageRest(), { ...currentPreview().project, settings: { platform: 'instagram_reels' } });
+  await ui.step('Export'); await tick();
+  assert.equal(button(ui.draw(), 'Make package'), undefined);
+  assert.match(text(ui.draw()), /After you approve and export the final video/);
+  assert.ok(!ui.calls.some(c => c.path.endsWith('/post')), 'Nothing is read before it can be used');
+});

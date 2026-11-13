@@ -67,6 +67,18 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
     approval, the final is refused: ask the person to review and approve the
     current version again.
 
+## Delivery packages
+
+After the person approves and the final finishes, offer a local delivery package.
+Use `cutroom_project post_text` to read the suggested copy, then save or pass
+`post: {title, caption, hashtags: []}` with `cutroom_project package`. Upload
+copy lives in `settings.post`; changing only that copy does not change video
+approval. Read any limit errors in plain words. `packages` lists folders and
+`verify_package` takes the project id and returned `package` folder name to
+recheck every checksum. Share the folder path and files, and say: **Nothing
+has been posted. Upload these files yourself.** Never claim a package was
+posted or grant approval from chat.
+
 ## Clips from a long recording
 
 For recordings longer than about three minutes, offer to find standalone clips.

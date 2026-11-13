@@ -47,6 +47,14 @@
   timeline and FFmpeg 7.1 findings are fixed separately (entry above). No
   native Desktop, external-service or publishing acceptance is claimed.
 
+## November 13 — F7 local delivery packages (branch `feat/f7-packages`)
+
+- Approved-current-final delivery folders with hard-link/copy video, 9:16 short-form reference covers, YouTube final thumbnail/SRT/description chapters, sourced post limits, a checksum manifest and a plain README. Nothing is posted.
+- Added post-only settings outside video approval, local package verification, REST and existing-tool actions, Export live counters and Check package, and chat guidance.
+- Real 32-second Sandra Reels and YouTube previews/finals were packaged and verified; both one-byte-tampered copies failed verification while originals stayed intact. Test/evidence fixture approval uses the Studio internal review/approve path, not person-watch acceptance. Both cover images were opened and inspected.
+- Local gates: **552 Python tests OK** (14 skipped), **71/71 Desktop tests**, Ruff check/format and `node --check` clean. Sources: [creator formats F7](creator-formats.md#f7--local-delivery-packages), `artifacts/f7/red.log`, `artifacts/f7/green.log`, `artifacts/f7/evidence/report.json`.
+- Open: native Desktop/per-platform acceptance (A28), live media download, OBS and rclone, all pending owner consent. No external integration was exercised.
+
 ## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
 
 - Added deterministic local discovery of whole-sentence 20–90 s clips, scored
