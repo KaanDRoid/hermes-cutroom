@@ -5,8 +5,14 @@ stays in Cutroom Studio (Desktop) and the local REST API only.
 """
 
 import json
+import math
+from pathlib import Path
 
 TRANSCRIPT_PREVIEW_WORDS = 50
+MEDIA_KINDS = ("preview", "final", "cover")
+QA_NAME_LIMIT = 20
+TEXT_LIMIT = 200
+DISPLAY_HINT = "Show it to the person with a line: MEDIA:"
 
 PROJECT_CHANGES = frozenset(
     {
@@ -62,9 +68,16 @@ LIST_FIELDS = ("id", "name", "revision", "status", "source")
 APPROVAL_NOTICE = (
     "Human approval of the exact reviewed digest is required before final job "
     "submission and is checked again on completion. Approval stays in Cutroom "
-    "Studio (Desktop) or the local REST API. This tool cannot approve, and "
-    "you must never claim that anything was approved; ask the user to review "
-    "and approve it in Cutroom Studio."
+    "Studio (Desktop) or the local REST API: only a person can approve. This "
+    "tool cannot approve, and you must never claim that anything was approved; "
+    "ask the user to review and approve it in Cutroom Studio."
+)
+WORKFLOW = (
+    "Usual order: cutroom_project create from a local path; cutroom_job submit "
+    "transcribe, then get every few seconds and report stage and percent; "
+    "cutroom_project update with the agreed cuts, settings.platform, caption "
+    "style and framing; submit preview; submit qa; the person reviews and "
+    "approves in Cutroom Studio; then submit final."
 )
 
 
@@ -136,6 +149,155 @@ def _compact(project):
     return result
 
 
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _text(value):
+    return value[:TEXT_LIMIT] if isinstance(value, str) else None
+
+
+def _json_safe(value):
+    """Replace non-finite numbers so a result always serialises."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _upstream_job(job):
+    identity = job.get("upstream_identity")
+    if isinstance(identity, dict):
+        return identity.get("job_id")
+    return None
+
+
+def qa_summary(job):
+    """Counts from the check statuses; a warning alone never means failure."""
+    checks = (job.get("result") or {}).get("checks")
+    checks = [check for check in checks or [] if isinstance(check, dict)]
+    statuses = [check.get("status") for check in checks]
+
+    def names(status):
+        return [
+            _text(check.get("name")) or "check"
+            for check in checks
+            if check.get("status") == status
+        ][:QA_NAME_LIMIT]
+
+    failed = statuses.count("fail")
+    warnings = statuses.count("warning")
+    return {
+        "job_id": job.get("id"),
+        "status": "fail" if failed else "warning" if warnings else "pass",
+        "passed": statuses.count("pass"),
+        "failed": failed,
+        "warnings": warnings,
+        "total": len(checks),
+        "failed_checks": names("fail"),
+        "warning_checks": names("warning"),
+    }
+
+
+def _latest_qa(studio, project_id, render_job_id):
+    if not render_job_id:
+        return None
+    matching = [
+        job
+        for job in studio.jobs(project_id=project_id) or []
+        if isinstance(job, dict)
+        and job.get("action") == "qa"
+        and job.get("status") == "completed"
+        and _upstream_job(job) == render_job_id
+    ]
+    if not matching:
+        return None
+    latest = max(
+        matching,
+        key=lambda job: (
+            _number(job.get("completed_at")) or _number(job.get("created_at")) or 0
+        ),
+    )
+    return qa_summary(latest)
+
+
+def _media(studio, job, project=None):
+    """Display summary of a completed preview, final or cover; None otherwise."""
+    if not isinstance(job, dict) or job.get("status") != "completed":
+        return None
+    kind = job.get("action")
+    result = job.get("result")
+    if kind not in MEDIA_KINDS or not isinstance(result, dict):
+        return None
+    value = (result.get("artifacts") or {}).get(kind) or result.get("output")
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file():
+        return None
+    if project is None:
+        project = studio.get(job["project_id"])
+    lineage = project.get("artifact_lineage") or {}
+    render_kind = kind
+    render_job_id = job.get("id")
+    if kind == "cover":
+        render_job_id = _upstream_job(job)
+        render_kind = (job.get("upstream_identity") or {}).get("kind") or "preview"
+    approval = project.get("approval") or {}
+    platform = (
+        result.get("platform")
+        or (lineage.get(render_kind) or {}).get("platform")
+        or (project.get("settings") or {}).get("platform")
+    )
+    return {
+        "path": value,
+        "kind": kind,
+        "project_id": project.get("id"),
+        "project_name": _text(project.get("name")),
+        "platform": _text(platform),
+        "duration": _number(result.get("duration")),
+        "width": _number(result.get("width")),
+        "height": _number(result.get("height")),
+        "current": (lineage.get(kind) or {}).get("job_id") == job.get("id"),
+        "qa": _latest_qa(studio, project.get("id"), render_job_id),
+        "approved": bool(approval)
+        and approval.get("revision") == project.get("revision"),
+    }
+
+
+def _with_media(studio, job):
+    """Add ``media`` and ``display_hint``; lookup problems never hide the job."""
+    try:
+        media = _media(studio, job)
+    except Exception:
+        media = None
+    if media is None:
+        return job
+    # A displayable render must still serialise; drop non-finite numbers.
+    return _json_safe(dict(job, media=media, display_hint=DISPLAY_HINT + media["path"]))
+
+
+def _project_media(studio, project):
+    summary = {}
+    lineage = project.get("artifact_lineage") or {}
+    for kind in ("preview", "final"):
+        job_id = (lineage.get(kind) or {}).get("job_id")
+        if kind not in (project.get("artifacts") or {}) or not job_id:
+            continue
+        try:
+            media = _media(studio, studio.job(job_id=job_id), project)
+        except Exception:
+            media = None
+        if media is not None:
+            summary[kind] = media
+    return summary
+
+
 def project_handler(args, **kwargs):
     """Validate the action-specific contract before resolving Studio."""
 
@@ -171,9 +333,14 @@ def project_handler(args, **kwargs):
             ):
                 raise ValueError("revision must be a positive integer")
         values = {key: value for key, value in args.items() if key != "action"}
-        result = getattr(get_studio(), action)(**values)
+        studio = get_studio()
+        result = getattr(studio, action)(**values)
         if action == "list":
             return [_compact(project) for project in result]
+        if action == "get" and isinstance(result, dict):
+            media = _project_media(studio, result)
+            result = _summarize(result)
+            return dict(result, media=media) if media else result
         if action in ("get", "create", "update", "derive"):
             return _summarize(result)
         if action == "review" and isinstance(result, dict) and "project" in result:
@@ -213,7 +380,11 @@ def job_handler(args, **kwargs):
         else:
             studio_call = ("cancel", {"job_id": args["job_id"]})
         method, values = studio_call
-        return getattr(get_studio(), method)(**values)
+        studio = get_studio()
+        result = getattr(studio, method)(**values)
+        if action in ("get", "submit"):
+            result = _with_media(studio, result)
+        return result
 
     return _response(perform)
 
@@ -280,7 +451,9 @@ def definitions():
     project = {
         "name": "cutroom_project",
         "description": (
-            "Manage Cutroom Studio projects. Actions: create(source, name?) imports "
+            "Manage Cutroom Studio projects. "
+            + WORKFLOW
+            + " Actions: create(source, name?) imports "
             "a local video; list() returns compact rows (id, name, revision, status, "
             "source, artifact kinds); get(project_id) returns the project with the "
             f"transcript summarized to word_count plus the first "
@@ -331,10 +504,16 @@ def definitions():
     job = {
         "name": "cutroom_job",
         "description": (
-            "Run and track background Cutroom Studio jobs. Actions: "
-            "submit(project_id, operation, options?) queues inspect, transcribe, "
-            "silence, vision, segment, storyboard, preview, final, cover or qa; "
-            "list(project_id?), get(job_id), cancel(job_id). " + APPROVAL_NOTICE
+            "Run and track background Cutroom Studio jobs. "
+            + WORKFLOW
+            + " Actions: submit(project_id, operation, options?) queues inspect, "
+            "transcribe, silence, vision, segment, storyboard, preview, final, "
+            "cover or qa; list(project_id?), get(job_id), cancel(job_id). A "
+            "completed preview, final or cover includes media (absolute path, "
+            "platform, duration, size, qa status pass/warning/fail, approved) "
+            "and display_hint: show the file with a line MEDIA:<path>. QA "
+            "'warning' means ready with notes; only 'fail' needs changes. The "
+            "cutroom:edit-video skill has the full workflow. " + APPROVAL_NOTICE
         ),
         "parameters": {
             "type": "object",
