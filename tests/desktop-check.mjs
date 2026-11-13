@@ -1897,3 +1897,19 @@ test('delivery package waits for an approved, exported final', async () => {
   assert.match(text(ui.draw()), /After you approve and export the final video/);
   assert.ok(!ui.calls.some(c => c.path.endsWith('/post')), 'Nothing is read before it can be used');
 });
+
+test('the home page heading is the Cutroom wordmark and still reads as Cutroom', async () => {
+  hookStores.clear(); queries.length = 0; projectRows = []; jobRows = [];
+  const registrations = [];
+  (await load()).default.register({ register: entry => registrations.push(entry), storage: { get: (_key, fallback) => fallback, set: () => {} }, rest: async () => ({}) });
+  const tree = draw(registrations.find(r => r.area === sdk.ROUTES_AREA));
+  const heading = nodes(tree).find(n => n.type === 'h1');
+  assert.ok(heading, `home heading in: ${text(tree).slice(0, 300)}`);
+  assert.equal(text(heading).trim(), 'Cutroom', 'screen readers hear the name once');
+  const logo = nodes(heading).find(n => n.type === 'svg');
+  assert.ok(logo, 'the wordmark is drawn');
+  assert.equal(logo.props['aria-hidden'], true);
+  const paints = nodes(logo).filter(n => n.type === 'path').map(n => n.props.fill);
+  assert.ok(paints.includes('currentColor'), 'letters follow the theme text colour');
+  assert.ok(paints.includes('var(--ui-accent)'), 'the portrait frame takes the app accent, like every other highlight');
+});

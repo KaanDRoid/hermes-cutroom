@@ -58,6 +58,20 @@ const HEX = /^#[0-9a-f]{6}$/i;
 const VIDEO_FILE = /\.(mp4|mov|m4v|webm|mkv|avi)$/i;
 const AUDIO_FILE = /\.(wav|mp3|m4a|flac|ogg|aac)$/i;
 
+// The Cutroom wordmark (docs/brand): letters take the text colour, the portrait frame the app accent.
+const WORDMARK = { viewBox: '375 286 8506 1407', transform: 'translate(286 1670) scale(1 -1)', paths: [
+  ['ink', 'M623 -23Q460 -23 340.0 49.5Q220 122 154.5 251.5Q89 381 89 553Q89 727 154.5 857.5Q220 988 340.0 1060.0Q460 1132 623 1132Q810 1132 939.5 1038.5Q1069 945 1105 781L862 730Q841 817 780.0 869.0Q719 921 625 921Q489 921 421.5 816.0Q354 711 354 554Q354 451 384.0 368.0Q414 285 474.0 236.5Q534 188 625 188Q721 188 782.5 242.5Q844 297 865 387L1108 336Q1072 169 942.0 73.0Q812 -23 623 -23Z'],
+  ['ink', 'M1714 -14Q1541 -14 1436.0 96.0Q1331 206 1331 407V1118H1591V447Q1591 335 1649.5 271.0Q1708 207 1810 207Q1914 207 1981.0 274.0Q2048 341 2048 463V1118H2309V0H2062L2060 224Q1960 -14 1714 -14Z'],
+  ['ink', 'M3102 1118V914H2886V315Q2886 254 2911.5 225.5Q2937 197 2997 197Q3015 197 3044.0 201.5Q3073 206 3092 210L3133 9Q3090 -4 3045.0 -9.5Q3000 -15 2959 -15Q2798 -15 2712.0 65.0Q2626 145 2626 293V914H2467V1118H2626V1384H2886V1118Z'],
+  ['ink', 'M3308 0V1118H3560V931H3572Q3602 1028 3677.0 1080.5Q3752 1133 3848 1133Q3898 1133 3943 1126V887Q3927 891 3891.0 895.5Q3855 900 3820 900Q3711 900 3639.5 832.5Q3568 765 3568 658V0Z'],
+  ['ink', 'M4416,-14H5355A344,344 0 0 1 5699,330V788A344,344 0 0 1 5355,1132H4416A344,344 0 0 1 4072,788V330A344,344 0 0 1 4416,-14ZM4416,186H5355A100,100 0 0 1 5455,286V832A100,100 0 0 1 5355,932H4416A100,100 0 0 1 4316,832V286A100,100 0 0 1 4416,186Z'],
+  ['accent', 'M6147,-14H6490A310,310 0 0 1 6800,296V822A310,310 0 0 1 6490,1132H6147A310,310 0 0 1 5837,822V296A310,310 0 0 1 6147,-14ZM6154.2,186H6482.8A73.2,73.2 0 0 1 6556,259.2V858.8A73.2,73.2 0 0 1 6482.8,932H6154.2A73.2,73.2 0 0 1 6081,858.8V259.2A73.2,73.2 0 0 1 6154.2,186Z'],
+  ['ink', 'M7027 0V1118H7271L7279 905Q7323 1024 7409.5 1080.0Q7496 1136 7596 1136Q7810 1136 7883 893Q7928 1014 8025.0 1075.0Q8122 1136 8240 1136Q8391 1136 8493.0 1038.0Q8595 940 8595 754V0H8335V714Q8335 818 8278.0 866.0Q8221 914 8141 914Q8046 914 7992.0 855.0Q7938 796 7938 702V0H7684V726Q7684 811 7631.0 862.5Q7578 914 7495 914Q7409 914 7348.0 855.5Q7287 797 7287 685V0Z'],
+] };
+const Wordmark = ({ height = 28 }) => el('svg', { xmlns: 'http://www.w3.org/2000/svg', viewBox: WORDMARK.viewBox, 'aria-hidden': true, focusable: 'false',
+  style: { height, width: 'auto', display: 'block' }, children: el('g', { transform: WORDMARK.transform, children: WORDMARK.paths.map(([paint, d], index) =>
+    el('path', { d, fillRule: 'evenodd', fill: paint === 'accent' ? 'var(--ui-accent)' : 'currentColor' }, `p${index}`)) }) });
+
 function useLive(initial) {
   const [value, setValue] = useState(initial);
   const ref = useRef(value);
@@ -360,7 +374,7 @@ function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }
   const when = item => (typeof SDK.relativeTime === 'function' && Number.isFinite(item.modified_at) ? SDK.relativeTime(item.modified_at * 1000) : '');
   const sorted = [...projects].sort((a, b) => (b.modified_at || 0) - (a.modified_at || 0));
   return el('div', { style: { ...stack, gap: 20, maxWidth: 880, width: '100%', margin: '0 auto' }, children: [
-    el('header', { style: { ...stack, gap: 4 }, children: [el('h1', { style: { fontSize: 22, fontWeight: 600, margin: 0 }, children: 'Cutroom' }), el('p', { style: muted, children: 'Cut a talking video by editing its words, style it for a platform, then review and export.' })] }, 'head'),
+    el('header', { style: { ...stack, gap: 4 }, children: [el('h1', { style: { margin: 0, lineHeight: 0, color: 'var(--ui-text-primary)' }, children: [jsx(Wordmark, { height: 30 }, 'logo'), el('span', { style: hidden, children: 'Cutroom' }, 'name')] }), el('p', { style: muted, children: 'Cut a talking video by editing its words, style it for a platform, then review and export.' })] }, 'head'),
     el('section', { 'aria-labelledby': 'cutroom-make', style: panel, children: [
       el('h2', { id: 'cutroom-make', style: h2s, children: 'Make a video' }),
       el('label', { htmlFor: 'cutroom-source', style: muted, children: 'Video file on the computer that runs Cutroom' }),

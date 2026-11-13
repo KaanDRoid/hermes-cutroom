@@ -1,6 +1,11 @@
-# Cutroom
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/cutroom-wordmark-reversed.svg">
+    <img src="docs/brand/cutroom-wordmark.svg" alt="Cutroom" width="420">
+  </picture>
+</h1>
 
-A local-first video editing studio for Hermes Agent.
+<p align="center">A local-first video editing studio for Hermes Agent.</p>
 
 Cutroom turns a local recording into a reviewable edit: word-timed transcript cuts and filler review, silence removal, face/gaze/mouth review, person segmentation for graphics behind the subject, three source-quoted hook options with a storyboard, a preview render, a human-approved final export, a cover and automated quality checks. Media and models stay on your machine, and source files are never overwritten.
 
