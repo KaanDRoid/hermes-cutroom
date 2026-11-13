@@ -24,6 +24,21 @@ The exact-plan receipt is a consistency guard, not user authentication. A native
 
 Face/head-facing review, person segmentation, graphic layers, explicit-consent media import, OBS recording and optional storage/calendar adapters are included in the accepted scope. They must be integrated and verified, not merely listed as helpers. See the current work packages linked above.
 
+## Later: GPU acceleration (deferred)
+
+Everything runs on the CPU today. Measured on an RTX 5060 Laptop GPU
+(2026-11-13, 60 s of the Sandra interview):
+
+- Encoding at 1080p: libx264 5.0 s, h264_nvenc 2.1 s. NVENC ships with the
+  bundled FFmpeg builds. Plan: use it when present, fall back to libx264 on
+  any failure, and choose its quality setting by comparing output, since
+  NVENC needs more bits for the same quality.
+- Transcription with whisper-small: CPU int8 8 s. CUDA failed because the
+  CUDA 12 cuBLAS/cuDNN libraries (about 1 GB) are not installed; support for
+  RTX 50 series cards is unverified. Plan: an opt-in "Use the GPU" setting,
+  with the libraries installed only after the person agrees.
+- Face analysis (MediaPipe) has no GPU path on Windows and stays on the CPU.
+
 ## Submission gate
 
 - Validate and test the pinned plugin commit.
