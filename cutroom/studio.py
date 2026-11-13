@@ -166,8 +166,13 @@ class Studio:
         path = self.root / (name + ".lock")
         with path.open("a+b") as stream:
             if path.stat().st_size == 0:
-                stream.write(b"\0")
-                stream.flush()
+                # Unbuffered: on Windows a caller that opened the new file at
+                # the same moment may already hold byte 0, and the write is
+                # refused. The file is then in use; the loop below waits.
+                try:
+                    os.write(stream.fileno(), b"\0")
+                except OSError:
+                    pass
             started = time.monotonic()
             while True:
                 if cancelled and cancelled():
