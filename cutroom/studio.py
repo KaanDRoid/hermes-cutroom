@@ -346,8 +346,16 @@ class Studio:
                     "end_screen_s",
                     "post",
                 }
-                if not isinstance(settings, dict) or set(settings) - keys:
+                if not isinstance(settings, dict):
                     raise ValueError("Unsupported settings")
+                unknown = sorted(set(settings) - keys)
+                if unknown:
+                    # Usually the app page is newer than the running server.
+                    raise ValueError(
+                        "Unsupported settings: "
+                        + ", ".join(unknown)[:200]
+                        + ". If Cutroom was just updated, restart Hermes."
+                    )
                 merged = updated["settings"] | settings
                 from .captions import RESETTABLE, validate_settings
 
