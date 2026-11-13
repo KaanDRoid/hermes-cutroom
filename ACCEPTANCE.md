@@ -44,7 +44,7 @@ Status (F0, 2026-11-12):
 
 - **A19 verified by automated tests on synthetic media.** Four sourced, dated profiles; a landscape test pattern renders at exactly 1080×1920 for Shorts and passes frame, length, loudness and safe-zone checks; one source produces four derived projects whose preview QA passes their own platform checks; a 185-second Shorts edit fails QA and a 190-second Shorts final is refused. Evidence: `tests/test_platforms.py`, `tests/test_studio_platforms.py`, [creator formats F0](docs/creator-formats.md#f0--platform-profiles-and-derived-projects). Native Desktop runs per platform belong to A28.
 - **A20 pending.** Platform siblings with their own settings, digest and approval are implemented and tested; siblings limited to a source range arrive with F5.
-- **A22 implemented, review pending.** Blur fill, centre crop and face-tracked crop with smoothing, cut resets and keyframes; crop upscaling is reported. Evidence: [creator formats F2](docs/creator-formats.md#f2--reframing). Native Desktop runs belong to A28.
+- **A22 implemented, review fixes applied.** Blur fill, centre crop and face-tracked crop with smoothing, shot-aware cut resets and keyframes; crops are planned in square display pixels; crop upscaling is a QA warning with or without a platform profile, and low face coverage is a render and QA warning. Real footage: a still speaker (Sandra, 415 of 415 fresh face frames inside the safe area by plan, 83 of 85 by output detection) and a moving face (1280 px inset sweeping at 213 px/s: 304 of 304 by plan, 328 of 329 by detection on every output frame). Evidence: [creator formats F2](docs/creator-formats.md#f2--reframing). Native Desktop runs belong to A28.
 - A21 and A23–A28 pending.
 
 ## Consented acceptance source
