@@ -1939,7 +1939,12 @@ def _platform_fps(add, entry, info, settings, deltas):
 
 
 def quality_report(
-    video, settings=None, captions=None, caption_words=None, caption_script=None
+    video,
+    settings=None,
+    captions=None,
+    caption_words=None,
+    caption_script=None,
+    longform=None,
 ):
     """Decode all frames; findings are heuristics, never editorial certification."""
     from statistics import median
@@ -2471,6 +2476,18 @@ def quality_report(
                 measurement=measure.method,
                 method="ASS event positions and measured glyph bounds, not decoded pixels",
             ),
+        )
+    if longform is not None:
+        # Long-form YouTube: chapters, subtitles file, thumbnail, end screen.
+        from .longform import quality_checks
+
+        rate = _frame_rate(info)
+        quality_checks(
+            add,
+            video,
+            info,
+            {**longform, "frame_interval": 1 / rate if rate else 1 / 30},
+            captions,
         )
     return dict(
         checks=checks,

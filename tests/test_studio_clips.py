@@ -174,6 +174,46 @@ class CreateClipTests(_ClipCase):
         )
         self.assertEqual(sibling["segments"], replaced["segments"])
 
+    def test_a_clip_drops_long_form_times_of_its_parent(self):
+        # Chapters and a chosen thumbnail frame are in the parent's program
+        # time; inside a clip they would point at other footage.
+        parent = self.studio.get(self.project["id"])
+        parent = self.studio.update(
+            parent["id"],
+            {
+                "settings": {
+                    "platform": "youtube",
+                    "chapters": [
+                        {"start": 0, "title": "Opening"},
+                        {"start": 200, "title": "Middle"},
+                        {"start": 400, "title": "Close"},
+                    ],
+                    "thumbnail": {"time": 300, "text": "Talk"},
+                    "end_screen_s": 10,
+                }
+            },
+            parent["revision"],
+        )
+        self.assertEqual(len(parent["settings"]["chapters"]), 3)
+        first, _ = self.sentences[10]
+        _, last = self.sentences[18]
+        child = self.studio.create_clip(
+            parent["id"],
+            "youtube",
+            start=self.words[first]["start"],
+            end=self.words[last]["end"],
+        )
+        self.assertNotIn("chapters", child["settings"])
+        self.assertNotIn("time", child["settings"].get("thumbnail") or {})
+        self.assertEqual(child["settings"]["thumbnail"]["text"], "Talk")
+        self.assertEqual(child["settings"]["end_screen_s"], 10)
+        summary = self.studio.longform_summary(child)
+        self.assertEqual(summary["chapter_problems"], [])
+        parent = self.studio.get(parent["id"])
+        self.assertEqual(
+            len(parent["settings"]["chapters"]), 3, "The parent keeps them"
+        )
+
     def test_a_free_range_is_snapped_to_sentence_boundaries(self):
         first, _ = self.sentences[10]
         _, last = self.sentences[18]

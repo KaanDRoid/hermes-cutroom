@@ -79,6 +79,33 @@ bounds must stay on the sentence boundaries returned by the tool. Use
 It opens a separate project limited to that source range, with its own preview,
 QA and approval. Never turn a score into a promise that a clip will perform well.
 
+## Long YouTube videos
+
+For a `youtube` project (talks, tutorials, anything over a few minutes):
+
+- **Chapters.** `cutroom_project get` returns `longform`: the program length,
+  `chapters`, `chapter_problems` and, while there are none, a list of
+  `suggested_chapters` made from the transcript. Show the suggested list as
+  `0:00 Title` lines, say the titles are rough suggestions, and offer better
+  titles in the speaker's own words. Let the person edit them, then save
+  `settings.chapters` (`[{start, title}]`, start in seconds of the edited
+  video). YouTube needs the first chapter at 0:00, at least three, each at
+  least 10 s; read `chapter_problems` back in plain words. Chapters move with
+  later cuts, and the update returns a note when one moved or broke a rule.
+- **Thumbnail.** Each preview and final makes a 16:9 `thumbnail.jpg` (up to
+  3840×2160, under 2 MB). `settings.thumbnail` takes `time` (seconds of the
+  edited video; leave it out for a face-forward frame) and short `text`.
+- **Subtitles.** A sentence-based `captions.srt` is written next to the video
+  unless `settings.subtitles_file` is false. Burned captions stay off for
+  YouTube unless the person asks.
+- **End screen.** If the person plans a YouTube end screen, set
+  `settings.end_screen_s` (5–20 s). QA warns when captions or a title show in
+  those seconds.
+
+Chapters, thumbnail and subtitles are part of the reviewed version: changing
+them needs a new preview and a new approval in Cutroom Studio. Never say
+that anything was approved.
+
 ## Other platforms
 
 To make another version, call `cutroom_project derive` with the target

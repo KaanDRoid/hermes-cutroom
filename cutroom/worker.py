@@ -45,6 +45,10 @@ def execute(operation, arguments):
         from .postproduction import make_cover
 
         return make_cover(**arguments)
+    if operation == "longform":
+        from .longform import deliver
+
+        return deliver(**arguments)
     if operation == "qa":
         from .postproduction import quality_report
 

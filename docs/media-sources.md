@@ -49,9 +49,11 @@ curl -fL https://videos.pexels.com/video-files/1416529/1416529-uhd_3840_2160_30f
 - **Observed SHA-1:** `d57f97f373fc8912b597c7d46174db5f74894994`.
 - **Observed properties:** 1920×1080, 30000/1001 fps, VP8/Vorbis, 1063.221 s.
 - **Local file:** `raw_vids/roberts-tedx.webm` (ignored, not bundled).
-- **Use:** F5 sentence-boundary and clip-render acceptance, with a local tiny
-  Whisper model. Previews are excerpted, fitted to a vertical frame and captioned;
-  they are local evidence, not an endorsement or fact-check of the talk.
+- **Use:** F5 sentence-boundary and clip-render acceptance and F6 chapters,
+  subtitles file and thumbnail acceptance, with a local tiny Whisper model.
+  F5 previews are excerpted, fitted to a vertical frame and captioned; the F6
+  preview is the whole talk at 16:9. They are local evidence, not an
+  endorsement or fact-check of the talk.
 
 ## Model assets
 

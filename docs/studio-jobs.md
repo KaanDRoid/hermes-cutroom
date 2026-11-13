@@ -14,8 +14,8 @@ The same jobs are reachable from three surfaces: the Python facade, the plugin R
 | `vision` | `frame_step` | `settings.face_model` | `analysis` (frames capped at 2000 in the project; review-only intervals) | +1, approval removed |
 | `segment` | none | `settings.segmentation_model`; optional `background` (file or `#RRGGBB`), `graphic`, `max_width` | `segmented` artifact and `segmentation` summary | +1, approval removed |
 | `storyboard` | none | a transcript with words | `story` (three hooks; scenes once a hook is selected), `storyboard` and `caption` JSON artifacts | +1, approval removed |
-| `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain, and `captions_ass` (the burned script) for animated caption styles | unchanged |
-| `final` | none | current human approval; selected hook and current storyboard if a story exists; an edit no longer than the platform's hard limit | `final` MP4 plus caption sidecars | unchanged |
+| `preview` | none | current `segmented` artifact if `use_segmented` | `preview` MP4 plus `captions_srt` / `captions_vtt` when words remain, and `captions_ass` (the burned script) for animated caption styles; for YouTube also `chapters` (`chapters.txt`, chapters embedded in the MP4) and `thumbnail` | unchanged |
+| `final` | none | current human approval; selected hook and current storyboard if a story exists; an edit no longer than the platform's hard limit; for YouTube, chapters that follow YouTube's rules | `final` MP4 plus caption sidecars (and the YouTube files, as for `preview`) | unchanged |
 | `cover` | `time` | a current `final` (preferred) or `preview` | `cover` PNG | unchanged |
 | `qa` | none | a current `final` (preferred) or `preview` | `quality` JSON report, with platform checks for platform projects | unchanged |
 
@@ -144,8 +144,9 @@ clip = studio.create_clip(project["id"], "youtube_shorts",
 - The child records `derived_from.range: {start, end}` in **source time**.
   Cuts and exclusions are intersected with it, words outside it are dropped,
   original word IDs/timestamps are retained and fillers are recomputed. Story
-  selections and program-time framing pins are cleared; settings and brand are
-  copied with the target profile. No analysis, render or approval is copied.
+  selections and program-time framing pins are cleared, as are chapters and a
+  chosen thumbnail frame (they are in the parent's program time; the thumbnail
+  text is kept); settings and brand are copied with the target profile. No analysis, render or approval is copied.
   A platform version derived from a clip keeps its range. Later edits, silence
   results and replacement transcripts cannot reopen the rest of the source.
 - The existing segment renderer and word remapper make program time start at
@@ -163,6 +164,23 @@ clip = studio.create_clip(project["id"], "youtube_shorts",
   new project without approving it. Pending edits are saved first.
 
 See [F5 verification and editorial limits](creator-formats.md#f5--clip-finder).
+
+## Long-form YouTube
+
+```python
+project = studio.update(project["id"], {"settings": {
+    "chapters": [{"start": 0, "title": "Intro"}, {"start": 134, "title": "The atmosphere"},
+                 {"start": 342, "title": "How warm is too warm"}],
+    "thumbnail": {"text": "Climate change is simple"},  # "time" in program seconds; omit for automatic
+    "end_screen_s": 20,
+}}, project["revision"])
+```
+
+- Only YouTube projects use these settings. `chapters` (program seconds, sorted, titles up to 100 characters), `thumbnail` (`time`, `text`), `subtitles_file` (default true) and `end_screen_s` (5–20) are optional, part of the digest, and `null` removes each.
+- `Studio.suggest_chapters(project_id)` / `POST /projects/{id}/chapters/suggest` returns suggestions with keywords and reasons; nothing is saved. `Studio.thumbnail_preview(project_id, time=None, text=None)` / `GET /projects/{id}/thumbnail-preview?time=&text=` returns a 1280×720 JPEG data URL and the size the export will make.
+- Edits that change the cut move chapters with their footage and return notes; a final is refused while chapters break YouTube's rules (first at 0:00, at least three, each at least 10 s).
+- `preview` and `final` results gain `longform` (`chapters_embedded`, `chapter_problems`, `subtitle_cues`, `thumbnail`). `qa` adds `chapters`, `subtitles_file`, `thumbnail` and, with `end_screen_s`, `end_screen`.
+- `cutroom_project get` adds `longform` with the chapters, `chapter_problems`, the description text and, while there are none, `suggested_chapters`.
 
 ## Platform versions (derived projects)
 

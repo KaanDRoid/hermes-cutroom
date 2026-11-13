@@ -205,6 +205,10 @@ const CHECK_TEXT = {
   pacing_face: ['Zoomed shots keep the face in the safe area', 'In some zoomed shots the face sits outside the safe area.'],
   pacing_transitions: ['Every cut has its transition', 'Some cuts kept a plain cut because a piece of the edit is very short.'],
   pacing_max_pause: ['No pause is longer than you chose', 'Some pauses are longer than the limit you set.'],
+  chapters: ['Chapters follow YouTube\u2019s rules', 'The chapters break a YouTube rule; see the Chapters list in Export.'],
+  subtitles_file: ['The subtitles file matches the words', 'The subtitles file has cues out of order or off their words.'],
+  thumbnail: ['The thumbnail is 16:9 and small enough', 'The thumbnail is enlarged from a small source, or its size or file is wrong.'],
+  end_screen: ['The end screen has room', 'Captions or titles show where the end screen goes, or the video is too short for one.'],
 };
 const STATUS_MARK = { pass: ['✓', 'OK'], warning: ['!', 'Note'], fail: ['✕', 'Problem'], skip: ['–', 'Not checked'] };
 
@@ -1082,6 +1086,15 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' } }, 'player:poster') : null;
   const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
   const marks = original ? removedRanges(view, total) : [];
+  // End-screen room: the last N seconds of a YouTube render, or of the edit while the original plays.
+  const endSeconds = Number.isFinite(view.settings?.end_screen_s) ? view.settings.end_screen_s : null;
+  const endScreen = (() => {
+    if (!endSeconds || (shown?.name || null) !== 'youtube') return false;
+    if (rendered) return ready && Number.isFinite(total) && now >= total - endSeconds;
+    const ranges = view.segments || baseSegments(view);
+    const length = programLength(view);
+    return media?.kind === 'source' && length > 0 && now >= programToSource(ranges, Math.max(0, length - endSeconds)) && now <= (ranges.at(-1)?.end ?? 0);
+  })();
   const zoneLabel = zone ? ` (${shown.label} safe zone: the shaded parts may be covered by the app)` : rendered ? ' (this video was made without a platform)' : ' (choose a platform in Style)';
   return el('div', { style: { ...stack, gap: 8 }, children: [
     el('div', { style: { ...row, justifyContent: 'space-between' }, children: [
@@ -1096,6 +1109,9 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         player, still,
         showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
         cue ? jsx(CaptionOverlay, { cue, zone, portrait: tall, settings: view.settings || {}, time: now }, 'caption') : null,
+        endScreen ? el('div', { 'data-cutroom-endscreen': true, 'aria-label': 'End screen space', style: { position: 'absolute', top: percent(zone?.top ?? 0.05), bottom: percent(zone?.bottom ?? 0.05), left: percent(zone?.left ?? 0.05), right: percent(zone?.right ?? 0.05),
+          border: `2px dashed color-mix(in srgb, ${ON_STAGE} 80%, transparent)`, borderRadius: 4, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', padding: 6, pointerEvents: 'none' },
+        children: el('span', { style: { fontSize: 12, padding: '2px 6px', borderRadius: 4, background: STAGE, color: ON_STAGE }, children: `End screen · last ${endSeconds} s` }) }, 'endscreen') : null,
         !media && offer && progress === null ? el('div', { style: center, children: jsx(Button, { onClick: () => load(offer.kind, true), children: offer.size ? `Load video (${megabytes(offer.size)})` : 'Load video' }) }, 'offer') : null,
         progress !== null ? el('div', { style: center, children: [el('span', { children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress' })] }, 'loading') : null,
       ] }, 'frame'),
@@ -1575,9 +1591,12 @@ function ExportStep({ kit }) {
   const [error, setError] = useState(null);
   const finalJob = jobs.find(job => ['final', 'cover'].includes(job.action) && ACTIVE.includes(job.status));
   const download = async kind => { setError(null); try { await downloadArtifact(ctx, project, kind); } catch (failure) { setError(failure); } };
-  const files = [['final', 'Download video'], ['captions_srt', 'Download SRT captions'], ['captions_vtt', 'Download VTT captions'], ['cover', 'Download cover'], ['quality', 'Download report']];
+  const youtube = kit.profile?.name === 'youtube';
+  const files = [['final', 'Download video'], ['captions_srt', 'Download SRT captions'], ['captions_vtt', 'Download VTT captions'], ['cover', 'Download cover'],
+    ...(youtube ? [['thumbnail', 'Download thumbnail'], ['chapters', 'Download chapter list']] : []), ['quality', 'Download report']];
   return el('div', { style: stack, children: [
     el('h2', { style: h2s, children: 'Export' }),
+    youtube ? jsx(LongFormPanel, { kit }, 'longform') : null,
     approved ? el('p', { style: muted, children: 'This makes the final video from exactly the version you approved.' })
       : el('div', { style: { ...panel, padding: 12, gap: 8, alignItems: 'flex-start' }, children: [
         el('p', { style: { margin: 0, fontSize: 13 }, children: 'Approve this version in Review before exporting. Export makes exactly the version you approved.' }),
@@ -1591,6 +1610,177 @@ function ExportStep({ kit }) {
       el('p', { style: muted, children: 'Nothing is uploaded or posted. Files are saved where you choose.' }),
     ] }),
     jsx(Notice, { error }),
+  ] });
+}
+
+// Long-form YouTube: chapters, thumbnail, subtitles file and end-screen room. Times are program time.
+const CHAPTER_MIN = 10;
+const twoDigits = value => String(value).padStart(2, '0');
+const chapterClock = (value, hours = false) => {
+  const total = Math.floor((Number(value) || 0) + 1e-6);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return hours ? `${h}:${twoDigits(m)}:${twoDigits(s)}` : `${h * 60 + m}:${twoDigits(s)}`;
+};
+// "1:05", "65" or "1:02:03" to seconds; null when it is not a time.
+const parseClock = value => {
+  const parts = String(value ?? '').trim().split(':');
+  if (!parts[0] || parts.length > 3 || parts.some(part => !/^\d+(\.\d+)?$/.test(part))) return null;
+  return parts.reduce((sum, part) => sum * 60 + Number(part), 0);
+};
+const programLength = view => (view.segments || baseSegments(view)).reduce((sum, segment) => sum + Math.max(0, segment.end - segment.start), 0);
+const programToSource = (segments, time) => {
+  let offset = 0;
+  for (const segment of segments) { const length = segment.end - segment.start; if (time < offset + length) return segment.start + Math.max(0, time - offset); offset += length; }
+  return segments.at(-1)?.end ?? time;
+};
+// Same rules and words as the backend (YouTube Help: first at 0:00, at least three, each at least 10 s).
+function chapterProblems(chapters, duration) {
+  if (!chapters.length) return [];
+  const hours = duration >= 3600;
+  const problems = [];
+  if (chapters.length < 3) problems.push(`YouTube needs at least three chapters; add ${3 - chapters.length} more.`);
+  if (Math.floor(chapters[0].start + 1e-6) !== 0) problems.push('The first chapter must start at 0:00.');
+  chapters.forEach((chapter, index) => {
+    const start = Math.floor(chapter.start + 1e-6);
+    const label = `“${chapter.title}” (${chapterClock(start, hours)})`;
+    if (start >= duration) { problems.push(`${label} starts after the video ends (${chapterClock(duration, hours)}).`); return; }
+    const end = index + 1 < chapters.length ? Math.floor(chapters[index + 1].start + 1e-6) : duration;
+    const length = Math.min(end, duration) - start;
+    if (length < CHAPTER_MIN) problems.push(`${label} is ${Math.max(0, Math.trunc(length))} s long; chapters need at least ${CHAPTER_MIN} s.`);
+  });
+  return problems;
+}
+const validShot = value => value && typeof value.data_url === 'string' && value.data_url.length < 4000000 && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value.data_url);
+
+function LongFormPanel({ kit }) {
+  const { ctx, view, edit, playback } = kit;
+  const settings = view.settings || {};
+  const chapters = Array.isArray(settings.chapters) ? settings.chapters : [];
+  const duration = programLength(view);
+  const hours = duration >= 3600;
+  const problems = chapterProblems(chapters, duration);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [shot, setShot] = useState(null);
+  const saveChapters = (next, label, group = null) => edit({ settings: { chapters: next.length ? [...next].sort((a, b) => a.start - b.start) : null } }, label, group);
+  const change = (index, patch, label, group) => saveChapters(chapters.map((chapter, i) => (i === index ? { ...chapter, ...patch } : chapter)), label, group);
+  const suggest = async () => {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await ctx.rest(`/projects/${enc(view.id)}/chapters/suggest`, { method: 'POST' });
+      const list = (Array.isArray(result?.chapters) ? result.chapters : []).filter(item => Number.isFinite(item?.start) && typeof item?.title === 'string' && item.title.trim())
+        .map(item => ({ start: item.start, title: item.title.trim().slice(0, 100) }));
+      if (!list.length) throw new Error('No chapters could be suggested for this video.');
+      saveChapters(list, 'Suggest chapters');
+    } catch (failure) { setError(failure); } finally { setBusy(false); }
+  };
+  const add = () => {
+    const last = chapters.at(-1);
+    const start = last ? Math.floor(Math.max(0, Math.min(duration - CHAPTER_MIN, last.start + 60))) : 0;
+    saveChapters([...chapters, { start, title: last ? 'New chapter' : 'Intro' }], 'Add chapter');
+  };
+  const timeField = index => value => {
+    const seconds = parseClock(value);
+    if (seconds === null) return 'Write the time as minutes:seconds, like 1:05';
+    if (seconds > duration) return `Pick a time inside the video (up to ${chapterClock(duration, hours)})`;
+    change(index, { start: seconds }, 'Chapter time', `chapter-time:${index}`);
+    return undefined;
+  };
+  const titleField = index => value => {
+    const title = value.trim();
+    if (!title) return 'A chapter needs a title';
+    if (title.length > 100) return 'Use at most 100 characters';
+    change(index, { title }, 'Chapter title', `chapter-title:${index}`);
+    return undefined;
+  };
+  const thumbnail = settings.thumbnail || {};
+  const setThumbnail = (changes, label) => {
+    const next = { ...thumbnail };
+    for (const [key, value] of Object.entries(changes)) { if (value === undefined || value === '') delete next[key]; else next[key] = value; }
+    edit({ settings: { thumbnail: next } }, label, 'thumbnail');
+  };
+  const thumbnailTime = value => {
+    if (value.trim() === '') { setThumbnail({ time: undefined }, 'Thumbnail frame'); return undefined; }
+    const seconds = parseClock(value);
+    if (seconds === null) return 'Write the time as minutes:seconds, like 1:05';
+    if (seconds > duration) return `Pick a time inside the video (up to ${chapterClock(duration, hours)})`;
+    setThumbnail({ time: seconds }, 'Thumbnail frame');
+    return undefined;
+  };
+  const thumbnailText = value => {
+    if (value.trim().length > 100) return 'Use at most 100 characters';
+    setThumbnail({ text: value.trim() }, 'Thumbnail text');
+    return undefined;
+  };
+  const rendered = ['preview', 'final'].includes(playback?.kind) && Number.isFinite(playback?.time);
+  const previewThumbnail = async () => {
+    setError(null);
+    try {
+      const query = [`text=${enc(thumbnail.text || '')}`, ...(Number.isFinite(thumbnail.time) ? [`time=${thumbnail.time}`] : [])].join('&');
+      const result = await ctx.rest(`/projects/${enc(view.id)}/thumbnail-preview?${query}`);
+      if (!validShot(result)) throw new Error('The thumbnail preview could not be read');
+      setShot(result);
+    } catch (failure) { setError(failure); }
+  };
+  const endScreen = Number.isFinite(settings.end_screen_s) ? settings.end_screen_s : null;
+  const endField = value => {
+    if (value === '') return 'End screen must be between 5 and 20 seconds';
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 5 || number > 20) return 'End screen must be between 5 and 20 seconds';
+    edit({ settings: { end_screen_s: number } }, 'End screen', 'end-screen');
+    return undefined;
+  };
+  const block = chapters.map(chapter => `${chapterClock(chapter.start, hours)} ${chapter.title}`).join('\n');
+  return el('section', { 'aria-labelledby': 'cutroom-longform', style: { ...stack, gap: 16 }, children: [
+    el('div', { style: { ...stack, gap: 4 }, children: [
+      el('h3', { id: 'cutroom-longform', style: h3s, children: 'YouTube extras' }),
+      el('p', { style: muted, children: 'Chapters, a thumbnail and a subtitles file are made with each preview and final. They are part of the version you approve, so a change here needs a new preview.' }),
+    ] }, 'intro'),
+    el('section', { 'aria-labelledby': 'cutroom-chapters', style: { ...panel, gap: 10, padding: 12 }, children: [
+      el('div', { style: { ...row, justifyContent: 'space-between' }, children: [
+        el('h3', { id: 'cutroom-chapters', style: h3s, children: 'Chapters' }),
+        el('span', { style: row, children: [
+          jsx(Button, { variant: 'secondary', disabled: busy, onClick: suggest, children: busy ? 'Suggesting…' : 'Suggest chapters' }, 'suggest'),
+          jsx(Button, { variant: 'ghost', onClick: add, children: 'Add chapter' }, 'add'),
+        ] }),
+      ] }, 'head'),
+      el('p', { style: muted, children: 'Suggestions come from the words and pauses of this video. Check every title and change it to your own words.' }, 'hint'),
+      ...chapters.map((chapter, index) => el('div', { role: 'group', 'aria-label': `Chapter ${index + 1}`, style: { ...row, alignItems: 'flex-end', flexWrap: 'nowrap' }, children: [
+        jsx(Field, { label: 'Starts at', name: `chapters.${index}.time`, value: chapterClock(chapter.start, hours), onCommit: timeField(index), style: { width: 84 } }, 'time'),
+        el('div', { style: { flex: '1 1 auto', minWidth: 0 }, children: jsx(Field, { label: 'Title', name: `chapters.${index}.title`, value: chapter.title, onCommit: titleField(index) }) }, 'title'),
+        jsx(Button, { variant: 'ghost', 'aria-label': `Remove chapter ${index + 1}`, onClick: () => saveChapters(chapters.filter((_, i) => i !== index), 'Remove chapter'), children: 'Remove' }, 'remove'),
+      ] }, `chapter:${index}`)),
+      el('div', { role: 'status', 'aria-label': 'Chapter check', 'aria-live': 'polite', style: { ...stack, gap: 4 }, children: !chapters.length
+        ? el('p', { style: muted, children: 'No chapters yet. YouTube needs at least three, the first at 0:00, each at least 10 s long.' })
+        : problems.length ? problems.map((problem, index) => el('p', { style: alertStyle, children: `! ${problem}` }, `problem:${index}`))
+          : el('p', { style: muted, children: '✓ These chapters follow YouTube\u2019s rules. They are added to the video and to chapters.txt for the description.' }) }, 'check'),
+      chapters.length && !problems.length ? jsx(Disclosure, { title: 'Text for the YouTube description', children: el('pre', { style: { ...muted, whiteSpace: 'pre-wrap', margin: 0 }, children: block }) }, 'block') : null,
+    ] }, 'chapters'),
+    el('section', { 'aria-labelledby': 'cutroom-thumbnail', style: { ...panel, gap: 10, padding: 12 }, children: [
+      el('h3', { id: 'cutroom-thumbnail', style: h3s, children: 'Thumbnail' }),
+      el('p', { style: muted, children: 'A 16:9 picture from the video, as large as the video allows (up to 3840 × 2160), kept under 2 MB. Leave the time blank to pick a frame where the speaker faces the camera.' }),
+      el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 }, children: [
+        jsx(Field, { label: 'Frame at (blank = automatic)', name: 'thumbnail.time', value: Number.isFinite(thumbnail.time) ? chapterClock(thumbnail.time, hours) : '', placeholder: 'Automatic', onCommit: thumbnailTime }, 'time'),
+        jsx(Field, { label: 'Text on the thumbnail (optional)', name: 'thumbnail.text', value: thumbnail.text || '', onCommit: thumbnailText }, 'text'),
+      ] }),
+      el('div', { style: row, children: [
+        jsx(Button, { variant: 'secondary', onClick: previewThumbnail, children: 'Preview thumbnail' }, 'preview'),
+        jsx(Button, { variant: 'ghost', disabled: !rendered, title: rendered ? 'Use the frame shown in the player' : 'Play the preview to pick a frame', onClick: () => setThumbnail({ time: Math.floor(playback.time) }, 'Thumbnail frame'), children: 'Use the player position' }, 'player'),
+      ] }),
+      shot ? el('figure', { style: { ...stack, gap: 4, margin: 0 }, children: [
+        jsx('img', { src: shot.data_url, alt: `Thumbnail preview at ${chapterClock(shot.time, hours)}${shot.text ? ` with the text “${shot.text}”` : ''}`, style: { display: 'block', width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', borderRadius: 6 } }, 'image'),
+        el('figcaption', { style: muted, children: `Exported at ${shot.width} × ${shot.height}${shot.upscaled ? ', enlarged from a smaller video' : ''}.` }, 'caption'),
+      ] }) : null,
+    ] }, 'thumbnail'),
+    el('section', { 'aria-labelledby': 'cutroom-sidecars', style: { ...panel, gap: 10, padding: 12 }, children: [
+      el('h3', { id: 'cutroom-sidecars', style: h3s, children: 'Subtitles and end screen' }),
+      el('label', { style: { ...row, fontSize: 13 }, children: [jsx(Tick, { 'aria-label': 'Make a subtitles file (SRT)', checked: settings.subtitles_file !== false, onCheckedChange: checked => edit({ settings: { subtitles_file: checked === true } }, 'Subtitles file') }), 'Subtitles file (SRT) for YouTube: sentences of up to two lines'] }, 'srt'),
+      el('label', { style: { ...row, fontSize: 13 }, children: [jsx(Tick, { 'aria-label': 'Leave room for an end screen', checked: endScreen !== null, onCheckedChange: checked => edit({ settings: { end_screen_s: checked === true ? 20 : null } }, 'End screen', 'end-screen') }), 'Leave room for an end screen'] }, 'end'),
+      jsx(Field, { label: 'End screen length, s (5–20)', name: 'end_screen_s', type: 'number', value: endScreen ?? '', disabled: endScreen === null, onCommit: endField }, 'end-seconds'),
+      el('p', { style: muted, children: duration < 25 ? 'YouTube adds end screens only to videos of at least 25 s.' : 'The checks warn when captions or titles show in those last seconds; the player marks the space.' }, 'end-note'),
+    ] }, 'sidecars'),
+    jsx(Notice, { error }, 'error'),
   ] });
 }
 

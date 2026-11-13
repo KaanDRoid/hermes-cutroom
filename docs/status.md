@@ -27,6 +27,14 @@
   candidates 3, 4, 6 and 7 read better alone than the first two. Quiet-gap checks
   are a listen-proxy, not a complete listening review. Nothing was approved or uploaded.
 
+## November 13 — F6 long-form YouTube (branch `feat/f6-long-form`)
+
+- Added YouTube chapters in program time (first at 0:00, at least three, each at least 10 s, from YouTube Help, checked 2026-11-13) that move with later cuts and block a final export while they break a rule; local chapter suggestions from the transcript (sentence starts with the least word overlap, titles from distinctive words); `chapters.txt` plus chapters embedded in the MP4; a sentence-based `captions.srt` (two lines of 42, 5/6–7 s, no overlaps); a 16:9 JPEG thumbnail under 2 MB from a face-forward frame with optional text beside the face; and an optional end screen of 5–20 s. QA adds `chapters`, `subtitles_file`, `thumbnail` and `end_screen`; Desktop gets YouTube extras in Export and an end-screen mark in the player; chat reads chapters and problems from `cutroom_project get`. Details: [creator formats F6](creator-formats.md#f6--long-form-youtube).
+- Fixed on the way: words timed with zero length by the recogniser were missing from the subtitles file (26 of 2,577 on the real talk).
+- On a real 17:43 TEDx talk (full-length 1080p YouTube preview): seven suggested chapters read back by `ffprobe` and matching `chapters.txt`, the shortest 85 s; 220 SRT cues holding every kept word, each starting on its first word; a 1920×1080, 106,982-byte thumbnail; all four new checks pass. The chapter boundaries match the talk's sections; several titles need renaming.
+- Local gates: **487 Python tests OK** (14 skipped without local models and media), **61/61 Desktop tests**, Ruff check and format clean. Logs: `artifacts/f6/red.log`, `artifacts/f6/green.log`.
+- Not yet done: a native Desktop check of the new controls.
+
 ## November 13 — F3 pacing (branch `feat/f3-pacing`)
 
 - Added `settings.pacing`: alternating punch-ins on edit cuts, centred on the face and kept under a total enlargement limit (default 2×, zooms are reduced and reported rather than exceeding it); an optional eased push-in on long ranges; a maximum pause between kept words that rebuilds the segments; and crossfade or dip transitions built from handles so program length, captions and sync do not change. QA adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and `pacing_max_pause`; Desktop gets a Pacing group in Style; the chat skill suggests pacing for talking heads and asks first. Details: [creator formats F3](creator-formats.md#f3--pacing).
