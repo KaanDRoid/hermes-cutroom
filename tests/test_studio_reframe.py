@@ -182,12 +182,40 @@ class FramingSettingsTests(_Case):
         project = self.settings(
             {"framing": "center_crop", "framing_keyframes": [{"time": 3, "x": 0.5}]}
         )
-        with self.assertRaisesRegex(ValueError, "range"):
+        # Shortening the edit drops pins past the new end and says so.
+        updated = self.studio.update(
+            project["id"],
+            {"segments": [{"start": 0, "end": 1}]},
+            project["revision"],
+        )
+        self.assertEqual(updated["settings"]["framing_keyframes"], [])
+        self.assertIn("3", " ".join(updated["notes"]))
+        stored = self.studio.get(project["id"])
+        self.assertNotIn("notes", stored)
+        self.assertEqual(stored["settings"]["framing_keyframes"], [])
+        # A pin supplied past the end is refused with a message naming it.
+        with self.assertRaisesRegex(ValueError, r"keyframe at 2(\.0)? s.*past"):
             self.studio.update(
                 project["id"],
-                {"segments": [{"start": 0, "end": 1}]},
-                project["revision"],
+                {"settings": {"framing_keyframes": [{"time": 2, "x": 0.5}]}},
+                stored["revision"],
             )
+
+    def test_transcript_edits_are_never_blocked_by_late_pins(self):
+        project = self.settings(
+            {
+                "framing": "center_crop",
+                "framing_keyframes": [{"time": 0.5, "x": 0.4}, {"time": 3, "x": 0.5}],
+            }
+        )
+        updated = self.studio.update(
+            project["id"],
+            {"segments": [{"start": 0, "end": 1}]},
+            project["revision"],
+        )
+        self.assertEqual(
+            updated["settings"]["framing_keyframes"], [{"time": 0.5, "x": 0.4}]
+        )
 
 
 class VisionCompletionTests(_Case):

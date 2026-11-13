@@ -571,9 +571,13 @@ class QualityTests(unittest.TestCase):
         report["face_frames"] = report["face_frames"][:-3]
         self.assertEqual(self.checks(report)["framing_frames"]["status"], "fail")
 
-    def test_reports_without_faces_skip_the_face_check(self):
+    def test_face_track_reports_without_faces_warn_instead_of_skipping(self):
         report = json.loads(json.dumps(self.result["framing"]))
         report["face_frames"] = []
+        self.assertEqual(
+            self.checks(report)["framing_face_safe_zone"]["status"], "warning"
+        )
+        report["mode"] = "center_crop"
         self.assertEqual(
             self.checks(report)["framing_face_safe_zone"]["status"], "skip"
         )

@@ -11,6 +11,11 @@ MODES = ("fit", "blur_fill", "center_crop", "face_track")
 TRACKING = {"dead_zone": 0.035, "max_speed": 1.2, "max_acceleration": 2.5, "tau": 0.18}
 MAX_FRAMES = 250000
 MAX_SAMPLES = 100000
+# Each axis's crop expression is a balanced if() tree of at most this many
+# linear pieces; FFmpeg parses it once, but the filter script grows with it.
+MAX_PIECES = 20000
+# Below this share of program frames with a usable face, face_track warns.
+MIN_FACE_COVERAGE = 0.5
 
 
 def number(value, low=0, high=86400):
@@ -40,10 +45,13 @@ def validate_keyframes(keys, duration=86400):
             or not {"time", "x"} <= set(key)
         ):
             raise ValueError("Each framing keyframe needs time, x and optional y")
-        item = {
-            "time": number(key["time"], high=duration),
-            "x": number(key["x"], high=1),
-        }
+        time = number(key["time"])
+        if time > duration:
+            raise ValueError(
+                f"Framing keyframe at {time:g} s is past the end of the "
+                f"{duration:g} s program; remove it or move it earlier"
+            )
+        item = {"time": time, "x": number(key["x"], high=1)}
         if "y" in key:
             item["y"] = number(key["y"], high=1)
         if item["time"] <= previous:
@@ -153,10 +161,11 @@ def scene_cuts(source):
 
 
 def crop_size(sw, sh, ow, oh):
-    """Nearest even crop (within one pixel of the ideal aspect), no source loss outside crop."""
+    """Even crop nearest the target aspect; odd sources lose at most one pixel row/column."""
+    ew, eh = max(2, sw // 2 * 2), max(2, sh // 2 * 2)
     if sw / sh > ow / oh:
-        return min(sw, max(2, round(sh * ow / oh / 2) * 2)), sh
-    return sw, min(sh, max(2, round(sw * oh / ow / 2) * 2))
+        return min(ew, max(2, round(sh * ow / oh / 2) * 2)), eh
+    return ew, min(eh, max(2, round(sw * oh / ow / 2) * 2))
 
 
 def content_upscale(source, width, height, mode):
@@ -221,34 +230,83 @@ def _motion(targets, resets, scale, frames):
     return result
 
 
-def _manual(values, keys, axis, source, crop, frames, mode):
+def _smoothstep(u):
+    return u * u * (3 - 2 * u)
+
+
+def _manual(values, keys, axis, source, crop, frames, mode, ramp=1.0):
+    """Apply pins; returns the path and each frame's pin weight (0 = tracker only).
+
+    Between pins the crop eases (smoothstep). Before the first and after the
+    last pin, center_crop holds the pin; face_track follows the tracked path and
+    blends into and out of the pin over a ramp sized for the motion limits.
+    """
     selected = [key for key in keys if axis in key]
     if not selected:
-        return values
+        return values, [0.0] * len(values)
     anchors = [
         (key["time"], _clip(key[axis] * source - crop / 2, 0, source - crop))
         for key in selected
     ]
-    if mode == "face_track":
-        if anchors[0][0] > frames[0]:
-            anchors.insert(0, (frames[0], values[0]))
-        if anchors[-1][0] < frames[-1]:
-            anchors.append((frames[-1], values[-1]))
-    result = []
     times = [p[0] for p in anchors]
-    for timestamp in frames:
+
+    def ramp_time(time, value):
+        tracked = values[min(len(frames) - 1, bisect.bisect_left(frames, time))]
+        distance = abs(value - tracked)
+        # Smoothstep peaks at 1.5x mean speed and 6x distance/T^2 acceleration.
+        return ramp * max(
+            0.25,
+            1.5 * distance / (TRACKING["max_speed"] * crop),
+            math.sqrt(6 * distance / (TRACKING["max_acceleration"] * crop)),
+        )
+
+    ramps = (ramp_time(*anchors[0]), ramp_time(*anchors[-1]))
+    result, weights = [], []
+    for i, timestamp in enumerate(frames):
         index = bisect.bisect_right(times, timestamp)
-        if index == 0:
-            value = anchors[0][1]
-        elif index == len(anchors):
-            value = anchors[-1][1]
-        else:
+        if 0 < index < len(anchors):
             ta, a = anchors[index - 1]
             tb, b = anchors[index]
-            u = (timestamp - ta) / (tb - ta)
-            value = a + (b - a) * u * u * (3 - 2 * u)
+            value, weight = a + (b - a) * _smoothstep((timestamp - ta) / (tb - ta)), 1
+        elif mode != "face_track":
+            value, weight = anchors[0 if index == 0 else -1][1], 1
+        else:
+            ta, a = anchors[0] if index == 0 else anchors[-1]
+            u = 1 - abs(timestamp - ta) / ramps[0 if index == 0 else 1]
+            weight = _smoothstep(u) if u > 0 else 0.0
+            value = values[i] + (a - values[i]) * weight
         result.append(value)
-    return result
+        weights.append(weight)
+    return result, weights
+
+
+def _pin_error(values, weights, scale, frames, resets):
+    """Speed/acceleration breach of a pinned path, or None.
+
+    A reset frame (edit or scene cut) may jump; when it does not, velocity
+    carries across it, so a smooth pan over a cut is not a stop and restart.
+    Frames driven only by the tracker are bounded by construction.
+    """
+    velocity = None
+    top = TRACKING["max_speed"] * scale
+    for i in range(1, len(values)):
+        dt = max(1e-6, frames[i] - frames[i - 1])
+        speed = (values[i] - values[i - 1]) / dt
+        if i in resets:
+            velocity = None if abs(speed) > top + 1e-5 else speed
+            continue
+        if not max(weights[max(0, i - 2) : i + 1]):
+            velocity = speed
+            continue
+        if abs(speed) > top + 1e-5:
+            return "Framing keyframes exceed pan speed; space them further apart"
+        if (
+            velocity is not None
+            and abs(speed - velocity) / dt > TRACKING["max_acceleration"] * scale + 1e-4
+        ):
+            return "Framing keyframes exceed pan acceleration; space them further apart"
+        velocity = speed
+    return None
 
 
 def plan_path(
@@ -264,12 +322,22 @@ def plan_path(
     edit_resets=(),
     zone=None,
     keyframes=(),
+    sample_interval=None,
 ):
+    """Plan the crop path in program frames.
+
+    `faces` are Vision samples in program time; only samples inside the
+    current shot (between resets) are used. At a reset the crop starts at the
+    first sample of the new shot (look-ahead) and stays centred until a sample
+    exists. A face frame is "fresh" when its sample is at most one sampling
+    interval plus one frame away; older held faces are "stale".
+    """
     validate_framing(mode)
     if not frames or len(frames) > MAX_FRAMES:
         raise ValueError(
             "Reframing requires 1 to 250000 output frames; split longer edits"
         )
+    count = len(frames)
     sw, sh = source_size
     cw, ch = crop_size
     zone = zone or {"left": 0.05, "right": 0.05, "top": 0.05, "bottom": 0.05}
@@ -278,68 +346,78 @@ def plan_path(
     resets = set(edit_resets) | {0}
     for cut in scene_cuts or []:
         index = bisect.bisect_left(frames, cut - 0.000001)
-        if index < len(frames):
+        if index < count:
             resets.add(index)
+    resets = {index for index in resets if 0 <= index < count}
+    if sample_interval is None:
+        gaps = sorted(b - a for a, b in zip(sample_times, sample_times[1:]))
+        sample_interval = gaps[len(gaps) // 2] if gaps else 1 / fps
+    max_age = sample_interval + 1 / fps + 1e-6
+    bounds = sorted(resets) + [count]
     targets_x, targets_y, face_frames = [], [], []
-    x, y = (sw - cw) / 2, (sh - ch) / 2
-    for index, timestamp in enumerate(frames):
-        if index in resets:
-            x, y = (sw - cw) / 2, (sh - ch) / 2
-        j = bisect.bisect_right(sample_times, timestamp + 0.000001) - 1
-        face = selected[j][1] if j >= 0 else None
-        if face:
-            fx, fy, _, _, eye, _ = face
-            fx, fy = fx * sw, fy * sh
-            x = _clip(fx - cw * (zone["left"] + 1 - zone["right"]) / 2, 0, sw - cw)
-            y = _clip(
-                eye * sh - ch * (zone["top"] + (1 - zone["top"] - zone["bottom"]) / 3),
-                0,
-                sh - ch,
-            )
-            # Keep the centre within the safe area when physical crop limits permit it.
-            y = _clip(
-                y,
-                max(0, fy - ch * (1 - zone["bottom"])),
-                min(sh - ch, max(0, fy - ch * zone["top"])),
-            )
-            face_frames.append([index, fx, fy])
-        targets_x.append(x)
-        targets_y.append(y)
-    x = _motion(targets_x, resets, cw, frames)
-    y = _motion(targets_y, resets, ch, frames)
-    x = _manual(x, keyframes, "x", sw, cw, frames, mode)
-    y = _manual(y, keyframes, "y", sh, ch, frames, mode)
-    x = [_clip(v, 0, sw - cw) for v in x]
-    y = [_clip(v, 0, sh - ch) for v in y]
-    # Pins never silently exceed the motion budget: request wider spacing instead.
-    for values, scale in ((x, cw), (y, ch)):
-        velocity = 0.0
-        for i in range(1, len(values)):
-            if i in resets:
-                velocity = 0.0
-                continue
-            dt = max(1e-6, frames[i] - frames[i - 1])
-            speed = (values[i] - values[i - 1]) / dt
-            if keyframes and abs(speed) > TRACKING["max_speed"] * scale + 1e-5:
-                raise ValueError(
-                    "Framing keyframes exceed pan speed; space them further apart"
+    stale = uncovered = 0
+    for start, stop in zip(bounds, bounds[1:]):
+        # Samples of this shot only: never the previous shot or removed content.
+        low = bisect.bisect_left(sample_times, frames[start] - 0.000001)
+        high = (
+            bisect.bisect_left(sample_times, frames[stop] - 0.000001)
+            if stop < count
+            else len(sample_times)
+        )
+        x, y = (sw - cw) / 2, (sh - ch) / 2
+        for index in range(start, stop):
+            timestamp = frames[index]
+            j = bisect.bisect_right(sample_times, timestamp + 0.000001) - 1
+            if j < low:
+                j = low if low < high else None
+            face = selected[j][1] if j is not None else None
+            if face:
+                fx, fy, _, _, eye, _ = face
+                fx, fy = fx * sw, fy * sh
+                x = _clip(fx - cw * (zone["left"] + 1 - zone["right"]) / 2, 0, sw - cw)
+                y = _clip(
+                    eye * sh
+                    - ch * (zone["top"] + (1 - zone["top"] - zone["bottom"]) / 3),
+                    0,
+                    sh - ch,
                 )
-            if (
-                keyframes
-                and abs(speed - velocity) / dt
-                > TRACKING["max_acceleration"] * scale + 1e-4
-            ):
-                raise ValueError(
-                    "Framing keyframes exceed pan acceleration; space them further apart"
+                # Keep the centre within the safe area when physical crop limits permit it.
+                y = _clip(
+                    y,
+                    max(0, fy - ch * (1 - zone["bottom"])),
+                    min(sh - ch, max(0, fy - ch * zone["top"])),
                 )
-            velocity = speed
-    return {
+                if abs(timestamp - sample_times[j]) <= max_age:
+                    face_frames.append([index, fx, fy])
+                else:
+                    stale += 1
+            else:
+                uncovered += 1
+            targets_x.append(x)
+            targets_y.append(y)
+    tracked_x = _motion(targets_x, resets, cw, frames)
+    tracked_y = _motion(targets_y, resets, ch, frames)
+    error = None
+    # face_track widens its blend ramps before refusing pins.
+    for ramp in (1.1, 1.4, 2, 3, 4.5, 7, 10) if mode == "face_track" else (1,):
+        x, wx = _manual(tracked_x, keyframes, "x", sw, cw, frames, mode, ramp)
+        y, wy = _manual(tracked_y, keyframes, "y", sh, ch, frames, mode, ramp)
+        x = [_clip(v, 0, sw - cw) for v in x]
+        y = [_clip(v, 0, sh - ch) for v in y]
+        error = _pin_error(x, wx, cw, frames, resets) or _pin_error(
+            y, wy, ch, frames, resets
+        )
+        if not error:
+            break
+    if keyframes and error:
+        raise ValueError(error)
+    report = {
         "mode": mode,
         "crop": [cw, ch],
         "source": [sw, sh],
         "frame": list(frame_size),
         "fps": fps,
-        "frames": len(frames),
+        "frames": count,
         "x": x,
         "y": y,
         "resets": sorted(resets),
@@ -353,6 +431,23 @@ def plan_path(
         "keyframed": bool(keyframes),
         "warnings": [],
     }
+    if mode == "face_track":
+        fraction = len(face_frames) / count
+        report["face_coverage"] = {
+            "fresh_frames": len(face_frames),
+            "stale_frames": stale,
+            "uncovered_frames": uncovered,
+            "fraction": fraction,
+            "max_sample_age_s": max_age,
+        }
+        if fraction < MIN_FACE_COVERAGE:
+            report["warnings"].append(
+                f"A usable face was found in {fraction:.0%} of program frames "
+                f"(below {MIN_FACE_COVERAGE:.0%}); the crop holds or stays centred "
+                "elsewhere. Small faces in wide shots can be missed: Vision "
+                "analyses frames at 640 px wide"
+            )
+    return report
 
 
 def path_expression(values, resets=()):
@@ -360,26 +455,42 @@ def path_expression(values, resets=()):
     boundaries = sorted({0, len(values), *resets})
     pieces = []
 
-    def split(a, b):
-        if a == b:
-            pieces.append((a, b, values[a], 0))
-            return
-        slope = (values[b] - values[a]) / (b - a)
-        errors = [
-            (abs(values[i] - (values[a] + slope * (i - a))), i) for i in range(a + 1, b)
-        ]
-        error, pivot = max(errors, default=(0, a))
-        if error > 0.1:
-            split(a, pivot)
-            split(pivot, b)
-        else:
-            pieces.append((a, b, values[a], slope))
+    def split(first, last):
+        # Iterative (left first) so adversarial paths cannot exhaust the stack.
+        stack = [(first, last)]
+        while stack:
+            a, b = stack.pop()
+            if a == b:
+                pieces.append((a, b, values[a], 0))
+                continue
+            slope = (values[b] - values[a]) / (b - a)
+            error, pivot = max(
+                (
+                    (abs(values[i] - (values[a] + slope * (i - a))), i)
+                    for i in range(a + 1, b)
+                ),
+                default=(0, a),
+            )
+            if error > 0.1:
+                # Split at the worst point unless it hugs an end of a long span;
+                # then halve, which bounds the work at O(n log n).
+                if b - a > 32 and min(pivot - a, b - pivot) < (b - a) // 8:
+                    pivot = (a + b) // 2
+                stack.append((pivot, b))
+                stack.append((a, pivot))
+            else:
+                pieces.append((a, b, values[a], slope))
+            if len(pieces) + len(stack) > MAX_PIECES:
+                # Every pending span adds at least one piece.
+                raise ValueError(
+                    f"Crop path for {len(values)} frames needs more than "
+                    f"{MAX_PIECES} expression pieces per axis (the limit); split "
+                    "the edit into shorter renders"
+                )
 
     for a, b in zip(boundaries, boundaries[1:]):
         if a < b:
             split(a, b - 1)
-    if len(pieces) > 20000:
-        raise ValueError("Crop expression exceeds 20000 pieces; split the edit")
 
     def balanced(items):
         if len(items) == 1:
@@ -429,6 +540,18 @@ def validate_report(report):
         number(face[0], high=count - 1)
         number(face[1], high=100000)
         number(face[2], high=100000)
+    coverage = report.get("face_coverage")
+    if coverage is not None:
+        if not isinstance(coverage, dict) or set(coverage) != {
+            "fresh_frames",
+            "stale_frames",
+            "uncovered_frames",
+            "fraction",
+            "max_sample_age_s",
+        }:
+            raise ValueError("Invalid face coverage")
+        for value in coverage.values():
+            number(value, high=MAX_FRAMES)
     zone = report.get("zone")
     if not isinstance(zone, dict) or set(zone) != {"left", "right", "top", "bottom"}:
         raise ValueError("Invalid framing safe zone")
@@ -441,8 +564,8 @@ def quality_checks(add, report, decoded_frames):
     if report is None:
         add(
             "framing_face_safe_zone",
-            "skip",
-            {"reason": "No crop-path report available"},
+            "warning",
+            {"reason": "face_track render without a crop-path report; not checked"},
         )
         return
     validate_report(report)
@@ -481,6 +604,20 @@ def quality_checks(add, report, decoded_frames):
             "method": "planned continuous path; encoded crop quantizes to chroma pixels",
         },
     )
+    factor = max(a / b for a, b in zip(report["frame"], report["crop"]))
+    add(
+        "framing_upscale",
+        "warning" if factor > 1.0001 else "pass",
+        {
+            "crop": report["crop"],
+            "frame": report["frame"],
+            "factor": factor,
+            "meaning": "crop window in square display pixels enlarged to the output "
+            "frame; detail is interpolated, not recorded",
+        },
+    )
+    tracked = report["mode"] == "face_track"
+    coverage = report.get("face_coverage") or {}
     zone = report["zone"]
     inside = total = 0
     for index, fx, fy in report["face_frames"]:
@@ -497,23 +634,47 @@ def quality_checks(add, report, decoded_frames):
     fraction = inside / total if total else None
     add(
         "framing_face_safe_zone",
-        "skip" if not total else "pass" if fraction >= 0.95 else "fail",
+        ("warning" if tracked else "skip")
+        if not total
+        else "pass"
+        if fraction >= 0.95
+        else "fail",
         {
             "inside_fraction": fraction,
             "required_fraction": 0.95,
             "sampled_face_frames": total,
             "inside": inside,
-            "no_face_frames": count - total,
-            "method": "selected source face centres projected through planned quantized crop, not output redetection",
+            "stale_frames": coverage.get("stale_frames"),
+            "uncovered_frames": coverage.get("uncovered_frames", count - total),
+            "max_sample_age_s": coverage.get("max_sample_age_s"),
+            "method": "frames with a fresh face sample of the same shot (age at most "
+            "one sampling interval plus one frame); selected face centres projected "
+            "through the planned quantized crop, not output redetection",
+            **({} if total else {"reason": "No usable face sample in any frame"}),
         },
     )
+    if tracked:
+        share = total / count
+        add(
+            "framing_face_coverage",
+            "warning" if share < MIN_FACE_COVERAGE else "pass",
+            {
+                "fresh_fraction": share,
+                "required_fraction": MIN_FACE_COVERAGE,
+                "fresh_frames": total,
+                "stale_frames": coverage.get("stale_frames"),
+                "uncovered_frames": coverage.get("uncovered_frames"),
+                "meaning": "share of program frames with a usable face; elsewhere "
+                "the crop holds or stays centred",
+            },
+        )
 
 
 def prepare_path(source, info, ranges, settings, width, height):
     """Map decoded source PTS to the exact kept frames; expressions use joined n."""
     import json
 
-    from .postproduction import _frame_rate, _run, _source_video
+    from .postproduction import _frame_rate, _run, _source_video, _timeline
 
     fps = _frame_rate(info) or 30
     data = json.loads(
@@ -556,9 +717,17 @@ def prepare_path(source, info, ranges, settings, width, height):
     if settings.get("framing") == "face_track" and "framing_analysis" not in settings:
         raise ValueError("Run Vision before rendering face_track framing")
     validate_analysis(analysis)
+    # One timeline: FFmpeg's filter time (container start = 0), as used by the
+    # trim edges, scdet and segment times. Vision times start at the first video
+    # frame, which sits `origin` seconds into that timeline.
+    base, origin = _timeline(info)
+    timestamps = [t - base for t in timestamps]
     selected, samples, resets, cuts = [], [], [], []
-    sample_times = [sample[0] for sample in analysis["faces"]]
+    source_times = [sample[0] + origin for sample in analysis["faces"]]
+    gaps = sorted(b - a for a, b in zip(source_times, source_times[1:]))
+    sample_interval = gaps[len(gaps) // 2] if gaps else 1 / fps
     source_cuts = analysis["scene_cuts"] or []
+    half = 0.5 / fps
     for start, end in ranges:
         indices = [t for t in timestamps if start <= t < end]
         if not indices:
@@ -568,9 +737,11 @@ def prepare_path(source, info, ranges, settings, width, height):
         for t in indices:
             index = len(selected)
             selected.append(t)
-            j = bisect.bisect_right(sample_times, t + 0.000001) - 1
-            faces = analysis["faces"][j][1] if j >= 0 else []
-            samples.append([index / fps, faces])
+            # Only a sample of this very frame is carried; samples from removed
+            # content never reach the program.
+            j = bisect.bisect_left(source_times, t - half)
+            if j < len(source_times) and source_times[j] < t + half:
+                samples.append([index / fps, analysis["faces"][j][1]])
             if bisect.bisect_right(source_cuts, t + 1e-6) > bisect.bisect_right(
                 source_cuts, last_t
             ):
@@ -604,6 +775,7 @@ def prepare_path(source, info, ranges, settings, width, height):
         edit_resets=resets,
         zone=zone,
         keyframes=keys,
+        sample_interval=sample_interval,
     )
     if analysis["scene_cuts"] is None:
         report["warnings"].append(
