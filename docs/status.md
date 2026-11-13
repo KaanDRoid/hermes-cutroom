@@ -1,5 +1,43 @@
 # Implementation status
 
+## November 13 — review fixes R01, R04, R05 and R06 (`feat/review-search-delivery`)
+
+- **R01:** clip discovery now preflights input and enumeration budgets, streams
+  exact greedy selection and materializes only picked records. Dense 1,000-word
+  timestamps are rejected before scoring instead of allocating all windows.
+  A deadline-bounded child probe measured 565,616 peak traced bytes / 0.156 s
+  for rejection; this is Python allocation evidence, not process RSS. The saved
+  2,577-word, 1063.221 s real-talk transcript returns eight candidates identical
+  in every result field to the previous implementation without optional
+  energy/faces (0.078 s new versus 0.032 s baseline in that local run).
+- **R04:** chat currentness uses the facade's artifact/digest/publication-byte
+  validation; approval also matches the current review digest. Historical
+  output never receives a `MEDIA:` handover hint. The retained real-render
+  music-swap repro now reports `current: false`, `approved: false`, no hint;
+  tampered/missing outputs are covered separately. Synthetic automated approval
+  in that repro is guard testing, not human-approval acceptance.
+- **R05:** subtitle text too large to fit losslessly is explicitly rejected,
+  never truncated. QA independently compares delivered text with the original
+  transcript. Co-timed zero-length words survive SRT and VTT; unrepresentable
+  cue durations are errors rather than silent skips.
+- **R06:** thumbnail cache pairs are limited to 32 entries / 32 MiB per project,
+  pruned by recency under a per-project interprocess lock covering generation
+  and reads. Tests cover byte/count limits, same/different-key concurrency,
+  recency, abandoned namespaced temporaries and refusal to unlink outside the
+  cache. Unrelated poster files are preserved.
+- Failing-first logs for each finding and the final verification are retained
+  under `artifacts/review-fixes/`: **543 Python tests OK (14 skipped)** on
+  FFmpeg/ffprobe **9.0.2**, **67/67 Desktop checks**, Ruff check/format and
+  `node --check desktop/plugin.js` pass. The original four RED logs precede
+  source fixes; later missing-file and abandoned-temporary RED logs cover the
+  additional guards. Expanded cache checks were added after the first GREEN.
+- Limits: cooperative synchronous search budgets, not an OS-isolated worker;
+  separate optional audio-analysis timeout; no global cache budget; legacy
+  anonymous poster/thumbnail temporary files are not reaped. R02/R03 timeline
+  and FFmpeg 7.1 findings are outside this patch and remain release blockers
+  until separately verified. No native Desktop, external-service or publishing
+  acceptance is claimed.
+
 ## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
 
 - Added deterministic local discovery of whole-sentence 20–90 s clips, scored
