@@ -346,7 +346,7 @@ Status: implemented on `feat/f2-reframing` with the review fixes below; not yet 
 - **QA.** For `center_crop` and `face_track`, Studio passes the render's crop path into QA, which adds:
   - `framing_frames`: the planned frame count equals the decoded frame count.
   - `framing_smoothness`: no frame-to-frame move above the speed limit, except on reset frames.
-  - `framing_upscale`: a warning whenever the crop window is enlarged to the output frame, for every crop render, with or without a platform profile (1.78× for 608×1080 to 1080×1920).
+  - `framing_upscale`: a warning whenever the crop window is enlarged to the output frame (1.78× for 608×1080 to 1080×1920). Platform renders report the same enlargement once, as `platform_upscale`, so `framing_upscale` is only added to renders without a platform profile.
   - `framing_face_safe_zone`: at least 95 % of frames with a fresh face sample keep the selected face centre inside the safe area of the planned (even-pixel) crop. Stale and uncovered frames are not counted and are reported separately. For `face_track` without any usable face the check is a warning, not a skip.
   - `framing_face_coverage` (`face_track` only): a warning below 50 % fresh face frames.
   - `platform_upscale` (from F0, platform profiles only) also uses the crop.
@@ -366,7 +366,7 @@ Status: implemented on `feat/f2-reframing` with the review fixes below; not yet 
   - `framing_frames` 450 of 450; `framing_smoothness` largest move 8.3 source px per frame against a limit of 24.3; `framing_face_safe_zone` 415 of 415 fresh face frames inside; `framing_face_coverage` 92 % (35 frames uncovered, none stale).
   - Independent check on the rendered output: MediaPipe on every fifth output frame found a face in 85 of 90 and the face centre inside the safe area in 83 of 85 (97.6 %).
   - Audio and video streams both 15.015 s from 0.
-  - `platform_upscale` and `framing_upscale` warn at 1.78×: the 608-pixel-wide crop is enlarged to 1080. That is expected for a 1080p landscape source and is reported.
+  - `platform_upscale` warns at 1.78×: the 608-pixel-wide crop is enlarged to 1080. That is expected for a 1080p landscape source and is reported.
   - Frames `face-track-00.png` … `face-track-14.png` and `blur-fill.png` from the first run were checked by eye (`artifacts/f2/f2-sheet.png`).
 - **Real footage, moving face** (`scripts/reframe_moving_evidence.py`, `artifacts/f2/evidence-moving/`): the Sandra clip scaled to 1280×720 slides across a black 1920×1080 canvas and back every 3 s (213 source px/s), 11.5 s at 29.97 fps, `face_track` for Reels, Vision frame step 5.
   - Vision found a face in 60 of 72 samples; Vision 4.7 s, preview 3.3 s, QA 2.9 s.
@@ -384,7 +384,7 @@ An independent review (`artifacts/f2/review/REVIEW.md`) found the defects below;
 - Anamorphic sources were cropped in storage pixels, squeezing a SAR 4:3 picture by 25 %. Crops are now planned and applied in square display pixels and upscaling is measured on that grid; crop sizes are even for odd sources.
 - `face_track` with no detected face rendered a centre crop and QA skipped the face check. Coverage is now reported, low coverage warns in the render and in QA, and the face check warns instead of skipping.
 - The face safe-zone check counted held samples of any age (12 samples covering 2 s counted 900 of 900 frames inside). It now counts only fresh samples and reports stale and uncovered frames.
-- Crop renders without a platform profile had no upscale check (a 5.35× upscale passed). `framing_upscale` now warns for every crop render.
+- Crop renders without a platform profile had no upscale check (a 5.35× upscale passed). `framing_upscale` now warns for them; platform renders keep reporting it once, as `platform_upscale`.
 - The expression limit error did not explain itself and adversarial paths could exhaust Python's recursion limit before reaching it. The split is now iterative with a bounded amount of work, and the error names the frame count and the 20,000-piece limit.
 - Shortening an edit below the last pin blocked the edit with "Framing values must be finite numbers in range". Late pins are now dropped with a note; a pin supplied past the end is refused by name.
 - A segment starting before a non-zero video start time was clamped to the first frame after it (start 1.3 s: segment [0, 1) showed source frames 31…47), and trim edges and `prepare_path` frame selection used different timelines that only happened to cancel. Both now use FFmpeg's filter timeline.

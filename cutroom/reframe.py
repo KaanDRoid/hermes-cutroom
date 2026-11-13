@@ -560,7 +560,7 @@ def validate_report(report):
     return report
 
 
-def quality_checks(add, report, decoded_frames):
+def quality_checks(add, report, decoded_frames, report_upscale=True):
     if report is None:
         add(
             "framing_face_safe_zone",
@@ -605,17 +605,19 @@ def quality_checks(add, report, decoded_frames):
         },
     )
     factor = max(a / b for a, b in zip(report["frame"], report["crop"]))
-    add(
-        "framing_upscale",
-        "warning" if factor > 1.0001 else "pass",
-        {
-            "crop": report["crop"],
-            "frame": report["frame"],
-            "factor": factor,
-            "meaning": "crop window in square display pixels enlarged to the output "
-            "frame; detail is interpolated, not recorded",
-        },
-    )
+    # Platform renders already report the crop's enlargement as platform_upscale.
+    if report_upscale:
+        add(
+            "framing_upscale",
+            "warning" if factor > 1.0001 else "pass",
+            {
+                "crop": report["crop"],
+                "frame": report["frame"],
+                "factor": factor,
+                "meaning": "crop window in square display pixels enlarged to the "
+                "output frame; detail is interpolated, not recorded",
+            },
+        )
     tracked = report["mode"] == "face_track"
     coverage = report.get("face_coverage") or {}
     zone = report["zone"]

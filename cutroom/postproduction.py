@@ -1949,6 +1949,7 @@ def quality_report(
             add,
             settings.get("framing_report"),
             len(points) if deltas is not None else None,
+            report_upscale=entry is None,
         )
     if entry is not None:
         _platform_fps(add, entry, info, settings, deltas)

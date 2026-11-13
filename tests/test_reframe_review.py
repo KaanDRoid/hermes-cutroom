@@ -225,6 +225,19 @@ class UpscaleQaTests(unittest.TestCase):
         )
         self.assertEqual(collect(small)["framing_upscale"]["status"], "pass")
 
+    def test_platform_renders_report_upscaling_once(self):
+        # platform_upscale already covers the crop on platform renders; a second
+        # check would show the same note twice.
+        checks, report = {}, plan(mode="center_crop")
+        reframe.quality_checks(
+            lambda name, status, detail: checks.__setitem__(name, status),
+            report,
+            report["frames"],
+            report_upscale=False,
+        )
+        self.assertNotIn("framing_upscale", checks)
+        self.assertIn("framing_smoothness", checks)
+
 
 class ExpressionCapTests(unittest.TestCase):
     def test_piece_cap_error_names_the_limit(self):
