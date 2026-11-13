@@ -43,3 +43,37 @@ class SearchBudgetTests(unittest.TestCase):
         self.assertTrue(any(c["start"] > 2 * duration / 3 for c in result))
         spans = sorted((c["start"], c["end"]) for c in result)
         self.assertTrue(all(a[1] <= b[0] for a, b in zip(spans, spans[1:])))
+
+    def test_a_three_hour_recording_with_short_sentences_finds_eight_clips(self):
+        # Ordinary podcast speech at the three-hour source limit must stay
+        # within the budgets with the default eight clips, and each window is
+        # scored once rather than once per pick.
+        words, _, duration = talk(minutes=180)
+        original = clips._evaluate
+        scored = []
+
+        def observe(*args, **kwargs):
+            scored.append(args[1:3])
+            return original(*args, **kwargs)
+
+        with patch.object(clips, "_evaluate", side_effect=observe):
+            result = clips.find_candidates(
+                words, duration, count=8, platform="youtube_shorts"
+            )
+        self.assertEqual(len(result["candidates"]), 8)
+        details = 8
+        self.assertEqual(len(scored), len(set(scored)) + details)
+        # The largest request is not refused either.
+        most = clips.find_candidates(words, duration, count=20)["candidates"]
+        self.assertEqual(len(most), 20)
+
+    def test_eight_clips_cost_about_as_much_as_one(self):
+        import time
+
+        words, _, duration = talk(minutes=60)
+        took = {}
+        for count in (1, 8):
+            started = time.perf_counter()
+            clips.find_candidates(words, duration, count=count)
+            took[count] = time.perf_counter() - started
+        self.assertLess(took[8], took[1] * 2 + 0.5, took)

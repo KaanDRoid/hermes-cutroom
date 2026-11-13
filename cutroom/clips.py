@@ -17,11 +17,13 @@ import re
 import subprocess
 import time
 
-# Search is synchronous: bound input, enumeration and rescoring independently.
+# Search is synchronous: bound the input and the windows visited. Each window
+# is scored once into a small tuple; full records (text and reasons) are built
+# only for the picked clips. 100,000 visits keep a three-hour recording of
+# short sentences (about 29,000 scored windows) well inside the budget.
 SEARCH_MAX_WORDS = 30_000
 SEARCH_MAX_TEXT_CHARS = 1_000_000
 SEARCH_MAX_WINDOWS = 100_000
-SEARCH_MAX_WORK = 500_000
 SEARCH_TIMEOUT_S = 10.0
 
 DEFAULT_MIN_S = 20
@@ -683,7 +685,7 @@ def find_candidates(
                 continue
             for j in range(i, total):
                 visits += 1
-                if visits > SEARCH_MAX_WINDOWS or visits * count > SEARCH_MAX_WORK:
+                if visits > SEARCH_MAX_WINDOWS:
                     raise ValueError(
                         "Clip search work budget exceeded; use a shorter transcript"
                     )
@@ -698,17 +700,29 @@ def find_candidates(
                     yield i, j
 
     # Preflight the complete workload before scoring even the first candidate.
-    # No window records (or repeated transcript text) are retained.
     for _ in windows():
         pass
+    scored = []
+    for k, (i, j) in enumerate(windows()):
+        if k % 256 == 255 and time.monotonic() > deadline:
+            raise ValueError(
+                "Clip search time budget exceeded; use a shorter transcript"
+            )
+        scored.append(
+            (
+                _evaluate(context, i, j, details=False),
+                round(context.starts[i], 3),
+                round(context.ends[j], 3),
+                i,
+                j,
+            )
+        )
     picked = []
     while len(picked) < count:
         best, best_key = None, None
-        for i, j in windows():
-            start, end = round(context.starts[i], 3), round(context.ends[j], 3)
+        for score, start, end, i, j in scored:
             if any(start < p["end"] and p["start"] < end for p in picked):
                 continue
-            score = _evaluate(context, i, j, details=False)
             middle = (start + end) / 2
             near = sum(
                 1
