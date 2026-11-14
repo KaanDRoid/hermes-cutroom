@@ -574,9 +574,17 @@ def transcribe(source, model_path, language=None):
     model = faster_whisper.WhisperModel(
         str(model_path), device="cpu", compute_type="int8", local_files_only=True
     )
+    # When unsure, Whisper retries with random sampling; a fixed seed makes the
+    # same recording always give the same transcript.
+    import ctranslate2
+
+    ctranslate2.set_random_seed(0)
     segments, info = model.transcribe(audio, language=language, word_timestamps=True)
     words, texts, invented = [], [], False
     for segment in segments:
+        if _unsure(segment):
+            invented = True
+            continue
         texts.append(segment.text.strip())
         for item in segment.words or []:
             if not item.word.strip():
@@ -618,6 +626,22 @@ NO_SPEECH_S = 0.5
 # Sandra interview, the JFK reference and five minutes of a TEDx talk (about
 # 1,700 words with the tiny and small models) no real word was further away.
 SPEECH_PAD_S = 0.5
+# A segment is dropped when the model is unsure of it in both ways: a low
+# average log probability and low word probabilities. On music it wrote
+# "Медведь", "Звезды" and "We need" this way. Real speech never met both on
+# Sandra, the JFK reference, seven minutes of a TEDx talk and the Iliana
+# interview with the small model (both decoders, two runs each); "Hi." over
+# applause has a word probability of 0.05 but a log probability of -0.18.
+UNSURE_LOGPROB = -1.0
+UNSURE_WORD = 0.5
+
+
+def _unsure(segment):
+    logprob = getattr(segment, "avg_logprob", None)
+    words = [w.probability for w in (segment.words or []) if w.word.strip()]
+    if logprob is None or not words:
+        return False
+    return logprob < UNSURE_LOGPROB and sum(words) / len(words) < UNSURE_WORD
 
 
 def _speech_spans(audio, rate=16000):

@@ -354,8 +354,19 @@ Silero voice detector bundled with faster-whisper (no download):
   words more than 0.5 s from any detected speech are discarded. On Sandra,
   the JFK reference and five minutes of the TEDx talk (about 1,700 words with
   the tiny and small models) no real word was discarded.
-- Limit: an invented word inside a sound the detector takes for speech stays;
-  remove it like any other word. Segment coverage was measured as a further
+- Inside detected sound, a segment is dropped when Whisper is unsure of it in
+  both ways: average log probability below -1.0 and mean word probability
+  below 0.5. On music it wrote "Медведь", "Звезды" and "We need" this way;
+  real speech never met both on Sandra, the JFK reference, seven minutes of
+  the TEDx talk and the Iliana interview with the small model (both FFmpeg
+  versions, two runs each). With the tiny model the same rule also removes
+  some of Iliana's English, which is one more reason the small model is
+  recommended.
+- When unsure, Whisper retries with random sampling, so the music clip gave
+  words in about one run in twelve. The random seed is fixed before each
+  transcription: the same recording always gives the same transcript.
+- Limit: an invented word the model is confident about stays; remove it like
+  any other word. Segment coverage was measured as a further
   filter and rejected: a real "Hi." over applause had 0 % coverage, while an
   invented word had 93 %.
 

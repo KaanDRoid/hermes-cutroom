@@ -123,6 +123,87 @@ class NoSpeechTests(unittest.TestCase):
         self.assertEqual([w["id"] for w in result["words"]], [0, 1])
         self.assertNotIn("bear", result["text"])
 
+    def test_a_segment_the_model_is_unsure_of_in_every_way_is_dropped(self):
+        # Inside detected sound the far-word rule cannot help. Whisper's own
+        # scores can: an invented segment has a low average log probability
+        # AND low word probabilities. A real short word ("Hi." over applause)
+        # can have a low word probability but a good log probability.
+        jfk = MAIN_RAW.parent / "artifacts" / "reference" / "jfk.wav"
+        if not jfk.is_file():
+            self.skipTest("The official JFK reference audio is not present")
+        from types import SimpleNamespace
+
+        def word(text, start, end, probability):
+            return SimpleNamespace(
+                word=f" {text}", start=start, end=end, probability=probability
+            )
+
+        segments = [
+            SimpleNamespace(
+                text=" Hi.", avg_logprob=-0.18, words=[word("Hi.", 0.4, 0.8, 0.05)]
+            ),
+            SimpleNamespace(
+                text=" ask not",
+                avg_logprob=-0.3,
+                words=[word("ask", 3.0, 3.3, 0.9), word("not", 3.3, 3.6, 0.95)],
+            ),
+            SimpleNamespace(
+                text=" Леонид Анастасия",
+                avg_logprob=-1.2,
+                words=[
+                    word("Леонид", 5.0, 5.5, 0.43),
+                    word("Анастасия", 5.5, 6.2, 0.39),
+                ],
+            ),
+            SimpleNamespace(
+                text=" what you can do",
+                avg_logprob=-1.1,
+                words=[word("what", 7.0, 7.2, 0.8), word("you", 7.2, 7.4, 0.7)],
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            model = fake_model(Path(temporary) / "whisper-tiny")
+            fake = SimpleNamespace(
+                transcribe=lambda *a, **k: (
+                    iter(segments),
+                    SimpleNamespace(language="en"),
+                )
+            )
+            with patch("faster_whisper.WhisperModel", return_value=fake):
+                result = speech.transcribe(jfk, model)
+        self.assertEqual(
+            [w["text"] for w in result["words"]], ["Hi.", "ask", "not", "what", "you"]
+        )
+        self.assertNotIn("Леонид", result["text"])
+
+    def test_the_same_recording_always_gives_the_same_transcript(self):
+        # When Whisper is unsure it retries with random sampling. A fixed seed
+        # right before transcribing makes the result repeatable: the same
+        # video never gives words one time and none the next.
+        jfk = MAIN_RAW.parent / "artifacts" / "reference" / "jfk.wav"
+        if not jfk.is_file():
+            self.skipTest("The official JFK reference audio is not present")
+        from types import SimpleNamespace
+
+        order = []
+        fake = SimpleNamespace(
+            transcribe=lambda *a, **k: (
+                order.append("transcribe") or iter([]),
+                SimpleNamespace(language="en"),
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            model = fake_model(Path(temporary) / "whisper-tiny")
+            with (
+                patch("faster_whisper.WhisperModel", return_value=fake),
+                patch(
+                    "ctranslate2.set_random_seed",
+                    side_effect=lambda seed: order.append(("seed", seed)),
+                ),
+            ):
+                speech.transcribe(jfk, model)
+        self.assertEqual(order, [("seed", 0), "transcribe"])
+
     def test_the_real_phone_clip_with_only_music_has_no_words(self):
         source = MAIN_RAW / "WhatsApp Video 2026-11-12 at 11.14.38.mp4"
         model = MAIN_RAW.parent / "models" / "whisper-tiny"
