@@ -115,9 +115,11 @@ function Field({ label, name, value, onCommit, type = 'text', placeholder = '', 
   ] });
 }
 
-function Bar({ value, label }) {
+// In a row the bar takes 120 px of the row; in a column pass a width (a flex basis there would set its height).
+function Bar({ value, label, width = null }) {
   const now = pct(value);
-  return el('div', { role: 'progressbar', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': now, style: { flex: '0 0 120px', height: 6, borderRadius: 3, background: 'var(--ui-stroke-secondary)', overflow: 'hidden' },
+  const size = width === null ? { flex: '0 0 120px' } : { width, flex: 'none' };
+  return el('div', { role: 'progressbar', 'aria-label': label, 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': now, style: { ...size, height: 6, borderRadius: 3, background: 'var(--ui-stroke-secondary)', overflow: 'hidden' },
     children: el('div', { style: { width: `${now}%`, height: '100%', background: 'var(--ui-accent)' } }) });
 }
 
@@ -1147,7 +1149,8 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
           border: `2px dashed color-mix(in srgb, ${ON_STAGE} 80%, transparent)`, borderRadius: 4, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', padding: 6, pointerEvents: 'none' },
         children: el('span', { style: { fontSize: 12, padding: '2px 6px', borderRadius: 4, background: STAGE, color: ON_STAGE }, children: `End screen · last ${endSeconds} s` }) }, 'endscreen') : null,
         !media && offer && progress === null ? el('div', { style: center, children: jsx(Button, { onClick: () => load(offer.kind, true), children: offer.size ? `Load video (${megabytes(offer.size)})` : 'Load video' }) }, 'offer') : null,
-        progress !== null ? el('div', { style: center, children: [el('span', { children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress' })] }, 'loading') : null,
+        progress !== null ? el('div', { style: center, children: el('div', { 'data-cutroom-loading': true, role: 'status', style: { ...stack, alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 8, background: STAGE, color: ON_STAGE, fontSize: 13 },
+          children: [el('span', { children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress', width: 160 })] }) }, 'loading') : null,
       ] }, 'frame'),
       el('div', { style: { ...row, flexWrap: 'nowrap', gap: 10, width: '100%', fontSize: 12 }, children: [
         jsx(Button, { variant: 'secondary', disabled: !media, 'aria-label': playing ? 'Pause' : 'Play', onClick: () => { const video = videoRef?.current; if (video) { if (video.paused) video.play?.(); else video.pause?.(); } }, children: playing ? '❚❚' : '▶' }),

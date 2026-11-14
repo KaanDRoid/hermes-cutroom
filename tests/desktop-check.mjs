@@ -1913,3 +1913,26 @@ test('the home page heading is the Cutroom wordmark and still reads as Cutroom',
   assert.ok(paints.includes('currentColor'), 'letters follow the theme text colour');
   assert.ok(paints.includes('var(--ui-accent)'), 'the portrait frame takes the app accent, like every other highlight');
 });
+
+test('a video that is still loading shows a readable label and a visible progress bar', async () => {
+  jobRows = [];
+  let hold;
+  const ui = await studio(async (path, options) => {
+    if (!path.includes('/media/')) return patchApplies(path, options);
+    if (path.includes('offset=0')) return { data: btoa('abc'), offset: 0, next_offset: 3, total: 9, mime: 'video/mp4', version: 'v1' };
+    return new Promise(resolve => { hold = resolve; });
+  });
+  choice(ui.draw(), 'Original').props.onClick();
+  await tick(); await tick();
+  const tree = ui.draw();
+  const bar = role(tree, 'progressbar', 'Media loading progress');
+  assert.ok(bar, 'progress bar while loading');
+  assert.equal(bar.props['aria-valuenow'], 33);
+  assert.ok(Number(bar.props.style.width) >= 120, 'the bar has a width in the centred column');
+  assert.ok(bar.props.style.flex === undefined || !/120px/.test(bar.props.style.flex), 'no flex basis that turns into height');
+  const label = nodes(tree).find(n => n.type === 'span' && text(n) === 'Loading video…');
+  const box = nodes(tree).find(n => n.props?.['data-cutroom-loading']);
+  assert.ok(label && box, 'loading label sits in its own box');
+  assert.ok(box.props.style.background, 'the box keeps the label readable over the poster');
+  hold?.({ data: btoa('abcdef'), offset: 3, next_offset: 9, total: 9, mime: 'video/mp4', version: 'v1' });
+});
