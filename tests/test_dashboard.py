@@ -583,3 +583,28 @@ class DashboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(
+    TestClient is None, "FastAPI/httpx are optional dashboard dependencies"
+)
+class CloudRouteTests(unittest.TestCase):
+    setUp = DashboardTests.setUp
+
+    def test_sending_to_the_cloud_needs_consent_and_lists_remotes(self):
+        self.studio.create("input.mp4")
+        self.studio.cloud_remotes = lambda: [{"name": "cutroom-drive", "type": "drive"}]
+        self.assertEqual(
+            self.client.get("/cloud/remotes").json(),
+            [{"name": "cutroom-drive", "type": "drive"}],
+        )
+        options = {"remote": "cutroom-drive", "folder": "Cutroom", "files": ["final"]}
+        refused = self.client.post(
+            "/projects/p1/jobs", json={"action": "upload", "options": options}
+        )
+        self.assertEqual(refused.status_code, 422)
+        accepted = self.client.post(
+            "/projects/p1/jobs",
+            json={"action": "upload", "options": {**options, "confirmed": True}},
+        )
+        self.assertEqual(accepted.status_code, 202, accepted.text)

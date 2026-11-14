@@ -7,9 +7,44 @@ The core workflow does not require online accounts. `cutroom/integrations.py` co
 | Supported media import | Explicit confirmation, trusted provider hosts, public-IP/redirect checks, bounded subprocess/download and attribution metadata |
 | Raster image import | Explicit confirmation, allowlisted HTTPS hosts, redirect/IP/MIME/size checks |
 | OBS WebSocket v5 | Loopback connection, explicit start/stop consent, lazy SDK import; a real running OBS instance is required |
-| rclone | Explicit upload consent and CLI-owned credentials. Matching supported remote digests verify content; name/size alone return `verified=false`, `verification="metadata_only"`. Existing files are not silently overwritten. No credential-file scraping. |
+| rclone | Studio **Send to the cloud** (person only; see below). CLI-owned credentials; matching remote MD5/SHA-1/SHA-256 verify content, name/size alone return `verified=false`, `verification="metadata_only"`. Existing files are never overwritten. No credential-file scraping. |
 | Calendar | Local timezone-aware ICS file; no live service event creation is implied |
 | Publication package | Local video/cover/caption/manifest files; not an automatic public post |
+
+## Send to the cloud (rclone)
+
+Export shows **Send to the cloud** once the approved final has been exported.
+It sends the final video, and any of the files made with it (captions,
+thumbnail, chapter list), to a remote that was set up with `rclone config`.
+
+- Only a person can send. The first click shows the files, their total size and
+  the destination folder; nothing moves until **Send now**. The job requires
+  `confirmed: true`, and the agent's `cutroom_job` tool has no upload action.
+- Only the exported final of the currently approved version can be sent. Each
+  file's size and SHA-256 are checked against the record made at export.
+- Each send makes a new folder, `<folder>/<project name> <date time>`, and
+  rclone runs with `--immutable --ignore-existing`, so nothing already in the
+  cloud is replaced. Names may use any letters.
+- Progress comes from rclone's JSON statistics; Cancel stops rclone.
+- After each file is copied, rclone lists it with its hashes and Cutroom
+  compares them with the local file. For Google Drive the result links to the
+  file. Nothing is shared: only the owner of the Drive can open the link.
+- Sending changes nothing in the project. An edit made while files are being
+  sent does not hide what was sent.
+- Google Drive limits requests from rclone's shared app. When that happens the
+  message says so; for steady use, set up rclone with its own client ID
+  (rclone.org/drive/#making-your-own-client-id).
+- rclone is found on `PATH`, beside the Python interpreter, or in a user-scope
+  WinGet install (for a Hermes that started before rclone was installed).
+
+Live check (2026-11-14, Google Drive, `drive.file` scope): a Studio upload job
+in a scratch workspace sent a video and its SRT through the job worker into a
+folder with a Turkish name; both files were verified by MD5, SHA-1 and SHA-256,
+progress moved 0.05 → 0.54 → 1.0 and the project revision did not change. The
+approval in that scratch workspace was made by the check script, so it is
+evidence of the sending path, not of a person's approval. The folder was
+deleted afterwards. An earlier run met Google's per-minute limit on rclone's
+shared app; that is why copies and checks now let rclone retry.
 
 These adapters are not an OS/network sandbox. Do not weaken allowlists, enable arbitrary extractors or expose raw shell commands to make a demo appear successful.
 
@@ -21,4 +56,4 @@ These adapters are not an OS/network sandbox. Do not weaken allowlists, enable a
 - Verify the real recorded/uploaded target after the operation.
 - Report missing applications/accounts as blockers, not success.
 
-At the current checkpoint, local ICS/package behavior and adapter contracts are tested. Real OBS capture, remote uploads and live calendar/account writes remain acceptance work.
+At the current checkpoint, local ICS/package behavior and adapter contracts are tested and cloud sending is live-checked as above. Real OBS capture and live calendar/account writes remain acceptance work, as does sending from the native Desktop window by a person.

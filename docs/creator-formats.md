@@ -765,9 +765,11 @@ all numeric text rules and dated source URLs live in `cutroom/platforms.py`.
 
 ### Open items
 
-- **Media download, OBS recording and rclone upload remain unrun and unaccepted**,
-  pending the owner's live consent and read-back verification. Their adapters
-  were not changed, connected or exercised in this work.
+- **Media download and OBS recording remain unrun and unaccepted**, pending the
+  owner's live consent and read-back verification. rclone upload is now wired
+  into Export as Send to the cloud and live-checked against Google Drive (see
+  [integrations](integrations.md#send-to-the-cloud-rclone)); sending from the
+  native Desktop window by a person is still to be accepted.
 - Native Hermes Desktop interaction and per-platform upload-surface acceptance
   remain F8/A28. Nothing in this package workflow posts anything.
 - Platform policies can change; source dates and conservative API limits are

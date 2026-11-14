@@ -197,11 +197,11 @@ function Browse({ ctx, pattern, onPick, noun }) {
 }
 
 const ACTIVE = ['queued', 'running'];
-const jobActions = ['transcribe', 'silence', 'vision', 'segment', 'storyboard', 'preview', 'final', 'cover', 'qa'];
+const jobActions = ['transcribe', 'silence', 'vision', 'segment', 'storyboard', 'preview', 'final', 'cover', 'qa', 'upload'];
 const JOB_WORDS = {
   inspect: ['Reading the video', 'Video check'], transcribe: ['Transcribing', 'Transcript'], silence: ['Finding pauses', 'Pause search'],
   vision: ['Analysing faces', 'Face analysis'], segment: ['Separating the background', 'Background layer'], storyboard: ['Building the story', 'Story'],
-  preview: ['Making preview', 'Preview'], final: ['Exporting final video', 'Final video'], cover: ['Making cover', 'Cover'], qa: ['Checking the video', 'Video check'],
+  preview: ['Making preview', 'Preview'], final: ['Exporting final video', 'Final video'], cover: ['Making cover', 'Cover'], qa: ['Checking the video', 'Video check'], upload: ['Sending to the cloud', 'Cloud copy'],
 };
 const jobWords = action => JOB_WORDS[action] || [action, action];
 const STEPS = [['edit', 'Edit'], ['style', 'Style'], ['sound', 'Sound'], ['review', 'Review'], ['export', 'Export']];
@@ -744,7 +744,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
         submit(next[0], {}, next.slice(1)).catch(failure => setJobError({ error: failure, step: stepRef.current }));
       } else if (next && !ACTIVE.includes(job.status)) delete chain.current[job.id];
       // Native notice when a long job ends; the host only shows it while the window is in the background.
-      if (!ACTIVE.includes(before) || !['completed', 'failed'].includes(job.status) || !['preview', 'final', 'transcribe'].includes(job.action)) continue;
+      if (!ACTIVE.includes(before) || !['completed', 'failed'].includes(job.status) || !['preview', 'final', 'transcribe', 'upload'].includes(job.action)) continue;
       const now = Date.now();
       if (now - lastNotice.current < 10000 || typeof ctx.os?.notify !== 'function') continue;
       lastNotice.current = now;
@@ -1746,11 +1746,68 @@ function ExportStep({ kit }) {
       el('h3', { id: 'cutroom-downloads', style: h3s, children: 'Files' }),
       el('div', { style: row, children: files.map(([kind, label]) => jsx(Button, { variant: 'secondary', disabled: !project.artifacts?.[kind], onClick: () => download(kind), children: label }, `download:${kind}`)) }),
       jsx(Disclosure, { title: 'More files', children: jsx(Button, { variant: 'ghost', disabled: !project.artifacts?.preview, onClick: () => download('preview'), children: 'Download preview' }) }),
-      el('p', { style: muted, children: 'Nothing is uploaded or posted. Files are saved where you choose.' }),
+      el('p', { style: muted, children: 'Downloads are saved where you choose. Nothing is posted anywhere.' }),
     ] }),
+    jsx(CloudSend, { kit }, 'cloud-send'),
     jsx(DeliveryPackage, { kit }, 'delivery-package'),
     jsx(Notice, { error }),
   ] });
+}
+
+// Send the exported approved final (and the files made with it) to a cloud folder set up in rclone.
+// Two clicks: the first shows exactly what goes where; only "Send now" sends. The agent cannot do this.
+const CLOUD_NAMES = { drive: 'Google Drive', onedrive: 'OneDrive', dropbox: 'Dropbox', box: 'Box', s3: 'S3', webdav: 'WebDAV' };
+const FILE_LABELS = { final: 'Video', captions_srt: 'SRT captions', captions_vtt: 'VTT captions', thumbnail: 'Thumbnail', chapters: 'Chapter list', cover: 'Cover' };
+const cloudName = remote => CLOUD_NAMES[remote?.type] || remote?.name || 'the cloud';
+const cloudFile = name => String(name || '').replace(/[\x00-\x1f\\/:*?"<>|]+/g, '-').replace(/^[ .-]+|[ .-]+$/g, '').replace(/\s+/g, ' ').slice(0, 100).trim() || 'Cutroom video';
+const sizeText = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
+
+function CloudSend({ kit }) {
+  const { ctx, scope, project, jobs } = kit;
+  const remotes = useQuery({ queryKey: [...scope, 'remotes'], queryFn: () => ctx.rest('/cloud/remotes'), staleTime: 60000 });
+  const [choice, setChoice] = useState(null);
+  const [folder, setFolder] = useState('Cutroom');
+  const [skipped, setSkipped] = useState([]);
+  const [asking, setAsking] = useState(false);
+  const list = Array.isArray(remotes.data) ? remotes.data : [];
+  const remote = list.find(item => item.name === choice) || list[0] || null;
+  const delivery = project.artifact_lineage?.final?.delivery_files || {};
+  const ready = Boolean(project.artifacts?.final && delivery.final && project.approval?.revision === project.revision);
+  const kinds = Object.keys(delivery).sort((a, b) => (a === 'final' ? -1 : b === 'final' ? 1 : 0));
+  const files = kinds.filter(kind => kind === 'final' || !skipped.includes(kind));
+  const bytes = files.reduce((sum, kind) => sum + (delivery[kind]?.size || 0), 0);
+  const mine = jobs.filter(job => job.action === 'upload');
+  const active = mine.find(job => ACTIVE.includes(job.status));
+  const last = newest(mine.filter(job => !ACTIVE.includes(job.status)))[0];
+  const where = remote ? cloudName(remote) : '';
+  const head = el('h3', { id: 'cutroom-cloud', style: h3s, children: 'Send to the cloud' }, 'head');
+  const section = children => el('section', { 'aria-labelledby': 'cutroom-cloud', style: { ...panel, gap: 10 }, children: [head, ...children] });
+  if (!ready) return section([el('p', { style: muted, children: 'After you export the approved final video, you can send it to a cloud folder such as Google Drive.' }, 'wait')]);
+  if (!list.length) return section([el('p', { style: muted, children: remotes.isPending ? 'Looking for cloud folders…' : 'No cloud folder is set up on this computer. Cutroom sends files with rclone: run rclone config once to connect Google Drive or another service, then come back here.' }, 'none')]);
+  const result = last?.status === 'completed' ? last.result : null;
+  const outcome = last && !active ? (result ? el('div', { style: { ...stack, gap: 4 }, children: [
+    el('p', { style: { margin: 0, fontSize: 13 }, children: `Sent to ${cloudName(list.find(item => result.destination?.startsWith(`${item.name}:`)) || remote)} › ${String(result.destination || '').split(':').slice(1).join(':')}` }, 'where'),
+    ...(result.files || []).filter(file => typeof file.link === 'string' && /^https:\/\/drive\.google\.com\/file\/d\/[A-Za-z0-9_-]+\/view$/.test(file.link)).map(file =>
+      el('a', { href: file.link, style: { fontSize: 13, color: 'var(--ui-accent)' }, children: `Open ${String(file.remote || '').split('/').pop()} in Google Drive` }, `link:${file.kind}`)),
+    el('p', { style: muted, children: 'Only you can see these files until you share them in Drive.' }, 'private'),
+  ] }, 'sent') : last.status === 'failed' ? el('p', { role: 'alert', style: alertStyle, children: `Sending failed: ${errorText(last.error)}` }, 'failed') : null) : null;
+  if (active) return section([
+    el('div', { style: { ...row, gap: 10 }, children: [el('span', { style: { fontSize: 13 }, children: `Sending to ${where}… ${pct(active.progress)}%` }), jsx(Bar, { value: active.progress, label: 'Sending progress' }),
+      jsx(Button, { variant: 'ghost', onClick: () => kit.cancel(active), children: 'Cancel sending' })] }, 'sending'),
+  ]);
+  const send = async () => { setAsking(false); await kit.run('upload', { remote: remote.name, folder: folder.trim() || 'Cutroom', files, confirmed: true }); };
+  return section([
+    list.length > 1 ? jsx(Choice, { label: 'Cloud folder', value: remote.name, options: list.map(item => [item.name, `${cloudName(item)} (${item.name})`]), onChange: value => { setChoice(value); setAsking(false); } }, 'remote') : null,
+    jsx(Field, { label: `Folder in ${where}`, name: 'cloud.folder', value: folder, onCommit: value => { setFolder(value); setAsking(false); return value.trim() && !/(^|\/)\.\.?(\/|$)|[\\:*?"<>|]/.test(value.trim()) ? undefined : 'Use a plain folder name, for example Cutroom'; } }, 'folder'),
+    kinds.length > 1 ? el('div', { role: 'group', 'aria-label': 'Files to send', style: { ...row, gap: 12 }, children: kinds.map(kind => el('label', { style: { ...row, gap: 6, fontSize: 13 }, children: [
+      jsx(Tick, { 'aria-label': FILE_LABELS[kind] || kind, checked: files.includes(kind), disabled: kind === 'final', onCheckedChange: checked => { setAsking(false); setSkipped(old => checked === true ? old.filter(item => item !== kind) : [...old, kind]); } }), FILE_LABELS[kind] || kind] }, `file:${kind}`)) }, 'files') : null,
+    asking ? el('div', { role: 'alertdialog', 'aria-label': 'Confirm sending', style: { ...panel, padding: 12, gap: 8 }, children: [
+      el('p', { style: { margin: 0, fontSize: 13 }, children: `Send ${plural(files.length, 'file')} (${sizeText(bytes)}) to ${where} › ${folder.trim() || 'Cutroom'}/${cloudFile(project.name)} with today's date and time?` }, 'what'),
+      el('p', { style: muted, children: `A new folder is made each time, so nothing already there is replaced. ${remote.type === 'drive' ? 'Only you can see them until you share them in Drive.' : 'Cutroom does not share them.'}` }, 'privacy'),
+      el('div', { style: row, children: [jsx(Button, { onClick: send, children: 'Send now' }, 'send'), jsx(Button, { variant: 'ghost', onClick: () => setAsking(false), children: 'Cancel' }, 'cancel')] }, 'actions'),
+    ] }, 'confirm') : jsx(Button, { variant: 'secondary', onClick: () => setAsking(true), children: `Send to ${where}…` }, 'open'),
+    outcome,
+  ]);
 }
 
 // Long-form YouTube: chapters, thumbnail, subtitles file and end-screen room. Times are program time.

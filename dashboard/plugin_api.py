@@ -231,6 +231,7 @@ Action = Literal[
     "qa",
     "download",
     "publish",
+    "upload",
 ]
 
 
@@ -261,11 +262,17 @@ class ApproveProject(RequestModel):
 @router.post("/projects/{project_id}/jobs", status_code=202)
 def submit_job(project_id: ProjectId, body: SubmitJob, studio=Depends(get_studio)):
     if (
-        body.action in ("download", "publish")
+        body.action in ("download", "publish", "upload")
         and body.options.get("confirmed") is not True
     ):
         raise HTTPException(422, "Explicit consent is required for remote adapters")
     return invoke(studio.submit, project_id, body.action, body.options)
+
+
+@router.get("/cloud/remotes")
+def cloud_remotes(studio=Depends(get_studio)):
+    """Cloud folders set up in rclone on this computer (name and type only)."""
+    return invoke(studio.cloud_remotes)
 
 
 @router.get("/jobs")

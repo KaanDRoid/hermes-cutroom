@@ -474,5 +474,6 @@ without its SDK documentation.
 
 See [creator formats F7](creator-formats.md#f7--local-delivery-packages) for the
 source table, cover-upload qualifications and real evidence. Nothing is posted.
-Live media download, OBS and rclone remain pending owner consent and were not
-connected or exercised here.
+Live media download and OBS remain pending owner consent. rclone upload is the
+person-only `upload` job described in
+[integrations](integrations.md#send-to-the-cloud-rclone).

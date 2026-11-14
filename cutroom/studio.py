@@ -95,6 +95,12 @@ def _replace_file(temporary, target):
             time.sleep(0.02)
 
 
+def _cloud_name(name):
+    """A project name usable as a cloud file name in any language."""
+    text = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "-", str(name or "")).strip(" .-")
+    return re.sub(r"\s+", " ", text)[:100].strip() or "Cutroom video"
+
+
 class Studio:
     def __init__(self, root, runner=None):
         self.root = _local_path(Path(root).expanduser(), must_exist=False)
@@ -1313,6 +1319,7 @@ class Studio:
             "publish",
             "calendar",
             "obs",
+            "upload",
         }
         if action not in actions:
             raise ValueError("Unsupported studio action")
@@ -1363,14 +1370,23 @@ class Studio:
             if "time" in options and _number(options["time"]) < 0:
                 raise ValueError("Cover time must be non-negative")
         if (
-            action in {"download", "publish", "obs"}
+            action in {"download", "publish", "obs", "upload"}
             and options.get("confirmed") is not True
         ):
             raise PermissionError("Explicit consent required for external operations")
+        if action == "upload" and set(options) - {
+            "remote",
+            "folder",
+            "files",
+            "confirmed",
+        }:
+            raise ValueError("Unsupported upload options")
         with self._lock():
             project = self.get(project_id)
             self._check_source(project)
             upstream = self._preflight(project, action)
+            if action == "upload":
+                self._upload_plan(project, options)
             input_digests = self._job_inputs(project, action, upstream)
             if action == "final" and project.get("approval", {}).get(
                 "digest"
@@ -1688,6 +1704,8 @@ class Studio:
         outputs = directory / "outputs"
         if action == "storyboard":
             return self._storyboard(project, outputs)
+        if action == "upload":
+            return self._upload(project, job)
         from .runtime import invoke_worker
 
         settings = project["settings"]
@@ -2015,6 +2033,120 @@ class Studio:
         )
         return str(found) if found else None
 
+    def cloud_remotes(self):
+        """Cloud folders set up in rclone; empty when rclone is missing."""
+        from . import integrations
+
+        try:
+            return integrations.list_remotes()
+        except RuntimeError:
+            return []
+
+    def _upload_plan(self, project, options):
+        """Check what a person asked to send: only the exported approved final."""
+        from . import integrations
+
+        digest = self._digest(project)
+        approval = project.get("approval") or {}
+        lineage = (project.get("artifact_lineage") or {}).get("final") or {}
+        if (
+            approval.get("digest") != digest
+            or approval.get("revision") != project["revision"]
+            or lineage.get("digest") != digest
+            or "final" not in project["artifacts"]
+        ):
+            raise PermissionError(
+                "Export the approved final of this version before sending it"
+            )
+        remote = options.get("remote")
+        remotes = {item["name"]: item["type"] for item in self.cloud_remotes()}
+        if not isinstance(remote, str) or remote not in remotes:
+            raise ValueError(
+                "That cloud folder is not set up in rclone on this computer"
+            )
+        folder = options.get("folder")
+        if not isinstance(folder, str) or not folder.strip():
+            raise ValueError("Name the folder to send the files to")
+        folder = folder.strip().strip("/")
+        integrations._remote_target(f"{remote}:{folder}/check")
+        files = options.get("files")
+        if (
+            not isinstance(files, list)
+            or not files
+            or len(files) > 10
+            or len(set(files)) != len(files)
+            or "final" not in files
+        ):
+            raise ValueError("Send the final video, with any of its other files")
+        delivery = lineage.get("delivery_files") or {}
+        chosen = []
+        for kind in files:
+            record = delivery.get(kind) if isinstance(kind, str) else None
+            if not record:
+                raise ValueError(f"{kind} is not available for this final")
+            path = _local_path(record["path"])
+            if not path.is_relative_to(self.root):
+                raise PermissionError("Files to send must be inside this workspace")
+            chosen.append((kind, path, record))
+        return {
+            "remote": remote,
+            "remote_type": remotes[remote],
+            "folder": folder,
+            "files": chosen,
+        }
+
+    def _job_progress(self, job_id, value):
+        """Record a running job's progress; skipped when the workspace is busy."""
+        try:
+            with self._lock(timeout=2):
+                job = self.job(job_id)
+                if job["status"] == "running" and value > job.get("progress", 0):
+                    job["progress"] = round(min(value, 0.99), 3)
+                    self._write_job(job)
+        except (TimeoutError, OSError):
+            pass
+
+    def _upload(self, project, job):
+        from . import integrations
+
+        plan = self._upload_plan(project, job["options"])
+        name = _cloud_name(project.get("name"))
+        stamp = time.strftime("%Y-%m-%d %H.%M", time.localtime(job["created_at"]))
+        destination = f"{plan['remote']}:{plan['folder']}/{name} {stamp}"
+        for kind, path, record in plan["files"]:
+            stat = path.stat()
+            if stat.st_size != record["size"] or file_digest(path) != record["sha256"]:
+                raise PermissionError(
+                    "A file changed after export; export the final again"
+                )
+        total = sum(record["size"] for _, _, record in plan["files"]) or 1
+        sent, files, last = 0, [], [0.0]
+
+        def report(done):
+            now = time.monotonic()
+            if done >= total or now - last[0] >= 0.5:
+                last[0] = now
+                self._job_progress(job["id"], 0.05 + 0.95 * done / total)
+
+        for kind, path, record in plan["files"]:
+            label = "" if kind == "final" or kind.startswith("captions") else " " + kind
+            target = f"{destination}/{name}{label}{path.suffix.lower()}"
+            size = record["size"]
+            result = integrations.upload_rclone(
+                path,
+                target,
+                True,
+                progress=lambda fraction, base=sent, size=size: report(
+                    base + fraction * size
+                ),
+                cancelled=lambda: self.job(job["id"]).get("cancel_requested", False),
+                remote_type=plan["remote_type"],
+            )
+            sent += size
+            files.append({"kind": kind, **result})
+        report(total)
+        return {"destination": destination, "files": files, "external_write": True}
+
     def _check_job_project(self, job):
         """Call under the state lock, both before execution and publication."""
         if self.job(job["id"]).get("cancel_requested"):
@@ -2085,6 +2217,19 @@ class Studio:
                 lineage[kind]["digest"] = digest
 
     def _complete_job(self, job, result):
+        if job["action"] == "upload":
+            # The files are already in the cloud: record what was sent even if
+            # the project was edited meanwhile. Sending never changes the project.
+            with self._lock():
+                job = self.job(job["id"])
+                job.update(
+                    status="completed",
+                    progress=1.0,
+                    result=result,
+                    completed_at=time.time(),
+                )
+                self._write_job(job)
+            return
         with self._lock():
             current = self._check_job_project(job)
             job = self.job(job["id"])

@@ -85,7 +85,18 @@ def _find_executable(name):
     if executable is not None:
         return executable
     sibling = Path(sys.executable).parent / (name + (".exe" if os.name == "nt" else ""))
-    return str(sibling) if sibling.is_file() else None
+    if sibling.is_file():
+        return str(sibling)
+    if name == "rclone" and os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        # A user-scope WinGet install, when Hermes started before it was added
+        # to PATH. Fixed location only; never a path from project data.
+        packages = (
+            Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Packages"
+        )
+        found = sorted(packages.glob("Rclone.Rclone_*/rclone-v*/rclone.exe"))
+        if found:
+            return str(found[-1])
+    return None
 
 
 def capability_report() -> dict:
@@ -686,32 +697,174 @@ def _run(argv, *, timeout=PROCESS_TIMEOUT):
         ) from None
 
 
-def upload_rclone(local_file, remote_path, confirmed=False) -> dict:
-    """Copy to an explicitly approved configured remote; verify the exact object."""
-    _consent(confirmed)
-    local = _local(local_file, exists=True)
-    if not isinstance(remote_path, str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}:[A-Za-z0-9][A-Za-z0-9._ /-]*", remote_path
-    ):
+def _rclone_env():
+    return child_env(python=False, forward=NETWORK, prefixes=("RCLONE_",))
+
+
+def list_remotes() -> list:
+    """Remotes configured in rclone (name and type); none when rclone is absent."""
+    executable = _find_executable("rclone")
+    if executable is None:
+        return []
+    response = _run([executable, "listremotes", "--long"], timeout=30)
+    remotes = []
+    for line in response.stdout.splitlines():
+        name, _, kind = line.partition(":")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name.strip()):
+            remotes.append({"name": name.strip(), "type": kind.strip()})
+    return remotes
+
+
+def _remote_target(remote_path):
+    """Split ``remote:folder/file`` and refuse anything but a plain relative path.
+
+    Folder and file names may use any letters (project names are often not
+    English); control characters, backslashes, colons and dot segments are
+    refused.
+    """
+    if not isinstance(remote_path, str) or ":" not in remote_path:
         raise ValueError("Use a configured remote name and a relative object path")
     remote, key = remote_path.split(":", 1)
     if (
-        len(remote) == 1
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", remote)
+        or not key
+        or len(key) > 1000
+        or key.startswith("/")
         or key.endswith("/")
-        or any(part in ("", ".", "..") for part in key.split("/"))
+        or any(ord(c) < 32 or c in '\\:*?"<>|' for c in key)
+        or any(part.strip() in ("", ".", "..") for part in key.split("/"))
     ):
-        raise ValueError("Invalid remote object path")
+        raise ValueError("Use a configured remote name and a relative object path")
+    return remote, key
+
+
+def _upload_problem(detail):
+    """One plain sentence for a failed copy; provider JSON details are dropped."""
+    text = (detail or "").split("\nDetails:", 1)[0].strip()
+    lowered = text.lower()
+    if "quota exceeded" in lowered or "ratelimitexceeded" in lowered.replace(" ", ""):
+        return (
+            "Google Drive is limiting requests from rclone's shared app. Wait a "
+            "minute and send again; for steady use, give rclone its own client ID "
+            "(rclone.org/drive/#making-your-own-client-id). Nothing was verified as sent"
+        )
+    text = re.sub(r"\s+", " ", text)[:240]
+    return (
+        f"Upload failed: {text}. Nothing was verified as sent"
+        if text
+        else ("Upload failed. Nothing was verified as sent")
+    )
+
+
+def _copy_with_progress(argv, *, timeout, progress, cancelled):
+    """Run ``rclone copyto`` and report its byte progress; stop on cancel."""
+    import queue
+
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            env=_rclone_env(),
+        )
+    except OSError:
+        raise RuntimeError(
+            "rclone could not start; no success has been verified"
+        ) from None
+    lines = queue.Queue()
+
+    def read():
+        for line in process.stderr:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    problem = None
+    finished = False
+
+    def stop():
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    while not finished:
+        if cancelled is not None and cancelled():
+            stop()
+            raise InterruptedError("Upload cancelled")
+        if time.monotonic() > deadline:
+            stop()
+            raise RuntimeError("Upload timed out; no success has been verified")
+        try:
+            line = lines.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if line is None:
+            finished = True
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("level") in ("error", "critical") and entry.get("msg"):
+            problem = str(entry["msg"]).strip()[:300]
+        figures = entry.get("stats")
+        if progress is not None and isinstance(figures, dict):
+            done, total = figures.get("bytes"), figures.get("totalBytes")
+            if isinstance(done, int) and isinstance(total, int) and total > 0:
+                progress(min(1.0, done / total))
+    if process.wait(timeout=30) != 0:
+        raise RuntimeError(_upload_problem(problem))
+
+
+def upload_rclone(
+    local_file,
+    remote_path,
+    confirmed=False,
+    *,
+    progress=None,
+    cancelled=None,
+    remote_type=None,
+) -> dict:
+    """Copy to an explicitly approved configured remote; verify the exact object.
+
+    Never replaces a file already at the destination. ``progress`` receives
+    0..1 while bytes move; ``cancelled`` is polled and stops rclone. For
+    Google Drive remotes the result carries a link that only the owner of the
+    Drive can open: nothing is shared.
+    """
+    _consent(confirmed)
+    local = _local(local_file, exists=True)
+    remote, key = _remote_target(remote_path)
     executable = _executable("rclone")
-    _run(
+    size = local.stat().st_size
+    # At least 5 minutes, and enough for 100 kB/s; never more than 6 hours.
+    timeout = min(6 * 3600, max(300, size / 100_000))
+    _copy_with_progress(
         [
             executable,
             "copyto",
             "--immutable",
             "--ignore-existing",
+            "--use-json-log",
+            "--stats",
+            "1s",
+            "--stats-log-level",
+            "NOTICE",
+            # rclone backs off and retries when a provider limits the rate.
             "--retries",
-            "1",
+            "3",
             "--low-level-retries",
-            "1",
+            "10",
             "--contimeout",
             "10s",
             "--timeout",
@@ -719,56 +872,79 @@ def upload_rclone(local_file, remote_path, confirmed=False) -> dict:
             "--",
             str(local),
             remote_path,
-        ]
-    )
-    response = _run(
-        [
-            executable,
-            "lsjson",
-            "--stat",
-            "--hash",
-            "--retries",
-            "1",
-            "--low-level-retries",
-            "1",
-            "--contimeout",
-            "10s",
-            "--timeout",
-            "30s",
-            "--",
-            remote_path,
         ],
-        timeout=60,
+        timeout=timeout,
+        progress=progress,
+        cancelled=cancelled,
     )
+    try:
+        # Listing right after a copy can meet the same rate limit: let rclone retry.
+        response = _run(
+            [
+                executable,
+                "lsjson",
+                "--stat",
+                "--hash",
+                "--low-level-retries",
+                "10",
+                "--contimeout",
+                "10s",
+                "--timeout",
+                "30s",
+                "--",
+                remote_path,
+            ],
+            timeout=120,
+        )
+    except RuntimeError as error:
+        how = "timed out" if "timed out" in str(error) else "failed"
+        raise RuntimeError(
+            f"The file was sent, but checking it in the cloud {how}. Look in the "
+            "folder before sending again"
+        ) from None
     try:
         metadata = json.loads(response.stdout)
         if (
             metadata.get("IsDir") is not False
-            or metadata.get("Size") != local.stat().st_size
+            or metadata.get("Size") != size
             or metadata.get("Name") != key.rsplit("/", 1)[-1]
         ):
             raise ValueError
+        # rclone names hashes in lowercase ("md5"); accept the older spelling too.
+        hashes = {
+            re.sub(r"[^a-z0-9]", "", str(name).lower()): value
+            for name, value in (metadata.get("Hashes") or {}).items()
+        }
         checked = []
         for name, algorithm in (
             ("MD5", "md5"),
             ("SHA-1", "sha1"),
             ("SHA-256", "sha256"),
         ):
-            digest = metadata.get("Hashes", {}).get(name)
+            digest = hashes.get(algorithm)
             if digest:
-                if digest.lower() != _hash_file(local, algorithm):
+                if str(digest).lower() != _hash_file(local, algorithm):
                     raise ValueError
                 checked.append(name)
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError(
             "Remote object verification failed; upload may have occurred"
         ) from None
+    file_id = metadata.get("ID")
+    link = (
+        f"https://drive.google.com/file/d/{file_id}/view"
+        if remote_type == "drive"
+        and isinstance(file_id, str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{10,200}", file_id)
+        else None
+    )
     return {
         "remote": remote_path,
         "size": metadata["Size"],
         "verified": bool(checked),
         "verification": "hash" if checked else "metadata_only",
         "hash_verified": checked,
+        "link": link,
         "external_write": True,
     }
 

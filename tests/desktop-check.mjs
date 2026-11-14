@@ -23,6 +23,7 @@ const invalidations = [];
 let projectRows = [];
 let selectedProject = null;
 let jobRows = [];
+let remoteRows = [];
 let posterData = null;
 const zone = (top, bottom, left, right) => ({ top, bottom, left, right, source: 'https://example.test/spec', checked: '2026-11-12' });
 const frames = portrait => ({ preview: portrait ? [1080, 1920] : [1920, 1080], final: portrait ? { 1080: [1080, 1920], 2160: [2160, 3840] } : { 1080: [1920, 1080], 2160: [3840, 2160] }, default_final: '1080' });
@@ -53,8 +54,8 @@ react.useEffect = (effect, dependencies) => {
 sdk.useValue = value => value.get();
 sdk.useQuery = options => {
   queries.push(options);
-  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs', 'platforms', 'activity', 'poster'].includes(x));
-  return { data: options.enabled === false ? undefined : kind === 'poster' ? posterData : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : kind === 'platforms' ? platformRows : jobRows,
+  const kind = options.queryKey.find(x => ['projects', 'project', 'jobs', 'platforms', 'activity', 'poster', 'remotes'].includes(x));
+  return { data: options.enabled === false ? undefined : kind === 'poster' ? posterData : kind === 'projects' ? projectRows : kind === 'project' ? selectedProject : kind === 'platforms' ? platformRows : kind === 'remotes' ? remoteRows : jobRows,
     isPending: false, isFetching: false, error: null, refetch: () => options.queryFn() };
 };
 sdk.useQueryClient = () => ({ invalidateQueries: options => invalidations.push(options), setQueryData: () => {} });
@@ -1935,4 +1936,58 @@ test('a video that is still loading shows a readable label and a visible progres
   assert.ok(label && box, 'loading label sits in its own box');
   assert.ok(box.props.style.background, 'the box keeps the label readable over the poster');
   hold?.({ data: btoa('abcdef'), offset: 3, next_offset: 9, total: 9, mime: 'video/mp4', version: 'v1' });
+});
+
+// An approved project whose final was exported for this revision, with its captions.
+const exportedProject = () => ({ revision: 7, approval: { digest: 'd'.repeat(64), revision: 7 }, artifacts: { final: 'final.mp4', captions_srt: 'final.srt' },
+  artifact_lineage: { final: { job_id: 'fj', digest: 'd'.repeat(64), delivery_files: { final: { path: 'final.mp4', size: 4000000, sha256: 'a' }, captions_srt: { path: 'final.srt', size: 1000, sha256: 'b' } } } } });
+
+test('Export sends the approved final to Google Drive only after a second, explicit Send', async () => {
+  jobRows = []; remoteRows = [{ name: 'cutroom-drive', type: 'drive' }];
+  const ui = await studio(async (path, options) => options?.method === 'POST' ? { id: 'up1', status: 'queued' } : patchApplies(path, options), exportedProject());
+  let tree = await ui.step('Export');
+  const open = button(tree, 'Send to Google Drive');
+  assert.ok(open, 'send button');
+  open.props.onClick();
+  tree = ui.draw();
+  assert.equal(ui.calls.filter(c => c.options?.method === 'POST').length, 0, 'nothing is sent by the first click');
+  const shown = text(tree);
+  assert.match(shown, /Send 2 files \(3\.8 MB\) to Google Drive/);
+  assert.match(shown, /Cutroom\/Demo/);
+  assert.match(shown, /Only you can see them until you share them in Drive/);
+  await button(tree, 'Send now').props.onClick();
+  await ui.flush();
+  const post = ui.calls.find(c => c.options?.method === 'POST');
+  assert.equal(post.path, '/projects/p1/jobs');
+  assert.deepEqual(post.options.body, { action: 'upload', options: { remote: 'cutroom-drive', folder: 'Cutroom', files: ['final', 'captions_srt'], confirmed: true } });
+  remoteRows = [];
+});
+
+test('Export shows sending progress with Cancel, then links to the files in Drive', async () => {
+  remoteRows = [{ name: 'cutroom-drive', type: 'drive' }];
+  jobRows = [{ id: 'up1', project_id: 'p1', action: 'upload', status: 'running', progress: 0.42, revision: 7 }];
+  let ui = await studio(patchApplies, exportedProject());
+  let tree = await ui.step('Export');
+  assert.match(text(tree), /Sending to Google Drive… 42%/);
+  assert.ok(button(tree, 'Cancel sending'));
+  jobRows = [{ id: 'up1', project_id: 'p1', action: 'upload', status: 'completed', progress: 1, revision: 7, completed_at: 2,
+    result: { destination: 'cutroom-drive:Cutroom/Demo 2026-11-14 02.10', external_write: true, files: [
+      { kind: 'final', remote: 'cutroom-drive:Cutroom/Demo 2026-11-14 02.10/Demo.mp4', link: 'https://drive.google.com/file/d/abc_123-XYZ0/view', verified: true },
+      { kind: 'captions_srt', remote: 'cutroom-drive:Cutroom/Demo 2026-11-14 02.10/Demo.srt', link: null, verified: true }] } }];
+  ui = await studio(patchApplies, exportedProject());
+  tree = await ui.step('Export');
+  assert.match(text(tree), /Sent to Google Drive › Cutroom\/Demo 2026-11-14 02\.10/);
+  const links = nodes(tree).filter(n => n.type === 'a');
+  assert.deepEqual(links.map(n => n.props.href), ['https://drive.google.com/file/d/abc_123-XYZ0/view']);
+  assert.match(text(links[0]), /Demo\.mp4/);
+  remoteRows = []; jobRows = [];
+});
+
+test('Export explains how to set up a cloud folder when rclone has none', async () => {
+  jobRows = []; remoteRows = [];
+  const ui = await studio(patchApplies, exportedProject());
+  const tree = await ui.step('Export');
+  assert.equal(button(tree, 'Send to Google Drive'), undefined);
+  assert.match(text(tree), /No cloud folder is set up/);
+  assert.match(text(tree), /rclone config/);
 });
