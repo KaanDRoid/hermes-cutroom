@@ -465,11 +465,9 @@ class IntegrationTests(unittest.TestCase):
             ):
                 integrations.upload_rclone(local, remote, confirmed=True)
 
-    def test_obs_validates_before_import_and_calls_real_client_contract(self):
-        import sys
-        import types
-        from unittest.mock import MagicMock
-
+    def test_obs_validates_before_connecting(self):
+        # Recording behaviour is tested against a protocol server in
+        # test_obs_client.
         for kwargs in (
             {"host": "192.168.1.2"},
             {"host": "evil.invalid"},
@@ -479,41 +477,6 @@ class IntegrationTests(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 integrations.obs_record(**({"action": "status"} | kwargs))
-        recording = self.root / "recording.mkv"
-        recording.write_bytes(b"OBS response path fixture")
-        client = MagicMock()
-        client.get_record_status.return_value = types.SimpleNamespace(
-            output_active=True, output_paused=False, output_timecode="00:00:01.000"
-        )
-        client.stop_record.return_value = types.SimpleNamespace(
-            output_path=str(recording)
-        )
-        sdk = types.SimpleNamespace(ReqClient=MagicMock(return_value=client))
-        with patch.dict(sys.modules, {"obsws_python": sdk}):
-            status = integrations.obs_record("status", password="secret")
-            self.assertTrue(status["recording"])
-            integrations.obs_record("start", password="secret", confirmed=True)
-            self.assertEqual(client.start_record.call_count, 1)
-            client.get_record_status.return_value.output_active = False
-            stopped = integrations.obs_record("stop", password="secret", confirmed=True)
-            self.assertEqual(stopped["output"], str(recording))
-            self.assertTrue(stopped["file_verified"])
-            password = sdk.ReqClient.call_args.kwargs["password"]
-            self.assertNotIn("secret", str(password))
-            self.assertEqual(password + "salt", "secretsalt")
-            self.assertEqual(sdk.ReqClient.call_args.kwargs["timeout"], 5)
-            client.stop_record.return_value.output_path = str(self.root / "missing.mkv")
-            with self.assertRaises(FileNotFoundError):
-                integrations.obs_record("stop", confirmed=True)
-            client.get_record_status.return_value.output_active = False
-            with self.assertRaises(RuntimeError):
-                integrations.obs_record("start", confirmed=True)
-            self.assertGreaterEqual(client.disconnect.call_count, 4)
-            sdk.ReqClient.side_effect = RuntimeError("secret connection failure")
-            with self.assertRaisesRegex(
-                RuntimeError, "OBS connection or request failed"
-            ):
-                integrations.obs_record("status", password="secret")
 
     def test_local_package_copies_real_files_and_hashes_without_sharing(self):
         video = self.root / "video.mp4"

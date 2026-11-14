@@ -2,7 +2,6 @@
 
 import hashlib
 import http.client
-import importlib.util
 import ipaddress
 import json
 import math
@@ -109,10 +108,6 @@ def capability_report() -> dict:
             "path": executable,
             "live_verified": False,
         }
-    result["obsws_python"] = {
-        "available": importlib.util.find_spec("obsws_python") is not None,
-        "live_verified": False,
-    }
     return result
 
 
@@ -949,15 +944,131 @@ def upload_rclone(
     }
 
 
-class _Password(str):
-    def __str__(self):
-        return "[redacted]"
+class _ObsSession:
+    """A minimal obs-websocket v5 client (JSON over WebSocket) using the stdlib.
 
-    def __repr__(self):
-        return "'[redacted]'"
+    Protocol: https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.md
+    Hello (op 0) -> Identify (op 1, SHA-256 auth) -> Identified (op 2), then
+    Request (op 6) / RequestResponse (op 7). Events are not subscribed.
+    """
 
-    def __format__(self, spec):
-        return format("[redacted]", spec)
+    def __init__(self, host, port, password, timeout=5):
+        import base64
+
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(
+            (
+                f"GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "Sec-WebSocket-Protocol: obswebsocket.json\r\n\r\n"
+            ).encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self.sock.recv(4096)
+            if not chunk or len(response) > 65536:
+                raise ConnectionError("No WebSocket handshake")
+            response += chunk
+        head, _, self.buffer = response.partition(b"\r\n\r\n")
+        accept = base64.b64encode(
+            hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+            ).digest()
+        ).decode()
+        if not head.startswith(b"HTTP/1.1 101") or accept.encode() not in head:
+            raise ConnectionError("Not an obs-websocket server")
+        hello = self._message()
+        if hello.get("op") != 0:
+            raise ConnectionError("Unexpected first message")
+        identify = {"rpcVersion": 1, "eventSubscriptions": 0}
+        auth = hello.get("d", {}).get("authentication")
+        if auth:
+            if not password:
+                raise PermissionError("OBS asks for a password")
+            secret = base64.b64encode(
+                hashlib.sha256((password + auth["salt"]).encode()).digest()
+            )
+            identify["authentication"] = base64.b64encode(
+                hashlib.sha256(secret + auth["challenge"].encode()).digest()
+            ).decode()
+        self._send({"op": 1, "d": identify})
+        if self._message().get("op") != 2:
+            raise ConnectionError("Not identified")
+
+    def _read(self, size):
+        while len(self.buffer) < size:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("OBS closed the connection")
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:size], self.buffer[size:]
+        return data
+
+    def _frame(self):
+        first, second = self._read(2)
+        length = second & 0x7F
+        if length == 126:
+            length = int.from_bytes(self._read(2), "big")
+        elif length == 127:
+            length = int.from_bytes(self._read(8), "big")
+        if length > 16 * 1024 * 1024:
+            raise ConnectionError("Message too large")
+        mask = self._read(4) if second & 0x80 else None
+        payload = self._read(length)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return first & 0x0F, payload
+
+    def _message(self):
+        while True:
+            opcode, payload = self._frame()
+            if opcode == 8:
+                code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 0
+                if code == 4009:
+                    raise PermissionError("OBS refused the password")
+                raise ConnectionError(f"OBS closed the connection ({code})")
+            if opcode == 9:  # ping
+                self._send_raw(10, payload)
+                continue
+            if opcode == 1:
+                return json.loads(payload)
+
+    def _send_raw(self, opcode, data):
+        mask = os.urandom(4)
+        header = bytes([0x80 | opcode])
+        if len(data) < 126:
+            header += bytes([0x80 | len(data)])
+        elif len(data) < 65536:
+            header += bytes([0x80 | 126]) + len(data).to_bytes(2, "big")
+        else:
+            header += bytes([0x80 | 127]) + len(data).to_bytes(8, "big")
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(header + mask + masked)
+
+    def _send(self, message):
+        self._send_raw(1, json.dumps(message).encode())
+
+    def request(self, kind):
+        request_id = uuid.uuid4().hex
+        self._send({"op": 6, "d": {"requestType": kind, "requestId": request_id}})
+        while True:
+            message = self._message()
+            data = message.get("d", {})
+            if message.get("op") == 7 and data.get("requestId") == request_id:
+                status = data.get("requestStatus", {})
+                if not status.get("result"):
+                    raise RuntimeError(status.get("comment") or f"OBS refused {kind}")
+                return data.get("responseData") or {}
+
+    def close(self):
+        try:
+            self._send_raw(8, (1000).to_bytes(2, "big"))
+        except OSError:
+            pass
+        self.sock.close()
 
 
 def obs_record(
@@ -975,40 +1086,51 @@ def obs_record(
         raise ValueError("Invalid OBS port")
     if password is not None and not isinstance(password, str):
         raise ValueError("Password must be supplied as text by the credential provider")
-    try:
-        import obsws_python
-    except ImportError:
-        raise RuntimeError("Install the optional obsws-python dependency") from None
-    client = None
+    session = None
     output = None
     try:
-        client = obsws_python.ReqClient(
-            host=host, port=port, password=_Password(password or ""), timeout=5
-        )
+        session = _ObsSession(host, port, password)
         if action == "start":
-            client.start_record()
+            session.request("StartRecord")
         elif action == "stop":
-            output = client.stop_record().output_path
-        status = client.get_record_status()
-        active = bool(status.output_active)
+            output = session.request("StopRecord").get("outputPath")
+        status = session.request("GetRecordStatus")
+        active = bool(status.get("outputActive"))
+        if action in ("start", "stop"):
+            # OBS answers first and starts or stops the output a moment later.
+            deadline = time.monotonic() + 10
+            while active != (action == "start") and time.monotonic() < deadline:
+                time.sleep(0.2)
+                status = session.request("GetRecordStatus")
+                active = bool(status.get("outputActive"))
         if action in ("start", "stop") and active != (action == "start"):
             raise RuntimeError("OBS did not reach the requested recording state")
         result = {
             "action": action,
             "recording": active,
-            "paused": bool(status.output_paused),
-            "timecode": status.output_timecode,
+            "paused": bool(status.get("outputPaused")),
+            "timecode": status.get("outputTimecode"),
         }
+    except PermissionError:
+        raise RuntimeError(
+            "OBS refused the password. Copy it from OBS: Tools > WebSocket Server "
+            "Settings > Show Connect Info"
+        ) from None
+    except (ConnectionRefusedError, socket.timeout, TimeoutError):
+        raise RuntimeError(
+            "Open OBS and turn on its WebSocket server: Tools > WebSocket Server "
+            "Settings > Enable WebSocket server"
+        ) from None
+    except RuntimeError:
+        raise
     except Exception:
         raise RuntimeError(
-            "OBS connection or request failed; check local OBS and provider configuration"
+            "OBS connection or request failed; check that OBS is open and its "
+            "WebSocket server is on"
         ) from None
     finally:
-        if client is not None:
-            try:
-                client.disconnect()
-            except Exception:
-                pass
+        if session is not None:
+            session.close()
     if action == "stop":
         path = _local(output, exists=True)
         if path.stat().st_size == 0:

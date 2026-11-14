@@ -608,3 +608,55 @@ class CloudRouteTests(unittest.TestCase):
             json={"action": "upload", "options": {**options, "confirmed": True}},
         )
         self.assertEqual(accepted.status_code, 202, accepted.text)
+
+
+@unittest.skipIf(
+    TestClient is None, "FastAPI/httpx are optional dashboard dependencies"
+)
+class ObsRouteTests(unittest.TestCase):
+    setUp = DashboardTests.setUp
+
+    def test_recording_controls_need_consent_and_never_echo_the_password(self):
+        seen = []
+
+        def obs(action, password=None, port=4455, confirmed=False):
+            seen.append((action, password, port, confirmed))
+            return {"action": action, "recording": action == "start"}
+
+        self.studio.obs = obs
+        status = self.client.post(
+            "/obs", json={"action": "status", "password": "pw-123", "port": 4455}
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        self.assertNotIn("pw-123", status.text)
+        refused = self.client.post(
+            "/obs", json={"action": "start", "password": "pw-123"}
+        )
+        self.assertEqual(refused.status_code, 422)
+        started = self.client.post(
+            "/obs", json={"action": "start", "password": "pw-123", "confirmed": True}
+        )
+        self.assertEqual(started.status_code, 200, started.text)
+        self.assertEqual(seen[-1], ("start", "pw-123", 4455, True))
+        bad = self.client.post("/obs", json={"action": "status", "port": 70000})
+        self.assertEqual(bad.status_code, 422)
+
+
+class StudioObsTests(unittest.TestCase):
+    def test_studio_passes_the_request_to_the_obs_adapter(self):
+        from unittest.mock import patch
+
+        from cutroom import integrations
+        from cutroom.studio import Studio
+
+        with tempfile.TemporaryDirectory() as temporary:
+            studio = Studio(Path(temporary))
+            with patch.object(
+                integrations, "obs_record", return_value={"recording": False}
+            ) as record:
+                self.assertEqual(
+                    studio.obs("status", password="x", port=4456), {"recording": False}
+                )
+            record.assert_called_once_with(
+                "status", port=4456, password="x", confirmed=False
+            )

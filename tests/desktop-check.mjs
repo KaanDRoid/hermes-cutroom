@@ -1991,3 +1991,55 @@ test('Export explains how to set up a cloud folder when rclone has none', async 
   assert.match(text(tree), /No cloud folder is set up/);
   assert.match(text(tree), /rclone config/);
 });
+
+test('Record with OBS: the password lives in Settings, Start records and Stop opens the recording as a project', async () => {
+  hookStores.clear(); queries.length = 0; jobRows = []; projectRows = [];
+  const stored = {};
+  const storage = { get: (key, fallback) => key in stored ? stored[key] : fallback, set: (key, value) => { stored[key] = value; } };
+  const pages = [], registrations = [], calls = [];
+  let recording = false;
+  (await load()).default.register({ register: entry => registrations.push(entry), registerSettingsPage: page => pages.push(page), storage,
+    rest: async (path, options) => {
+      calls.push({ path, options });
+      if (path === '/obs') {
+        const { action } = options.body;
+        if (action === 'start') recording = true;
+        if (action === 'stop') { recording = false; return { action, recording, output: 'C:/Users/me/Videos/2026-11-14 02-40-00.mkv', file_verified: true }; }
+        return { action, recording, timecode: recording ? '00:00:05.000' : null };
+      }
+      if (path === '/projects') return { id: 'r1', name: 'Recording', revision: 1, settings: {}, artifacts: {} };
+      return { id: 'r1', revision: 2 };
+    } });
+  const page = { render: () => pages[0].render() };
+  const secret = field(draw(page), 'obs.password');
+  assert.ok(secret, 'password field in Settings');
+  assert.equal(secret.props.type, 'password');
+  type(secret, 'pw-123');
+  assert.equal(stored.obs.password, 'pw-123');
+  const route = registrations.find(r => r.area === sdk.ROUTES_AREA);
+  let tree = draw(route);
+  assert.doesNotMatch(text(tree), /pw-123/, 'the password is never shown');
+  await button(tree, 'Start recording').props.onClick();
+  await tick(); await tick();
+  const start = calls.find(c => c.path === '/obs' && c.options.body.action === 'start');
+  assert.deepEqual(start.options.body, { action: 'start', password: 'pw-123', port: 4455, confirmed: true });
+  tree = draw(route);
+  assert.match(text(tree), /Recording/);
+  await button(tree, 'Stop and edit').props.onClick();
+  await tick(); await tick(); await tick();
+  const imported = calls.find(c => c.path === '/projects' && c.options?.method === 'POST');
+  assert.equal(imported.options.body.source, 'C:/Users/me/Videos/2026-11-14 02-40-00.mkv');
+});
+
+test('Record with OBS explains how to turn OBS on when it cannot connect', async () => {
+  hookStores.clear(); queries.length = 0; jobRows = []; projectRows = [];
+  const registrations = [];
+  (await load()).default.register({ register: entry => registrations.push(entry), storage: { get: (_k, fallback) => fallback, set: () => {} },
+    rest: async path => { if (path === '/obs') throw new Error("Error invoking remote method 'hermes:api': Error: 422: {\"detail\":\"Open OBS and turn on its WebSocket server: Tools > WebSocket Server Settings > Enable WebSocket server\"}"); return []; } });
+  const route = registrations.find(r => r.area === sdk.ROUTES_AREA);
+  await button(draw(route), 'Start recording').props.onClick();
+  await tick(); await tick();
+  const shown = text(draw(route));
+  assert.match(shown, /Open OBS and turn on its WebSocket server/);
+  assert.doesNotMatch(shown, /hermes:api/);
+});

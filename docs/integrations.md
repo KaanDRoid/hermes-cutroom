@@ -6,10 +6,37 @@ The core workflow does not require online accounts. `cutroom/integrations.py` co
 |---|---|
 | Supported media import | Explicit confirmation, trusted provider hosts, public-IP/redirect checks, bounded subprocess/download and attribution metadata |
 | Raster image import | Explicit confirmation, allowlisted HTTPS hosts, redirect/IP/MIME/size checks |
-| OBS WebSocket v5 | Loopback connection, explicit start/stop consent, lazy SDK import; a real running OBS instance is required |
+| OBS WebSocket v5 | Studio **Record with OBS** (person only; see below). Loopback only, explicit start/stop consent, a small built-in client (no extra package) |
 | rclone | Studio **Send to the cloud** (person only; see below). CLI-owned credentials; matching remote MD5/SHA-1/SHA-256 verify content, name/size alone return `verified=false`, `verification="metadata_only"`. Existing files are never overwritten. No credential-file scraping. |
 | Calendar | Local timezone-aware ICS file; no live service event creation is implied |
 | Publication package | Local video/cover/caption/manifest files; not an automatic public post |
+
+## Record with OBS
+
+The home page has **Record with OBS** under Make a video. Start recording
+starts OBS's recording; **Stop and edit** stops it and imports the file as a
+new project.
+
+- OBS must be open with its WebSocket server on (OBS: Tools → WebSocket Server
+  Settings → Enable WebSocket server). Its password goes in Settings → Plugins
+  → Cutroom; Hermes Desktop keeps it on this computer and sends it only with
+  each OBS request. Cutroom never reads OBS's own settings files and never
+  stores the password in a project.
+- Only loopback addresses are accepted. Start and stop need explicit consent
+  (`confirmed: true`); the agent has no OBS tool.
+- The client speaks obs-websocket v5 directly: HTTP upgrade, Hello/Identify
+  with the documented SHA-256 authentication, then Request/Response; events are
+  not subscribed. OBS answers StartRecord and StopRecord before the output
+  changes, so Cutroom waits up to 10 s for the new state.
+- A wrong password, a closed OBS and a disabled server each give one plain
+  sentence saying what to do.
+- OBS's WebSocket server listens on all network interfaces by default and is
+  protected by its password; turn it off in OBS when you do not record.
+
+Live check (2026-11-14, OBS Studio on Windows): status, start, 3 s of
+recording and stop through Cutroom's client; OBS wrote a 1920×1080 MP4 with
+audio (3.1 s) that imported as a project. The test recording was deleted and
+OBS closed afterwards.
 
 ## Send to the cloud (rclone)
 
@@ -56,4 +83,4 @@ These adapters are not an OS/network sandbox. Do not weaken allowlists, enable a
 - Verify the real recorded/uploaded target after the operation.
 - Report missing applications/accounts as blockers, not success.
 
-At the current checkpoint, local ICS/package behavior and adapter contracts are tested and cloud sending is live-checked as above. Real OBS capture and live calendar/account writes remain acceptance work, as does sending from the native Desktop window by a person.
+At the current checkpoint, local ICS/package behavior and adapter contracts are tested and cloud sending is live-checked as above. OBS recording is live-checked as above. Live calendar/account writes remain acceptance work, as do recording and sending from the native Desktop window by a person.

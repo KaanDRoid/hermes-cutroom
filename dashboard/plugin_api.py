@@ -269,6 +269,27 @@ def submit_job(project_id: ProjectId, body: SubmitJob, studio=Depends(get_studio
     return invoke(studio.submit, project_id, body.action, body.options)
 
 
+class ObsRequest(RequestModel):
+    action: Literal["status", "start", "stop"]
+    password: str | None = Field(default=None, max_length=512)
+    port: int = Field(default=4455, ge=1, le=65535)
+    confirmed: bool = False
+
+
+@router.post("/obs")
+def obs(body: ObsRequest, studio=Depends(get_studio)):
+    """Record with OBS on this computer; start and stop need explicit consent."""
+    if body.action != "status" and body.confirmed is not True:
+        raise HTTPException(422, "Explicit consent is required to start or stop OBS")
+    return invoke(
+        studio.obs,
+        body.action,
+        password=body.password,
+        port=body.port,
+        confirmed=body.confirmed,
+    )
+
+
 @router.get("/cloud/remotes")
 def cloud_remotes(studio=Depends(get_studio)):
     """Cloud folders set up in rclone on this computer (name and type only)."""

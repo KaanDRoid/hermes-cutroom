@@ -349,13 +349,46 @@ function StudioScope({ ctx, profile, connection }) {
   ] });
 }
 
+// Record with OBS on this computer, then edit the recording. The password is
+// kept by this app (Settings) and sent only with each OBS request.
+const obsSettings = ctx => { const value = ctx.storage?.get?.('obs', {}) || {}; return { password: typeof value.password === 'string' ? value.password : '', port: Number.isInteger(value.port) ? value.port : 4455 }; };
+
+function ObsRecorder({ ctx, onRecorded }) {
+  const [state, setState] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const call = async (action, confirmed = false) => {
+    const { password, port } = obsSettings(ctx);
+    return ctx.rest('/obs', { method: 'POST', body: { action, password, port, ...(confirmed ? { confirmed: true } : {}) }, timeoutMs: 20000 });
+  };
+  const act = async action => {
+    if (busy) return;
+    setBusy(true); setError(null);
+    try {
+      const result = await call(action, true);
+      setState(result);
+      if (action === 'stop' && result?.output) await onRecorded(result.output);
+    } catch (failure) { setError(failure); }
+    finally { setBusy(false); }
+  };
+  const recording = state?.recording === true;
+  return el('div', { style: { ...stack, gap: 8, paddingTop: 12, borderTop: '1px solid var(--ui-stroke-secondary)' }, children: [
+    el('h3', { style: h3s, children: 'Record with OBS' }, 'head'),
+    el('p', { style: muted, children: recording ? `Recording… ${String(state.timecode || '').slice(0, 8)}` : 'Record your screen or camera in OBS Studio, then edit the recording here. OBS must be open with its WebSocket server on; add its password in Settings → Plugins → Cutroom.' }, 'what'),
+    el('div', { style: row, children: recording
+      ? [jsx(Button, { disabled: busy, onClick: () => act('stop'), children: busy ? 'Stopping…' : 'Stop and edit' }, 'stop')]
+      : [jsx(Button, { variant: 'secondary', disabled: busy, onClick: () => act('start'), children: busy ? 'Starting…' : 'Start recording' }, 'start')] }, 'actions'),
+    jsx(Notice, { error }, 'error'),
+  ] });
+}
+
 function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }) {
   const client = useQueryClient();
   const [source, setSource, sourceRef] = useLive('');
   const [error, setError] = useState(null);
   const create = useMutation({ mutationFn: path => ctx.rest('/projects', { method: 'POST', body: { source: path }, timeoutMs: 120000 }) });
-  const importVideo = async () => {
-    const path = sourceRef.current.trim();
+  const importVideo = async (chosen = null) => {
+    const path = (typeof chosen === 'string' ? chosen : sourceRef.current).trim();
     if (!path) return;
     setError(null);
     try {
@@ -387,6 +420,7 @@ function Home({ ctx, scope, projects, jobs, platforms, choose, report, loading }
       ] }),
       el('p', { style: muted, children: 'Cutroom never changes the original file. Browse lists files on this computer, so use it when Cutroom runs here too.' }),
       jsx(Notice, { error }),
+      jsx(ObsRecorder, { ctx, onRecorded: importVideo }, 'obs'),
     ] }, 'make'),
     el('section', { 'aria-labelledby': 'cutroom-recent', style: stack, children: [
       el('h2', { id: 'cutroom-recent', style: h2s, children: 'Recent projects' }),
@@ -2170,6 +2204,16 @@ function SettingsPage({ ctx }) {
       el('p', { style: { ...muted, marginTop: -4 }, children: 'For removing words, the small model hears short words reliably. The tiny model is faster but can invent or miss a word; listen before you remove one.' }, 'whisper-hint'),
       path('face_model', 'Face model file'), path('segmentation_model', 'Background model file'),
     ] }, 'models'),
+    el('section', { 'aria-labelledby': 'cutroom-obs', style: stack, children: [
+      el('h3', { id: 'cutroom-obs', style: h3s, children: 'Recording with OBS' }),
+      el('p', { style: muted, children: 'In OBS: Tools → WebSocket Server Settings → Enable WebSocket server, then Show Connect Info for the password. It is kept on this computer and sent only to OBS on this computer.' }),
+      jsx(Field, { label: 'OBS WebSocket password', name: 'obs.password', type: 'password', value: obsSettings(ctx).password, onCommit: value => { ctx.storage?.set?.('obs', { ...obsSettings(ctx), password: value }); return undefined; } }, 'obs-password'),
+      jsx(Field, { label: 'OBS WebSocket port', name: 'obs.port', type: 'number', value: obsSettings(ctx).port, onCommit: value => {
+        const port = Number(value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return 'The port is a whole number, usually 4455';
+        ctx.storage?.set?.('obs', { ...obsSettings(ctx), port }); return undefined;
+      } }, 'obs-port'),
+    ] }, 'obs'),
     el('section', { 'aria-labelledby': 'cutroom-default-platform', style: stack, children: [
       el('h3', { id: 'cutroom-default-platform', style: h3s, children: 'Default platform' }),
       jsx(RadioCards, { label: 'Default platform', value: values.platform || 'custom', min: 130, onChange: value => set('platform', value), options: Object.entries(PLATFORM_NAMES).map(([value, title]) => ({ key: `default-platform:${value}`, value, title })) }),

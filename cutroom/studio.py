@@ -2033,6 +2033,17 @@ class Studio:
         )
         return str(found) if found else None
 
+    def obs(self, action, password=None, port=4455, confirmed=False):
+        """Start, stop or read OBS recording on this computer (person only).
+
+        The password is passed through for this request and never stored.
+        """
+        from . import integrations
+
+        return integrations.obs_record(
+            action, port=port, password=password, confirmed=confirmed
+        )
+
     def cloud_remotes(self):
         """Cloud folders set up in rclone; empty when rclone is missing."""
         from . import integrations
