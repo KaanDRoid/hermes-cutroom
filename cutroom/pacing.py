@@ -370,7 +370,7 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
     range's head handle, centred on the cut, so every kept frame keeps its
     program position and the program length does not change.
     """
-    from . import reframe
+    from . import fanout, reframe
 
     numerator, _, denominator = rate.partition("/")
     num, den = int(numerator), int(denominator or 1)
@@ -379,18 +379,33 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
     by_frame = {t["frame"]: t for t in report["transitions"]}
     lines, lengths, pieces = [], [], [0, 0]
 
-    for k, item in enumerate(ranges):
-        start, count = item["start_frame"], item["frames"]
+    def handles(k):
+        start = ranges[k]["start_frame"]
         hb = by_frame.get(start, {}).get("before", 0) if k else 0
         ha = (
             by_frame.get(ranges[k + 1]["start_frame"], {}).get("after", 0)
             if k + 1 < len(ranges)
             else 0
         )
-        first = item["source_first"] - hb
-        stop = item["source_first"] + count + ha
+        return hb, ha
+
+    spans = []
+    for k, item in enumerate(ranges):
+        hb, ha = handles(k)
+        spans.append(
+            (item["source_first"] - hb, item["source_first"] + item["frames"] + ha)
+        )
+    # Each range reads only its part of the source (see fanout).
+    tree, inputs = fanout.cut_inputs("[0:v:0]", spans, video=True, prefix="pf")
+    lines.extend(tree)
+
+    for k, item in enumerate(ranges):
+        start, count = item["start_frame"], item["frames"]
+        hb, ha = handles(k)
+        stream, offset = inputs[k]
+        first, stop = spans[k]
         chain = [
-            f"trim=start_frame={first}:end_frame={stop}",
+            f"trim=start_frame={first - offset}:end_frame={stop - offset}",
             "setpts=PTS-STARTPTS",
         ]
         chain += list(prefilters)
@@ -424,7 +439,7 @@ def build_graph(report, *, rate, origin, out_size, crop=None, prefilters=(), sar
         if crop is not None or zoomed:
             chain.append(f"scale={out_size[0]}:{out_size[1]}")
         chain += [f"setsar={sar}", f"settb={den}/{num}", "setpts=N", f"fps={rate}"]
-        lines.append("[0:v:0]" + ",".join(chain) + f"[p{k}]")
+        lines.append(stream + ",".join(chain) + f"[p{k}]")
         lengths.append(hb + count + ha)
     if max(pieces) > reframe.MAX_PIECES:
         raise ValueError(

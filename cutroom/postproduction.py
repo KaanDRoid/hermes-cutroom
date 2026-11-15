@@ -12,10 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
-    from . import audio, pacing, platforms, reframe
+    from . import audio, fanout, pacing, platforms, reframe
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
-    from cutroom import audio, pacing, platforms, reframe
+    from cutroom import audio, fanout, pacing, platforms, reframe
     from cutroom.childenv import child_env
 
 
@@ -1398,18 +1398,40 @@ def export_video(
     )
     # The kept frames (or exact source times), not the half-frame edges.
     program = sum(samples for _, _, samples in sound_ranges) / sample_rate
+    # Each cut reads only its part of the stream (see fanout): with every cut
+    # reading the whole stream, hundreds of cuts take hours.
+    video_inputs = audio_inputs = None
+    if not paced and frames is not None:
+        lines, video_inputs = fanout.cut_inputs(
+            "[0:v:0]",
+            [(first, first + count) for first, count in frames],
+            video=True,
+            prefix="vf",
+        )
+        graph.extend(lines)
+    if info["has_audio"]:
+        lines, audio_inputs = fanout.cut_inputs(
+            "[0:a:0]",
+            [(sound_start, sound_end) for sound_start, sound_end, _ in sound_ranges],
+            video=False,
+            prefix="af",
+        )
+        graph.extend(lines)
+        audio_graph.extend(lines)
     for index, ((start, end), (sound_start, sound_end, samples)) in enumerate(
         zip(ranges, sound_ranges)
     ):
         if not paced:
             if frames is not None:
                 first, count = frames[index]
+                stream, offset = video_inputs[index]
                 timebase = 1 / Fraction(rate)
                 trim_video = (
-                    f"trim=start_frame={first}:end_frame={first + count},"
+                    f"trim=start_frame={first - offset}:"
+                    f"end_frame={first + count - offset},"
                     f"settb={timebase.numerator}/{timebase.denominator},setpts=N"
                 )
-                graph.append(f"[0:v:0]{trim_video}[v{index}]")
+                graph.append(f"{stream}{trim_video}[v{index}]")
                 labels.append(f"[v{index}]")
         if info["has_audio"]:
             # Place sound by the requested start, not by its first sample: when
@@ -1420,7 +1442,7 @@ def export_video(
             # asks for (loudnorm works at 192 kHz) and the sample counts below
             # would cut a quarter of the sound.
             trim = (
-                f"[0:a:0]atrim=start={sound_start}:end={sound_end},"
+                f"{audio_inputs[index][0]}atrim=start={sound_start}:end={sound_end},"
                 f"asetpts=PTS-{sound_start}/TB,"
                 f"aresample={sample_rate}:async=1:first_pts=0"
             )

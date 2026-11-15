@@ -9,8 +9,10 @@ import tempfile
 from pathlib import Path
 
 try:
+    from . import fanout
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
+    from cutroom import fanout
     from cutroom.childenv import child_env
 
 PROCESS_TIMEOUT = 300
@@ -76,6 +78,7 @@ def render(source: str | Path, segments: list[dict], output: str | Path) -> dict
         raise ValueError("At least one segment is required")
     filters = []
     labels = []
+    spans = []
     previous_end = 0.0
     for index, segment in enumerate(segments):
         if (
@@ -90,13 +93,27 @@ def render(source: str | Path, segments: list[dict], output: str | Path) -> dict
                 "Segments must be ordered, non-overlapping, and within the source duration"
             )
         previous_end = end
+        spans.append((start, end))
+    # Each segment reads only its part of the streams (see fanout).
+    video_tree, video_inputs = fanout.cut_inputs(
+        "[0:v:0]", spans, video=True, by_frame=False, prefix="mv"
+    )
+    filters.extend(video_tree)
+    if has_audio:
+        audio_tree, audio_inputs = fanout.cut_inputs(
+            "[0:a:0]", spans, video=False, prefix="ma"
+        )
+        filters.extend(audio_tree)
+    for index, (start, end) in enumerate(spans):
         filters.append(
-            f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
+            f"{video_inputs[index][0]}trim=start={start}:end={end},"
+            f"setpts=PTS-STARTPTS[v{index}]"
         )
         labels.append(f"[v{index}]")
         if has_audio:
             filters.append(
-                f"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]"
+                f"{audio_inputs[index][0]}atrim=start={start}:end={end},"
+                f"asetpts=PTS-STARTPTS[a{index}]"
             )
             labels.append(f"[a{index}]")
     filters.append(
