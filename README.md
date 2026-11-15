@@ -17,6 +17,34 @@ It ships three surfaces:
 
 See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md) and [current status](docs/status.md) for exact contracts and limits.
 
+## A look at the Studio
+
+Start from a file on your computer, or record one with OBS and edit it straight away.
+
+<img src="docs/screenshots/home.png" alt="Cutroom home: import a video or record with OBS" width="720">
+
+**Edit by text.** Click a word to jump there; select words and press Delete to cut them. Long pauses and repeats come as suggestions you apply or keep. Removed words stay visible, struck through, so nothing is lost.
+
+<img src="docs/screenshots/edit.png" alt="Editing a talk by deleting words in its transcript" width="900">
+
+**Style it for a platform.** Pick YouTube Shorts, Reels, TikTok or YouTube, a caption style and a framing. Face track keeps the speaker in a 9:16 crop of a 16:9 recording.
+
+<img src="docs/screenshots/style.png" alt="YouTube Shorts with face-tracked framing and pop-in captions" width="900">
+
+**Review, then approve.** Cutroom renders a preview and checks it: frame, timing, loudness, captions, safe zone and framing. A problem says what is wrong, where, and how to fix it. Only a person can approve, and any later change needs a new approval.
+
+<img src="docs/screenshots/review.png" alt="Preview with automatic checks and the approval box" width="900">
+
+**Export and deliver.** The final is made from exactly the approved version. Download the files, make a local delivery package, or send them to a Google Drive folder.
+
+<img src="docs/screenshots/export.png" alt="Export with downloads, cloud copy and delivery package" width="900">
+
+Nothing leaves your computer without a second, explicit click that says what goes where.
+
+<img src="docs/screenshots/cloud.png" alt="Confirmation before sending files to Google Drive" width="900">
+
+<sub>Screenshots are from Hermes Desktop. The footage is an excerpt of <a href="https://commons.wikimedia.org/wiki/File:Climate_change_is_simple_David_Roberts_at_TEDxTheEvergreenStateCollege.webm"><i>Climate change is simple</i></a>, David Roberts at TEDxTheEvergreenStateCollege, published by TEDx Talks under <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>. It was cut, reframed and captioned in Cutroom.</sub>
+
 ## Studio workflow
 
 1. `transcribe` (local faster-whisper) → review fillers and exclude words.

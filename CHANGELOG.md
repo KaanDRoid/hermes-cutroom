@@ -53,6 +53,29 @@ Creator formats, a redesigned Studio and faster renders.
 - Sound and picture stay in sync on FFmpeg 7.1, on recordings that lost frames
   and on sound that starts late.
 - The chat gets three tools by default; the older plan-file tools are opt-in.
+- Face track no longer pans slowly after a camera change the scene detector
+  missed: when the face is found again far away after a gap, the crop moves to
+  it at once; a new shot starts where its first face is.
+- The original player shows the Face track crop, not the centre; a person can
+  switch Original, Preview and Final while a video is loading.
+- Review explains caption problems (what, where, how to fix) and the cloud
+  list uses readable file names.
+
+### Safety
+- Try again repeats local jobs only, never a cloud copy and never with consent.
+- In a chat on Telegram, Discord and similar services, finished renders are not
+  shared automatically: the agent asks first, because sharing uploads the file
+  there.
+- An OBS request has one time budget; the OBS password never appears in an
+  error; signed links in cloud errors lose their query string.
+- Scrubbing or choosing a destination keeps an approval; a real edit clears it.
+
+### Known limits
+- `/obs` status takes any local port and its error tells a closed port from
+  another failure, so a local program could use it to probe local ports.
+- In a Hermes profile other than the one the gateway started with, plugin
+  requests go through a separate plugin host; there, loading a video into the
+  player measured about 0.8 MB/s (about 2.5 minutes for a 34 MB preview).
 
 ## 0.1.1
 

@@ -1,5 +1,39 @@
 # Implementation status
 
+## November 15 — Release checks for 0.2.0 (`feat/ui-redesign`)
+
+- **Security review** of the Python side and of the Desktop page with the HTTP
+  API. Fixed: Try again could send a failed cloud copy again without the Send
+  now confirmation; a video the host cannot play reloaded in a loop; scrubbing
+  or choosing a destination cleared an approval; OBS could be held open by
+  another program on its port; the OBS password could come back in an error;
+  signed links in cloud errors kept their query string; jobs without a runner
+  saved their options; chat tools allowed larger changes than the HTTP API; in
+  a chat on a messaging service, finished renders were offered for sharing
+  without asking. Each fix has a test that failed first.
+- **Native Desktop run** in Hermes Desktop against the real gateway, on a
+  75-second excerpt of a CC BY 3.0 TEDx talk: import, transcription, word
+  edits, YouTube Shorts with Face track and pop captions, face analysis,
+  preview, checks, approval, final, delivery package and the Drive
+  confirmation (not sent). The approval was clicked by the agent for the
+  screenshots; the person ran the workflow separately and accepted it.
+- Found and fixed on that run: Face track panned slowly after a camera change
+  the scene detector missed and left the speaker out of frame for about a
+  second (the crop now moves where the face is found again, from the frame it
+  was lost); the original player showed a centre crop for Face track; Original,
+  Preview and Final could not be switched while a video loaded; a caption
+  problem was labelled "Captions are present" with no place or fix; the cloud
+  list showed `captions_ass`.
+- **Clean install** from a fresh clone (`c0c552e`) in a new Python 3.12
+  environment with all optional extras: imports and `scripts/check.py` pass
+  (643 tests, 14 skipped; Ruff; Desktop; whitespace).
+- Gates: 652 Python tests OK (14 skipped) on FFmpeg 9.0.2 and 7.1.1, 92/92
+  Desktop tests, Ruff clean, `hermes plugins validate` 16/16.
+- Known limits: `/obs` status accepts any local port and its error tells a
+  closed port from other failures. In a profile other than the one the gateway
+  started with, plugin requests pass through a separate plugin host; there the
+  player loaded media at about 0.8 MB/s.
+
 ## November 14–15 — Cloud copy, OBS, speech and performance (`feat/ui-redesign`)
 
 - **Send to the cloud:** Export copies an approved final and its files to a new
