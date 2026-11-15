@@ -743,6 +743,8 @@ def _upload_problem(detail):
             "minute and send again; for steady use, give rclone its own client ID "
             "(rclone.org/drive/#making-your-own-client-id). Nothing was verified as sent"
         )
+    # Signed URLs carry tokens in their query string; never keep them.
+    text = re.sub(r"(https?://[^\s?\"']+)\?[^\s\"']*", r"\1?…", text)
     text = re.sub(r"\s+", " ", text)[:240]
     return (
         f"Upload failed: {text}. Nothing was verified as sent"
@@ -952,9 +954,13 @@ class _ObsSession:
     Request (op 6) / RequestResponse (op 7). Events are not subscribed.
     """
 
-    def __init__(self, host, port, password, timeout=5):
+    def __init__(self, host, port, password, timeout=5, budget=15):
         import base64
 
+        # One deadline for the whole session: something else on the port that
+        # keeps sending must not hold the request open.
+        self.deadline = time.monotonic() + budget
+        self.timeout = timeout
         self.sock = socket.create_connection((host, port), timeout=timeout)
         self.sock.settimeout(timeout)
         key = base64.b64encode(os.urandom(16)).decode()
@@ -968,6 +974,8 @@ class _ObsSession:
         )
         response = b""
         while b"\r\n\r\n" not in response:
+            if time.monotonic() > self.deadline:
+                raise ConnectionError("OBS did not answer in time")
             chunk = self.sock.recv(4096)
             if not chunk or len(response) > 65536:
                 raise ConnectionError("No WebSocket handshake")
@@ -1000,6 +1008,10 @@ class _ObsSession:
 
     def _read(self, size):
         while len(self.buffer) < size:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                raise ConnectionError("OBS did not answer in time")
+            self.sock.settimeout(min(self.timeout, left))
             chunk = self.sock.recv(65536)
             if not chunk:
                 raise ConnectionError("OBS closed the connection")

@@ -442,3 +442,28 @@ class DescriptionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MessagingSurfaceTests(MediaCase):
+    def test_on_a_messaging_service_the_file_is_not_offered_for_upload(self):
+        import sys
+        import types
+
+        surface = types.ModuleType("gateway.session_context")
+        surface.session_is_messaging_surface = lambda: True
+        with patch.dict(sys.modules, {"gateway.session_context": surface}):
+            result = self.get_job(self.render_job())
+        self.assertNotIn("display_hint", result)
+        self.assertIn("ask the person", result["share_notice"].lower())
+        self.assertEqual(result["media"]["path"], str(self.preview))
+
+    def test_on_desktop_the_file_is_shown(self):
+        import sys
+        import types
+
+        surface = types.ModuleType("gateway.session_context")
+        surface.session_is_messaging_surface = lambda: False
+        with patch.dict(sys.modules, {"gateway.session_context": surface}):
+            result = self.get_job(self.render_job())
+        self.assertIn("MEDIA:", result["display_hint"])
+        self.assertNotIn("share_notice", result)

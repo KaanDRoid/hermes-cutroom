@@ -13,6 +13,28 @@ MEDIA_KINDS = ("preview", "final", "cover")
 QA_NAME_LIMIT = 20
 TEXT_LIMIT = 200
 DISPLAY_HINT = "Show it to the person with a line: MEDIA:"
+SHARE_NOTICE = (
+    "This chat runs on a messaging service: a MEDIA: line uploads the file to "
+    "that service. Ask the person before sharing it; otherwise tell them to "
+    "watch it in Cutroom Studio."
+)
+
+
+def _on_messaging_surface():
+    """True when this turn is delivered over a chat service such as Telegram.
+
+    Hermes' own check is used when the gateway is loaded; on Desktop, the CLI
+    and anywhere it cannot be read, the file stays on this computer.
+    """
+    import sys
+
+    module = sys.modules.get("gateway.session_context")
+    check = getattr(module, "session_is_messaging_surface", None)
+    try:
+        return bool(check()) if check else False
+    except Exception:
+        return False
+
 
 PROJECT_CHANGES = frozenset(
     {
@@ -319,7 +341,10 @@ def _with_media(studio, job):
     result = dict(job, media=media)
     result.pop("display_hint", None)
     if media["current"]:
-        result["display_hint"] = DISPLAY_HINT + media["path"]
+        if _on_messaging_surface():
+            result["share_notice"] = SHARE_NOTICE
+        else:
+            result["display_hint"] = DISPLAY_HINT + media["path"]
     return _json_safe(result)
 
 
@@ -768,7 +793,9 @@ def definitions():
             "cover or qa; list(project_id?), get(job_id), cancel(job_id). A "
             "completed preview, final or cover includes media (absolute path, "
             "platform, duration, size, qa status pass/warning/fail, approved) "
-            "and display_hint: show the file with a line MEDIA:<path>. QA "
+            "and display_hint: show the file with a line MEDIA:<path>. On a "
+            "messaging service there is a share_notice instead: sending the "
+            "file uploads it there, so ask the person first. QA "
             "'warning' means ready with notes; only 'fail' needs changes. The "
             "cutroom:edit-video skill has the full workflow. " + APPROVAL_NOTICE
         ),

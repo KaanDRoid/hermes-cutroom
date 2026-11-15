@@ -48,7 +48,10 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      adds a slow zoom on ranges of 4 s or more.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
-   `media.path` from the completed job exactly as returned.
+   `media.path` from the completed job exactly as returned. When the job has
+   `share_notice` instead of `display_hint`, this chat runs on a messaging
+   service and a `MEDIA:` line uploads the file there: ask the person first,
+   or tell them to watch it in Cutroom Studio.
 7. **Explain QA.** Read `media.qa.status`:
    - `pass`: say it passed the checks.
    - `warning`: say it is ready with notes, and explain each note in plain

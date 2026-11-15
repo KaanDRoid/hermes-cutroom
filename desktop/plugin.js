@@ -215,6 +215,10 @@ function Browse({ ctx, pattern, onPick, noun }) {
 
 const ACTIVE = ['queued', 'running'];
 const jobActions = ['transcribe', 'silence', 'vision', 'segment', 'storyboard', 'preview', 'final', 'cover', 'qa', 'upload'];
+// Jobs Try again may repeat: local work only. A cloud copy is sent again from Export, with its confirmation.
+const retryActions = new Set(['transcribe', 'silence', 'vision', 'segment', 'storyboard', 'preview', 'cover', 'qa']);
+// Fields that play, scrub or pick where a file goes; they never change the video, so they keep an approval.
+const VIEW_FIELDS = new Set(['player.position', 'clip.platform', 'cloud.folder', 'framing.x', 'job.language', 'job.noise_db', 'job.min_duration']);
 const JOB_WORDS = {
   inspect: ['Reading the video', 'Video check'], transcribe: ['Transcribing', 'Transcript'], silence: ['Finding pauses', 'Pause search'],
   vision: ['Analysing faces', 'Face analysis'], segment: ['Separating the background', 'Background layer'], storyboard: ['Building the story', 'Story'],
@@ -388,6 +392,11 @@ function ObsRecorder({ ctx, onRecorded }) {
     } catch (failure) { setError(failure); }
     finally { setBusy(false); }
   };
+  useEffect(() => {
+    let live = true;
+    call('status').then(result => { if (live) setState(result); }).catch(() => { /* OBS closed: Start explains. */ });
+    return () => { live = false; };
+  }, []);
   const recording = state?.recording === true;
   return el('div', { style: { ...stack, gap: 8, paddingTop: 12, borderTop: '1px solid var(--ui-stroke-secondary)' }, children: [
     el('h3', { style: h3s, children: 'Record with OBS' }, 'head'),
@@ -816,7 +825,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const togglePlay = () => {
     const video = videoRef.current;
     if (!video) return false;
-    if (video.paused) video.play?.(); else video.pause?.();
+    if (video.paused) video.play?.()?.catch?.(() => {}); else video.pause?.();
     return true;
   };
   const onKeyDown = event => {
@@ -832,7 +841,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
     event.preventDefault?.();
     if (key === 'k') { video.pause?.(); video.playbackRate = 1; return; }
     if (key === 'j') { try { video.currentTime = Math.max(0, (Number(video.currentTime) || 0) - 5); } catch { /* Before metadata. */ } return; }
-    if (video.paused) { video.playbackRate = 1; video.play?.(); } else video.playbackRate = Math.min(4, (video.playbackRate || 1) * 2);
+    if (video.paused) { video.playbackRate = 1; video.play?.()?.catch?.(() => {}); } else video.playbackRate = Math.min(4, (video.playbackRate || 1) * 2);
   };
 
   const correctWord = (id, text) => {
@@ -871,7 +880,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const next = STEPS[index + 1];
   const stepNode = { edit: EditStep, style: StyleStep, sound: SoundStep, review: ReviewStep, export: ExportStep }[step] || EditStep;
   const saveText = { pending: 'Saving…', saving: 'Saving…', error: "Couldn't save" }[save.state] || '✓ Saved';
-  return el('div', { 'aria-label': 'Project editing workspace', onChangeCapture: event => { if (!event?.target?.closest?.('[data-cutroom-confirm], [data-cutroom-post]')) clearApproval(); }, onKeyDown, style: { ...stack, gap: 12 }, children: [
+  return el('div', { 'aria-label': 'Project editing workspace', onChangeCapture: event => { if (!VIEW_FIELDS.has(event?.target?.name) && !event?.target?.closest?.('[data-cutroom-confirm], [data-cutroom-post]')) clearApproval(); }, onKeyDown, style: { ...stack, gap: 12 }, children: [
     el('header', { style: { ...row, justifyContent: 'space-between', paddingBottom: 8, borderBottom: '1px solid var(--ui-stroke-secondary)' }, children: [
       el('div', { style: { ...row, flex: '1 1 360px' }, children: [
         jsx(Button, { variant: 'ghost', 'aria-label': 'Back to projects', onClick: leave, children: '‹ Projects' }),
@@ -908,7 +917,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
         jsx(MoreTools, { kit }, 'more'),
       ] }, 'steps'),
     ] }, 'body'),
-    jsx(Activity, { jobs, cancel, retry: job => run(job.action, job.options || {}) }, 'activity'),
+    jsx(Activity, { jobs, cancel, retry: job => { if (!retryActions.has(job.action)) return; const { confirmed: _consent, ...options } = job.options || {}; return run(job.action, options); } }, 'activity'),
   ] });
 }
 
@@ -948,7 +957,7 @@ function Activity({ jobs, cancel, retry }) {
     last ? el('div', { style: row, children: [
       el('span', { style: muted, children: `${jobWords(last.action)[1]} ${last.status === 'completed' ? 'done' : last.status === 'cancelled' ? 'stopped' : 'failed'}` }),
       last.status === 'failed' ? jsx(Notice, { error: last.error || 'Something went wrong' }) : null,
-      last.status === 'failed' && jobActions.includes(last.action) && last.action !== 'final' ? jsx(Button, { variant: 'ghost', onClick: () => retry(last), children: 'Try again' }) : null,
+      last.status === 'failed' && retryActions.has(last.action) ? jsx(Button, { variant: 'ghost', onClick: () => retry(last), children: 'Try again' }) : null,
     ] }, 'last') : null,
     !job && !last ? el('span', { style: muted, children: 'Nothing running' }, 'idle') : null,
   ] });
@@ -1178,7 +1187,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     },
     onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false),
     onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); if (media.kind === 'source') startClip(event?.currentTarget); },
-    onError: () => { setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); release(); } }, 'player:video') : null;
+    onError: () => { chosen.current = true; release(); setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); } }, 'player:video') : null;
   const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' } }, 'player:poster') : null;
   const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
   const marks = original ? removedRanges(view, total) : [];
@@ -2233,7 +2242,7 @@ function SettingsPage({ ctx }) {
     ] }, 'models'),
     el('section', { 'aria-labelledby': 'cutroom-obs', style: stack, children: [
       el('h3', { id: 'cutroom-obs', style: h3s, children: 'Recording with OBS' }),
-      el('p', { style: muted, children: 'In OBS: Tools → WebSocket Server Settings → Enable WebSocket server, then Show Connect Info for the password. It is kept on this computer and sent only to OBS on this computer.' }),
+      el('p', { style: muted, children: 'In OBS: Tools → WebSocket Server Settings → Enable WebSocket server, then Show Connect Info for the password. Hermes Desktop keeps it on this computer and sends it only with OBS requests, to OBS on the computer where Cutroom runs.' }),
       jsx(Field, { label: 'OBS WebSocket password', name: 'obs.password', type: 'password', value: obsSettings(ctx).password, onCommit: value => { ctx.storage?.set?.('obs', { ...obsSettings(ctx), password: value }); return undefined; } }, 'obs-password'),
       jsx(Field, { label: 'OBS WebSocket port', name: 'obs.port', type: 'number', value: obsSettings(ctx).port, onCommit: value => {
         const port = Number(value);

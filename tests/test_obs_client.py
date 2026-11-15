@@ -12,6 +12,7 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -65,7 +66,9 @@ def read_frame(conn):
 
 
 class FakeObs:
-    def __init__(self, recording_path, password=PASSWORD, padding=0, lag=0):
+    def __init__(
+        self, recording_path, password=PASSWORD, padding=0, lag=0, flood=False
+    ):
         self.recording_path = recording_path
         self.password = password
         self.padding = padding
@@ -73,6 +76,8 @@ class FakeObs:
         # Real OBS starts and stops the output a moment after answering: the
         # first status requests still report the old state.
         self.lag = lag
+        # Something else on the port that never answers but keeps talking.
+        self.flood = flood
         self.pending = 0
         self.requests = []
         self.socket = socket.socket()
@@ -136,6 +141,11 @@ class FakeObs:
                         return
                     message = json.loads(payload)["d"]
                     self.requests.append(message["requestType"])
+                    if self.flood:
+                        event = json.dumps({"op": 5, "d": {"eventType": "Noise"}})
+                        while True:
+                            send_frame(conn, event)
+                            time.sleep(0.01)
                     data = {}
                     if message["requestType"] == "StartRecord":
                         self.active, self.pending = True, self.lag
@@ -212,6 +222,13 @@ class ObsClientTests(unittest.TestCase):
             "stop", port=obs.port, password=PASSWORD, confirmed=True
         )
         self.assertFalse(stopped["recording"])
+
+    def test_a_listener_that_never_answers_cannot_hold_the_request(self):
+        obs = self.server(flood=True)
+        started = time.monotonic()
+        with self.assertRaises(RuntimeError):
+            integrations.obs_record("status", port=obs.port, password=PASSWORD)
+        self.assertLess(time.monotonic() - started, 20)
 
     def test_large_responses_are_read_whole(self):
         obs = self.server(padding=70_000)

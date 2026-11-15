@@ -212,8 +212,9 @@ test('home imports a local path, lists recent projects in plain words and scopes
   type(input, 'C:/raw/demo.mp4');
   tree = draw(route);
   await button(tree, 'Import video').props.onClick();
-  assert.equal(calls[0].path, '/projects');
-  assert.deepEqual(calls[0].options.body, { source: 'C:/raw/demo.mp4' });
+  const made = calls.filter(c => c.path !== '/obs');
+  assert.equal(made[0].path, '/projects');
+  assert.deepEqual(made[0].options.body, { source: 'C:/raw/demo.mp4' });
   const patches = calls.filter(c => c.options?.method === 'PATCH');
   assert.equal(patches.length, 1, 'Without saved defaults, one patch applies the default caption style');
   assert.deepEqual(patches[0].options.body.changes, { settings: { caption_style: 'highlight', captions: true } });
@@ -2107,4 +2108,67 @@ test('home Browse opens subfolders, goes back up and fills the nested path', asy
   button(draw(route), 'c.mp4').props.onClick();
   assert.equal(field(draw(route), 'source').props.value, 'C:/clips/raw/day 2/c.mp4');
   assert.deepEqual(asked, ['', 'raw', 'raw/day 2', 'raw', 'raw/day 2']);
+});
+
+test('watching and choosing destinations keep the approval; real edits still clear it', async () => {
+  const ui = await studio(packageRest(), approvedFinal());
+  await ui.step('Export'); await tick(); ui.draw(); await tick();
+  const workspace = () => nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Project editing workspace');
+  for (const name of ['player.position', 'clip.platform', 'cloud.folder', 'framing.x', 'job.language', 'job.noise_db', 'job.min_duration']) {
+    workspace().props.onChangeCapture({ target: { name, closest: () => null } });
+    assert.ok(button(ui.draw(), 'Make package'), `${name} keeps the approval`);
+  }
+  workspace().props.onChangeCapture({ target: { name: 'brief', closest: () => null } });
+  assert.equal(button(ui.draw(), 'Make package'), undefined, 'an edit clears it');
+});
+
+test('Try again never re-sends a cloud copy', async () => {
+  jobRows = [{ id: 'u1', project_id: 'p1', action: 'upload', status: 'failed', error: 'Upload failed', revision: 7, options: { remote: 'gdrive', folder: 'Old', files: ['final'], confirmed: true } }];
+  let ui = await studio(async (path, options) => (options?.method === 'POST' ? { id: 'job' } : selectedProject));
+  assert.match(text(labelled(ui.draw(), 'Activity')), /failed/);
+  assert.equal(button(labelled(ui.draw(), 'Activity'), 'Try again'), undefined, 'a cloud copy is sent again only from Export');
+  jobRows = [{ id: 'q1', project_id: 'p1', action: 'qa', status: 'failed', error: 'x', revision: 7, options: { confirmed: true } }];
+  ui = await studio(async (path, options) => (options?.method === 'POST' ? { id: 'job' } : selectedProject));
+  await button(labelled(ui.draw(), 'Activity'), 'Try again').props.onClick();
+  const sent = ui.calls.filter(c => c.options?.method === 'POST' && c.path.endsWith('/jobs'));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].options.body.action, 'qa');
+  assert.equal(sent[0].options.body.options.confirmed, undefined, 'a retry never carries consent');
+  jobRows = [];
+});
+
+test('a video the host cannot play is not loaded again by itself', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:bad'; URL.revokeObjectURL = () => {};
+  try {
+    jobRows = [];
+    const ui = await studio(async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/quicktime', version: 'v1' } : selectedProject);
+    for (let i = 0; i < 4; i++) { ui.draw(); await tick(); }
+    const loads = () => ui.calls.filter(c => c.path.includes('/media/')).length;
+    const first = loads();
+    assert.ok(first >= 1, 'the small source loads once by itself');
+    for (let round = 0; round < 3; round++) {
+      const video = nodes(ui.draw()).find(n => n.type === 'video');
+      if (video) video.props.onError();
+      for (let i = 0; i < 4; i++) { ui.draw(); await tick(); }
+    }
+    assert.equal(loads(), first, 'no reload loop after a playback error');
+    assert.match(text(ui.draw()), /cannot play this file/);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('Record with OBS asks OBS for its state when the home page opens', async () => {
+  hookStores.clear(); queries.length = 0; jobRows = []; projectRows = [];
+  const registrations = [], calls = [];
+  (await load()).default.register({ register: entry => registrations.push(entry), storage: { get: (_k, fallback) => fallback, set: () => {} },
+    rest: async (path, options) => { calls.push({ path, options }); if (path === '/obs') return { action: 'status', recording: true, timecode: '00:01:02.000' }; return []; } });
+  const route = registrations.find(r => r.area === sdk.ROUTES_AREA);
+  draw(route); await tick(); await tick();
+  const status = calls.find(c => c.path === '/obs');
+  assert.ok(status, 'status is asked on open');
+  assert.equal(status.options.body.action, 'status');
+  assert.equal(status.options.body.confirmed, undefined);
+  const tree = draw(route);
+  assert.ok(button(tree, 'Stop and edit'), 'a recording that is running can be stopped');
+  assert.match(text(tree), /00:01:02/);
 });

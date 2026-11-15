@@ -32,11 +32,29 @@ new project.
   sentence saying what to do.
 - OBS's WebSocket server listens on all network interfaces by default and is
   protected by its password; turn it off in OBS when you do not record.
+- Each OBS request has one 15-second budget, so a program other than OBS on
+  that port cannot hold it open. A wrong password is never sent back in an
+  error. The home page asks OBS for its state when it opens, so a recording
+  started earlier can still be stopped.
 
 Live check (2026-11-14, OBS Studio on Windows): status, start, 3 s of
 recording and stop through Cutroom's client; OBS wrote a 1920×1080 MP4 with
 audio (3.1 s) that imported as a project. The test recording was deleted and
 OBS closed afterwards.
+
+## What `confirmed: true` means
+
+Cloud copies, OBS start/stop and approvals need `confirmed: true`
+in the HTTP request. The Desktop page sends it only from a person's click, and
+the agent's tools cannot send it. The HTTP API itself cannot tell a click from
+another program that can call the local Hermes dashboard as the same user: the
+guarantee is that the agent cannot act on its own, not that other local
+software is kept out. Try again in the activity bar repeats local jobs only,
+never a cloud copy, and never with consent.
+
+On a messaging service (Telegram, Discord and the like) a `MEDIA:` line uploads
+the file to that service, so completed renders carry a `share_notice` instead
+of a `display_hint` there: the agent asks the person before sharing.
 
 ## Send to the cloud (rclone)
 

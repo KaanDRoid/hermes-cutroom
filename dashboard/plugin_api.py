@@ -229,8 +229,6 @@ Action = Literal[
     "final",
     "cover",
     "qa",
-    "download",
-    "publish",
     "upload",
 ]
 
@@ -261,17 +259,15 @@ class ApproveProject(RequestModel):
 
 @router.post("/projects/{project_id}/jobs", status_code=202)
 def submit_job(project_id: ProjectId, body: SubmitJob, studio=Depends(get_studio)):
-    if (
-        body.action in ("download", "publish", "upload")
-        and body.options.get("confirmed") is not True
-    ):
+    if body.action == "upload" and body.options.get("confirmed") is not True:
         raise HTTPException(422, "Explicit consent is required for remote adapters")
     return invoke(studio.submit, project_id, body.action, body.options)
 
 
 class ObsRequest(RequestModel):
     action: Literal["status", "start", "stop"]
-    password: str | None = Field(default=None, max_length=512)
+    # Checked in the route: a validation error would echo the value back.
+    password: Any = None
     port: int = Field(default=4455, ge=1, le=65535)
     confirmed: bool = False
 
@@ -279,6 +275,10 @@ class ObsRequest(RequestModel):
 @router.post("/obs")
 def obs(body: ObsRequest, studio=Depends(get_studio)):
     """Record with OBS on this computer; start and stop need explicit consent."""
+    if body.password is not None and (
+        not isinstance(body.password, str) or len(body.password) > 512
+    ):
+        raise HTTPException(422, "The OBS password is text of at most 512 characters")
     if body.action != "status" and body.confirmed is not True:
         raise HTTPException(422, "Explicit consent is required to start or stop OBS")
     return invoke(
@@ -450,7 +450,8 @@ def media_chunk(
     """JSON transport for ctx.rest, which does not expose binary responses.
 
     Native grants never enter media URLs. The renderer builds and revokes a
-    local Blob URL from bounded, authenticated chunks after an explicit click.
+    local Blob URL from bounded, authenticated chunks: files up to 64 MiB load
+    when a project opens, larger ones after a click (256 MiB at most).
     """
     return artifact_chunk(
         studio, project_id, kind, offset, length, version, media_only=True

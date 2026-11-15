@@ -190,9 +190,11 @@ class StudioTests(unittest.TestCase):
             ):
                 studio = Studio(root / "workspace")
                 project = studio.create(source)
-            for action in ("final", "download", "publish", "obs"):
-                with self.subTest(action=action), self.assertRaises(PermissionError):
-                    studio.submit(project["id"], action)
+            with self.assertRaises(PermissionError):
+                studio.submit(project["id"], "final")
+            for action in ("download", "publish", "obs", "calendar"):
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    studio.submit(project["id"], action, {"confirmed": True})
             self.assertEqual(studio.jobs(), [])
             with self.assertRaises(ValueError):
                 studio.update(project["id"], {"source": "replacement.mp4"}, 1)

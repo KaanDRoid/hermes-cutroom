@@ -308,6 +308,18 @@ class Studio:
         }
         if not isinstance(changes, dict) or not changes or set(changes) - allowed:
             raise ValueError("Unsupported or empty project changes")
+        # The same limits as the HTTP API, for every caller (chat tools too):
+        # a project file that grows past its read limit cannot be opened again.
+        try:
+            size = len(json.dumps(changes, allow_nan=False))
+        except (TypeError, ValueError) as error:
+            raise ValueError("Changes must be plain JSON values") from error
+        if size > 2_000_000:
+            raise ValueError("These changes are too large to save (over 2 MB)")
+        if "name" in changes and (
+            not isinstance(changes["name"], str) or len(changes["name"]) > 200
+        ):
+            raise ValueError("A project name is text of at most 200 characters")
         with self._lock():
             project = self.get(project_id)
             if isinstance(revision, bool) or project["revision"] != revision:
@@ -1315,12 +1327,10 @@ class Studio:
             "final",
             "cover",
             "qa",
-            "download",
-            "publish",
-            "calendar",
-            "obs",
             "upload",
         }
+        # Downloads, publishing, OBS and calendars are not Studio jobs: OBS has
+        # its own request (Studio.obs), the others have no job runner.
         if action not in actions:
             raise ValueError("Unsupported studio action")
         if options is None:
@@ -1369,10 +1379,7 @@ class Studio:
                 raise ValueError("Unsupported cover options")
             if "time" in options and _number(options["time"]) < 0:
                 raise ValueError("Cover time must be non-negative")
-        if (
-            action in {"download", "publish", "obs", "upload"}
-            and options.get("confirmed") is not True
-        ):
+        if action == "upload" and options.get("confirmed") is not True:
             raise PermissionError("Explicit consent required for external operations")
         if action == "upload" and set(options) - {
             "remote",
@@ -2084,6 +2091,7 @@ class Studio:
         if (
             not isinstance(files, list)
             or not files
+            or not all(isinstance(kind, str) for kind in files)
             or len(files) > 10
             or len(set(files)) != len(files)
             or "final" not in files

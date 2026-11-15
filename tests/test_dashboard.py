@@ -387,18 +387,13 @@ class DashboardTests(unittest.TestCase):
                 ).status_code,
                 422,
             )
-        for action in ("download", "publish"):
-            self.assertEqual(
-                self.client.post(
-                    "/projects/p1/jobs", json={"action": action}
-                ).status_code,
-                422,
-            )
-            response = self.client.post(
-                "/projects/p1/jobs",
-                json={"action": action, "options": {"confirmed": True}},
-            )
-            self.assertEqual(response.status_code, 202, response.text)
+        # Downloads and publishing have no job runner: refused even with consent.
+        for action in ("download", "publish", "obs", "calendar"):
+            for options in ({}, {"confirmed": True}):
+                response = self.client.post(
+                    "/projects/p1/jobs", json={"action": action, "options": options}
+                )
+                self.assertEqual(response.status_code, 422, response.text)
 
     def test_human_approval_requires_explicit_confirmation_and_current_exact_digest(
         self,
