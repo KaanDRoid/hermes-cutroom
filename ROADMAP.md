@@ -24,9 +24,9 @@ The exact-plan receipt is a consistency guard, not user authentication. A native
 
 Face/head-facing review, person segmentation, graphic layers, explicit-consent media import, OBS recording and optional storage/calendar adapters are included in the accepted scope. They must be integrated and verified, not merely listed as helpers. See the current work packages linked above.
 
-## 0.2.0 addition: split-screen explainer format
+## Next release: split-screen explainer format
 
-Planned as package S1 in `docs/creator-formats.md`: headline, top media panel,
+Planned for the release after 0.2.0 (see `docs/creator-formats.md`): headline, top media panel,
 speaker in a rounded frame, keyword-coloured captions, in the Studio and from
 chat. A research round (layouts, UX, chat flow, image-generation providers,
 prototype) comes before any code.

@@ -57,7 +57,6 @@ Sources and choices:
 | F5 | Clip finder: sentence-bounded 20–90 s candidates with explained scores; selected clips become derived projects | ≥ 5 candidates on a 10+ minute talk, each starting and ending on sentence boundaries |
 | F6 | Long-form YouTube: chapters that follow YouTube's rules, a 16:9 thumbnail (YouTube recommends 3840×2160, at least 640 px wide), SRT, end-screen space | Chapters start at 00:00, at least three, each ≥ 10 s |
 | F7 | Per-platform delivery packages plus the pending integrations (media download, OBS recording, rclone upload) wired into Studio as person-only actions and accepted against live services | Each integration exercised live with explicit consent and read-back verification |
-| S1 | Split-screen explainer format, added after the plan (research first, see below); comes before F8 | Decided after the research round |
 | F8 | Security review, native Desktop acceptance per platform, clean installation, FFmpeg 7.1 compatibility, documentation and demo | Every new acceptance item (A19–A28) linked to evidence |
 | F9 | Release 0.2.0 to `main` and a new catalog pin | Catalog validation on a clean checkout |
 
@@ -776,9 +775,9 @@ all numeric text rules and dated source URLs live in `cutroom/platforms.py`.
 - Platform policies can change; source dates and conservative API limits are
   explicit, and the service's current upload screen remains the final check.
 
-## S1 — Split-screen explainer format (planned)
+## Next release: split-screen explainer format
 
-Added to 0.2.0 on 2026-11-14 after reviewing five creator shorts. All five
+Planned for the release after 0.2.0 (decided 2026-11-15), after reviewing five creator shorts on 2026-11-14. All five
 share one layout, a common short-form format that Cutroom cannot make yet:
 
 - a large headline at the top, often with a second line in a coloured box;
