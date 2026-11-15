@@ -59,14 +59,19 @@ class ScenecutLookAheadTests(unittest.TestCase):
         self.assertIn(52, result["resets"])
         self.assertAlmostEqual(result["x"][51] + 304, 0.25 * 1920, delta=2)
         self.assertAlmostEqual(result["x"][52] + 304, 0.75 * 1920, delta=2)
-        # No sample in the new shot yet: hold the centre, never the old shot.
+        # No face in the new shot yet: start at the shot's first face, never the old shot.
         sparse = [s for s in faces if not 52 / FPS <= s[0] < 70 / FPS]
         held = plan(sparse, scene_cuts=[52 / FPS])
         self.assertAlmostEqual(held["x"][52] + 304, 0.75 * 1920, delta=2)
         empty = [[t, [] if 52 / FPS <= t < 70 / FPS else f] for t, f in faces]
-        centred = plan(empty, scene_cuts=[52 / FPS])
+        ahead = plan(empty, scene_cuts=[52 / FPS])
+        self.assertAlmostEqual(ahead["x"][52] + 304, 0.75 * 1920, delta=2)
+        self.assertAlmostEqual(ahead["x"][60] + 304, 0.75 * 1920, delta=2)
+        # A shot without any face stays centred.
+        faceless = [[t, [] if t >= 52 / FPS else f] for t, f in faces]
+        centred = plan(faceless, scene_cuts=[52 / FPS])
         self.assertAlmostEqual(centred["x"][52], CENTRE, delta=1)
-        self.assertAlmostEqual(centred["x"][60], CENTRE, delta=1)
+        self.assertAlmostEqual(centred["x"][-1], CENTRE, delta=1)
 
     def test_edit_range_start_never_uses_a_sample_from_removed_content(self):
         timestamps = [i / 30 for i in range(120)]

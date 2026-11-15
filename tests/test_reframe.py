@@ -203,10 +203,13 @@ class PathTests(unittest.TestCase):
             return 0.63 if t < 1.0 else None if t < 1.5 else 0.31
 
         result = plan(samples(4, at))
-        index = 45
-        self.assertIn(index, result["resets"])
+        # The camera most likely changed when the face was lost (frame 30),
+        # so the crop moves there and covers the gap at the new position.
+        index = 30
+        self.assertEqual(result["resets"], [0, index])
         self.assertAlmostEqual(result["x"][index - 1] + 304, 0.63 * 1920, delta=2)
         self.assertAlmostEqual(result["x"][index] + 304, 0.31 * 1920, delta=2)
+        self.assertAlmostEqual(result["x"][44] + 304, 0.31 * 1920, delta=2)
         self.assertLessEqual(
             max(steps(result["x"], result["resets"])), self.limit + 1e-6
         )

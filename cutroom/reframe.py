@@ -369,7 +369,8 @@ def plan_path(
             else len(sample_times)
         )
         x, y = (sw - cw) / 2, (sh - ch) / 2
-        seen = None  # time of this shot's last fresh face
+        seen = None  # index and time of this shot's last fresh face
+        found = False  # a face has been found in this shot
         for index in range(start, stop):
             timestamp = frames[index]
             j = bisect.bisect_right(sample_times, timestamp + 0.000001) - 1
@@ -392,14 +393,24 @@ def plan_path(
                     max(0, fy - ch * (1 - zone["bottom"])),
                     min(sh - ch, max(0, fy - ch * zone["top"])),
                 )
+                if not found and index > start:
+                    # Before the shot's first face, start where that face is.
+                    targets_x[start:index] = [x] * (index - start)
+                    targets_y[start:index] = [y] * (index - start)
+                found = True
                 if abs(timestamp - sample_times[j]) <= max_age:
                     if (
                         seen is not None
-                        and timestamp - seen >= REACQUIRE["gap_s"]
-                        and abs(x - targets_x[-1]) > REACQUIRE["distance"] * cw
+                        and timestamp - seen[1] >= REACQUIRE["gap_s"]
+                        and abs(x - targets_x[seen[0]]) > REACQUIRE["distance"] * cw
                     ):
-                        reacquired.add(index)
-                    seen = timestamp
+                        # Moved while lost: the camera most likely changed when
+                        # the face was lost, so the crop moves there.
+                        gap = seen[0] + 1
+                        targets_x[gap:index] = [x] * (index - gap)
+                        targets_y[gap:index] = [y] * (index - gap)
+                        reacquired.add(gap)
+                    seen = (index, timestamp)
                     face_frames.append([index, fx, fy])
                 else:
                     stale += 1
