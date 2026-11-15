@@ -57,6 +57,7 @@ Sources and choices:
 | F5 | Clip finder: sentence-bounded 20–90 s candidates with explained scores; selected clips become derived projects | ≥ 5 candidates on a 10+ minute talk, each starting and ending on sentence boundaries |
 | F6 | Long-form YouTube: chapters that follow YouTube's rules, a 16:9 thumbnail (YouTube recommends 3840×2160, at least 640 px wide), SRT, end-screen space | Chapters start at 00:00, at least three, each ≥ 10 s |
 | F7 | Per-platform delivery packages plus the pending integrations (media download, OBS recording, rclone upload) wired into Studio as person-only actions and accepted against live services | Each integration exercised live with explicit consent and read-back verification |
+| S1 | Split-screen explainer format, added after the plan (research first, see below); comes before F8 | Decided after the research round |
 | F8 | Security review, native Desktop acceptance per platform, clean installation, FFmpeg 7.1 compatibility, documentation and demo | Every new acceptance item (A19–A28) linked to evidence |
 | F9 | Release 0.2.0 to `main` and a new catalog pin | Catalog validation on a clean checkout |
 
@@ -774,6 +775,33 @@ all numeric text rules and dated source URLs live in `cutroom/platforms.py`.
   remain F8/A28. Nothing in this package workflow posts anything.
 - Platform policies can change; source dates and conservative API limits are
   explicit, and the service's current upload screen remains the final check.
+
+## S1 — Split-screen explainer format (planned)
+
+Added to 0.2.0 on 2026-11-14 after reviewing five creator shorts. All five
+share one layout, a common short-form format that Cutroom cannot make yet:
+
+- a large headline at the top, often with a second line in a coloured box;
+- a top panel with a screen recording, image, app card or animation;
+- the speaker in a rounded frame in the bottom half;
+- word-by-word captions between the two, with chosen keywords in colour;
+- in one example, an AI-generated character and an animated chart.
+
+Cutroom already has portrait framing that follows the speaker, word-timed
+captions and a one-line title. Missing: the split layout, a two-line headline
+with a boxed line, keyword colouring, top-panel media that changes with the
+transcript, and optional image generation.
+
+The format must be usable both in the Desktop Studio and from Hermes chat
+(tools that build the same layout from a request in plain words).
+
+Before any code: a separate research round, as for the 0.2.0 UI redesign —
+the layout conventions of current creator tools and platforms (sourced and
+dated), the UX for placing top-panel media against the transcript, the chat
+flow, image-generation providers available in Hermes and their consent and
+cost model, and a clickable prototype to approve. Work packages and acceptance
+criteria are written after that round. Terminal-typing and other motion
+graphics are out of scope unless the research shows a way that fits Cutroom.
 
 ## Order and branches
 
