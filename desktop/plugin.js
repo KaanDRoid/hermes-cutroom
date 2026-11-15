@@ -245,7 +245,7 @@ const CHECK_TEXT = {
   audio: ['The sound track is present'], audio_clipping: ['No distorted sound', 'Some loud moments may sound distorted.'],
   audio_gaps: ['No unexpected silent gaps', 'There are silent gaps; check that they are intended.'],
   audio_loudness: ['Speech volume is even'], mix_loudness: ['Music and voice are balanced', 'The music may be too loud or too quiet next to the voice.'],
-  music: ['Music is mixed in correctly'], captions: ['Captions are present'], caption_bounds: ['Captions fit on screen'],
+  music: ['Music is mixed in correctly'], captions: ['Captions are easy to read'], caption_bounds: ['Captions fit on screen'],
   caption_timing: ['Each word appears on time'], safe_area: ['Text stays clear of the edges'], safe_zone: ['Captions stay clear of app buttons', 'Some text may sit under the app\u2019s buttons.'],
   platform_duration: ['The length fits the platform', 'The video is longer than the platform recommends.'], platform_frame: ['The frame size fits the platform'],
   platform_fps: ['The frame rate fits the platform'], platform_loudness: ['Loudness fits the platform', 'The sound is louder or quieter than the platform expects.'],
@@ -263,6 +263,23 @@ const CHECK_TEXT = {
   subtitles_file: ['The subtitles file matches the words', 'The subtitles file has cues out of order or off their words.'],
   thumbnail: ['The thumbnail is 16:9 and small enough', 'The thumbnail is enlarged from a small source, or its size or file is wrong.'],
   end_screen: ['The end screen has room', 'Captions or titles show where the end screen goes, or the video is too short for one.'],
+};
+// Notes built from a check's own findings, so a problem says what, where and how to fix it.
+const listTimes = times => times.length > 1 ? `${times.slice(0, -1).join(', ')} and ${times[times.length - 1]}` : times[0];
+const CHECK_DETAIL = {
+  captions: detail => {
+    const issues = Array.isArray(detail?.issues) ? detail.issues : [];
+    if (!issues.length) return null;
+    const broken = issues.find(issue => !Number.isFinite(issue?.start));
+    if (broken) return `The captions could not be checked: ${String(broken.reason || 'unknown problem')}`;
+    const at = list => listTimes([...new Set(list.slice(0, 4).map(issue => clock(issue.start)))]);
+    const fast = issues.filter(issue => issue.cps > detail.max_cps);
+    const long = issues.filter(issue => !(issue.cps > detail.max_cps));
+    const parts = [];
+    if (fast.length) parts.push(`${plural(fast.length, 'caption')} go${fast.length === 1 ? 'es' : ''} by faster than ${detail.max_cps} characters a second, at ${at(fast)}`);
+    if (long.length) parts.push(`${plural(long.length, 'caption')} ${long.length === 1 ? 'is' : 'are'} too long for two lines, at ${at(long)}`);
+    return `${parts.join('; ')} (preview time). Remove a few words there in Edit, or approve if they read well in the preview.`;
+  },
 };
 const STATUS_MARK = { pass: ['✓', 'OK'], warning: ['!', 'Note'], fail: ['✕', 'Problem'], skip: ['–', 'Not checked'] };
 
@@ -1042,6 +1059,25 @@ function SafeZoneOverlay({ zone }) {
   ];
 }
 
+// Where the original sits in a crop framing: Face track follows the larger face
+// (averaged over half a second each side, like the render's smoothing), others stay centred.
+function cropPosition(view, info, box, time) {
+  const samples = view?.settings?.framing === 'face_track' ? view.analysis?.face_samples : null;
+  if (!Array.isArray(samples) || !samples.length || !(info?.width > 0 && info?.height > 0) || !Number.isFinite(time)) return '50% 50%';
+  let low = 0, high = samples.length;
+  while (low < high) { const mid = (low + high) >> 1; if (samples[mid][0] < time - 0.5) low = mid + 1; else high = mid; }
+  let x = 0, y = 0, count = 0;
+  for (let index = low; index < samples.length && samples[index][0] <= time + 0.5; index++) {
+    const faces = samples[index][1] || [];
+    const face = faces.reduce((best, item) => (!best || item[2] * item[3] > best[2] * best[3] ? item : best), null);
+    if (face) { x += face[0]; y += face[1]; count++; }
+  }
+  if (!count) return '50% 50%';
+  const source = info.width / info.height, frame = box[0] / box[1];
+  const place = (centre, share) => (share >= 1 ? 50 : Math.round(1000 * Math.max(0, Math.min(1, (centre - share / 2) / (1 - share)))) / 10);
+  return `${place(x / count, frame / source)}% ${place(y / count, source / frame)}%`;
+}
+
 // Removed parts of the original, for marks on the scrubber.
 function removedRanges(view, total) {
   if (!(total > 0)) return [];
@@ -1108,7 +1144,8 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     if (kind && kind !== 'source') { chosen.current = false; release(); }
   }, [project.revision, project.artifacts?.preview, project.artifacts?.final]);
   const load = async (kind, explicit = false) => {
-    if (lock.current) return;
+    // A person's choice replaces a load in progress (release() retires it); automatic loads wait.
+    if (lock.current && !explicit) return;
     if (explicit) chosen.current = true;
     release(); lock.current = true; loading.current = kind; setError(null);
     const token = generation.current;
@@ -1170,7 +1207,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const active = media?.kind || loading.current || offer?.kind || null;
   const seekTo = value => { const video = videoRef?.current; if (video && Number.isFinite(value)) { try { video.currentTime = value; } catch { /* Before metadata. */ } setTime(value); } };
   const player = media ? jsx('video', { ref: videoRef, src: media.url, preload: 'metadata', playsInline: true, 'aria-label': `${media.kind === 'source' ? 'Original' : media.kind === 'preview' ? 'Preview' : 'Final video'} player`,
-    style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' },
+    style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, objectPosition: original && fill === 'cover' ? cropPosition(view, project.source_info, [w, h], time ?? 0) : '50% 50%', display: 'block' },
     onTimeUpdate: event => {
       const target = event.currentTarget;
       let at = target.currentTime;
@@ -1188,7 +1225,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     onPlay: () => setPlaying(true), onPause: () => setPlaying(false), onEnded: () => setPlaying(false),
     onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); if (media.kind === 'source') startClip(event?.currentTarget); },
     onError: () => { chosen.current = true; release(); setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); } }, 'player:video') : null;
-  const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, display: 'block' } }, 'player:poster') : null;
+  const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, objectPosition: fill === 'cover' ? cropPosition(view, project.source_info, [w, h], poster.time ?? 0) : '50% 50%', display: 'block' } }, 'player:poster') : null;
   const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
   const marks = original ? removedRanges(view, total) : [];
   // End-screen room: the last N seconds of a YouTube render, or of the edit while the original plays.
@@ -1204,7 +1241,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   return el('div', { style: { ...stack, gap: 8 }, children: [
     el('div', { style: { ...row, justifyContent: 'space-between' }, children: [
       el('div', { role: 'group', 'aria-label': 'Video to play', style: { ...row, gap: 2, padding: 2, borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)' }, children: MEDIA_CHOICES.map(([kind, label]) => jsx(Button, {
-        variant: active === kind ? 'secondary' : 'ghost', 'aria-pressed': active === kind, disabled: progress !== null || (kind !== 'source' && !project.artifacts?.[kind]),
+        variant: active === kind ? 'secondary' : 'ghost', 'aria-pressed': active === kind, disabled: kind !== 'source' && !project.artifacts?.[kind],
         title: kind === 'source' ? 'The imported video, with an approximate caption preview' : kind === 'preview' ? 'The rendered preview of the edit' : 'The exported final video',
         onClick: () => load(kind, true), children: label }, `media:${kind}`)) }),
       el('span', { style: muted, children: shown ? `${shown.label} · ${w}:${h}` : `${w}:${h}` }),
@@ -1634,7 +1671,8 @@ function CheckRows({ label, items }) {
   return el('ul', { 'aria-label': label, style: { listStyle: 'none', margin: 0, padding: 0, border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10 }, children: items.map((check, index) => {
     const [title, note] = CHECK_TEXT[check.name] || [String(check.name || 'Check')];
     const [mark, word] = STATUS_MARK[check.status] || ['?', String(check.status || 'Unknown')];
-    const explain = check.status === 'warning' ? note || 'Worth a look before you approve.' : check.status === 'fail' ? note || 'This needs fixing before export.' : '';
+    const found = check.status === 'warning' || check.status === 'fail' ? CHECK_DETAIL[check.name]?.(check.detail) : null;
+    const explain = found || (check.status === 'warning' ? note || 'Worth a look before you approve.' : check.status === 'fail' ? note || 'This needs fixing before export.' : '');
     return el('li', { style: { ...row, alignItems: 'flex-start', flexWrap: 'nowrap', padding: '8px 12px', borderTop: index ? '1px solid var(--ui-stroke-secondary)' : 'none' }, children: [
       el('span', { 'aria-hidden': true, style: { width: 16, fontWeight: 700, color: check.status === 'pass' ? 'var(--ui-text-secondary)' : 'var(--ui-text-primary)' }, children: mark }),
       el('span', { style: { ...stack, gap: 2 }, children: [el('span', { style: { fontSize: 13 }, children: `${title} — ${word}` }), explain ? el('span', { style: muted, children: explain }) : null] }),
@@ -1827,7 +1865,7 @@ function ExportStep({ kit }) {
 // Send the exported approved final (and the files made with it) to a cloud folder set up in rclone.
 // Two clicks: the first shows exactly what goes where; only "Send now" sends. The agent cannot do this.
 const CLOUD_NAMES = { drive: 'Google Drive', onedrive: 'OneDrive', dropbox: 'Dropbox', box: 'Box', s3: 'S3', webdav: 'WebDAV' };
-const FILE_LABELS = { final: 'Video', captions_srt: 'SRT captions', captions_vtt: 'VTT captions', thumbnail: 'Thumbnail', chapters: 'Chapter list', cover: 'Cover' };
+const FILE_LABELS = { final: 'Video', captions_srt: 'SRT captions', captions_vtt: 'VTT captions', captions_ass: 'Styled captions (ASS)', thumbnail: 'Thumbnail', chapters: 'Chapter list', cover: 'Cover' };
 const cloudName = remote => CLOUD_NAMES[remote?.type] || remote?.name || 'the cloud';
 const cloudFile = name => String(name || '').replace(/[\x00-\x1f\\/:*?"<>|]+/g, '-').replace(/^[ .-]+|[ .-]+$/g, '').replace(/\s+/g, ' ').slice(0, 100).trim() || 'Cutroom video';
 const sizeText = bytes => bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;

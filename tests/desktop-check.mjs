@@ -2172,3 +2172,87 @@ test('Record with OBS asks OBS for its state when the home page opens', async ()
   assert.ok(button(tree, 'Stop and edit'), 'a recording that is running can be stopped');
   assert.match(text(tree), /00:01:02/);
 });
+
+test('with Face track the original player keeps the speaker in a tall frame', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:talk'; URL.revokeObjectURL = () => {};
+  try {
+    jobRows = [];
+    // Speaker on the left third of a 16:9 source; a 9:16 crop keeps 31.6 % of the width.
+    const samples = [0, 0.5, 1, 1.5, 2].map(time => [time, [[0.25, 0.4, 0.1, 0.2, 0.3, null], [0.8, 0.4, 0.04, 0.08, 0.3, null]]]);
+    const ui = await studio(async path => path.includes('/artifact-info/') ? { size: 3 } : path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : selectedProject,
+      { settings: { platform: 'youtube_shorts', framing: 'face_track' }, source_info: { duration: 12, width: 1920, height: 1080 }, analysis: { face_samples: samples } });
+    for (let i = 0; i < 4; i++) { ui.draw(); await tick(); }
+    const video = () => nodes(ui.draw()).find(n => n.type === 'video');
+    assert.ok(video(), 'the source is loaded');
+    const [x] = String(video().props.style.objectPosition || '50% 50%').split(' ').map(parseFloat);
+    const crop = (9 / 16) / (16 / 9);
+    assert.ok(Math.abs(x - 100 * (0.25 - crop / 2) / (1 - crop)) < 1, `crop follows the larger face (got ${x}%)`);
+    selectedProject.settings = { platform: 'youtube_shorts', framing: 'center_crop' };
+    assert.equal(video().props.style.objectPosition || '50% 50%', '50% 50%', 'Center crop stays centred');
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('a caption problem says what is wrong, where, and how to fix it', async () => {
+  const preview = currentPreview();
+  const fast = { name: 'captions', status: 'fail', detail: { max_chars: 84, max_cps: 25, issues: [
+    { index: 30, start: 58.75, end: 59.63, text: 'it up. So one thing led', characters: 23, cps: 26.1, estimated_lines: 2 },
+    { index: 31, start: 59.63, end: 60.53, text: 'to another, and here I am', characters: 25, cps: 27.8, estimated_lines: 2 }] } };
+  jobRows = currentPreview(7, [qaJob([fast])]).jobs;
+  const ui = await studio(async path => path.endsWith('/review') ? { digest: 'a'.repeat(64), project: selectedProject, notice: '' } : selectedProject, preview.project);
+  await ui.step('Review'); await tick();
+  const shown = text(ui.draw());
+  assert.doesNotMatch(shown, /Captions are present/);
+  assert.match(shown, /Captions are easy to read/);
+  assert.match(shown, /2 captions go by faster than 25 characters a second, at 0:59 and 1:00/);
+  assert.match(shown, /remove a few words there in Edit/i);
+  jobRows = currentPreview(7, [qaJob([{ name: 'captions', status: 'fail', detail: { max_chars: 84, max_cps: 25, issues: [{ index: 2, start: 3, end: 9, text: 'x'.repeat(90), characters: 90, cps: 15, estimated_lines: 3 }] } }])]).jobs;
+  const long = await studio(async path => path.endsWith('/review') ? { digest: 'a'.repeat(64), project: selectedProject, notice: '' } : selectedProject, preview.project);
+  await long.step('Review'); await tick();
+  assert.match(text(long.draw()), /1 caption is too long for two lines, at 0:03/);
+  jobRows = [];
+});
+
+test('choosing Preview while the original is still loading switches to the preview', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:x'; URL.revokeObjectURL = () => {};
+  try {
+    // Not known to be current yet, so the page opens on the original.
+    const preview = currentPreview();
+    jobRows = [];
+    let releaseSource;
+    const sourceGate = new Promise(resolve => { releaseSource = resolve; });
+    const chunk = { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' };
+    const ui = await studio(async path => {
+      if (path.includes('/artifact-info/')) return { size: 3 };
+      // The first part arrives (progress shows), the rest waits.
+      if (path.includes('/media/source')) { if (path.includes('offset=0&')) return { ...chunk, total: 6 }; await sourceGate; return { ...chunk, offset: 3, next_offset: 6, total: 6 }; }
+      if (path.includes('/media/preview')) return chunk;
+      return selectedProject;
+    }, preview.project);
+    for (let i = 0; i < 3; i++) { ui.draw(); await tick(); }
+    assert.ok(ui.calls.some(c => c.path.includes('/media/source')), 'the original started loading');
+    const tab = nodes(ui.draw()).find(n => n.type === 'Button' && n.props.children === 'Preview');
+    assert.ok(!tab.props.disabled, 'Preview can be chosen while the original loads');
+    await tab.props.onClick();
+    releaseSource();
+    for (let i = 0; i < 4; i++) { ui.draw(); await tick(); }
+    assert.ok(ui.calls.some(c => c.path.includes('/media/preview')), 'the preview is requested');
+    const video = nodes(ui.draw()).find(n => n.type === 'video');
+    assert.equal(video?.props['aria-label'], 'Preview player');
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; jobRows = []; }
+});
+
+test('every file offered for the cloud has a readable name', async () => {
+  jobRows = []; remoteRows = [{ name: 'cutroom-drive', type: 'drive' }];
+  const project = exportedProject();
+  project.artifacts.captions_ass = 'final.ass';
+  project.artifact_lineage.final.delivery_files.captions_ass = { path: 'final.ass', size: 2000, sha256: 'c' };
+  const ui = await studio(async (path, options) => patchApplies(path, options), project);
+  const tree = await ui.step('Export');
+  const ticks = nodes(tree).filter(n => n.type === 'Tick' || (n.props?.['aria-label'] && 'checked' in (n.props || {})));
+  const names = ticks.map(n => n.props['aria-label']);
+  assert.ok(names.length >= 3, `cloud file choices (${names})`);
+  for (const name of names) assert.doesNotMatch(name, /_/, `"${name}" is an internal name`);
+  assert.match(text(tree), /Styled captions \(ASS\)/);
+});

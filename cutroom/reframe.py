@@ -9,6 +9,9 @@ from pathlib import Path
 
 MODES = ("fit", "blur_fill", "center_crop", "face_track")
 TRACKING = {"dead_zone": 0.035, "max_speed": 1.2, "max_acceleration": 2.5, "tau": 0.18}
+# A face lost for this long and found again more than this share of a crop
+# width away starts the crop over (a camera change the scene detector missed).
+REACQUIRE = {"gap_s": 0.25, "distance": 0.5}
 MAX_FRAMES = 250000
 MAX_SAMPLES = 100000
 # Each axis's crop expression is a balanced if() tree of at most this many
@@ -356,6 +359,7 @@ def plan_path(
     bounds = sorted(resets) + [count]
     targets_x, targets_y, face_frames = [], [], []
     stale = uncovered = 0
+    reacquired = set()
     for start, stop in zip(bounds, bounds[1:]):
         # Samples of this shot only: never the previous shot or removed content.
         low = bisect.bisect_left(sample_times, frames[start] - 0.000001)
@@ -365,6 +369,7 @@ def plan_path(
             else len(sample_times)
         )
         x, y = (sw - cw) / 2, (sh - ch) / 2
+        seen = None  # time of this shot's last fresh face
         for index in range(start, stop):
             timestamp = frames[index]
             j = bisect.bisect_right(sample_times, timestamp + 0.000001) - 1
@@ -388,6 +393,13 @@ def plan_path(
                     min(sh - ch, max(0, fy - ch * zone["top"])),
                 )
                 if abs(timestamp - sample_times[j]) <= max_age:
+                    if (
+                        seen is not None
+                        and timestamp - seen >= REACQUIRE["gap_s"]
+                        and abs(x - targets_x[-1]) > REACQUIRE["distance"] * cw
+                    ):
+                        reacquired.add(index)
+                    seen = timestamp
                     face_frames.append([index, fx, fy])
                 else:
                     stale += 1
@@ -395,6 +407,7 @@ def plan_path(
                 uncovered += 1
             targets_x.append(x)
             targets_y.append(y)
+    resets |= reacquired
     tracked_x = _motion(targets_x, resets, cw, frames)
     tracked_y = _motion(targets_y, resets, ch, frames)
     error = None

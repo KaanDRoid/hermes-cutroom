@@ -195,6 +195,36 @@ class PathTests(unittest.TestCase):
         nothing = plan([])
         self.assertEqual(set(nothing["x"]), {(1920 - 608) / 2})
 
+    def test_a_face_found_again_far_away_after_a_gap_is_framed_at_once(self):
+        # A camera change the scene detector missed: the face is lost, then
+        # found more than half a crop away; panning there would leave the
+        # speaker out of the frame, so the crop starts over where the face is.
+        def at(t):
+            return 0.63 if t < 1.0 else None if t < 1.5 else 0.31
+
+        result = plan(samples(4, at))
+        index = 45
+        self.assertIn(index, result["resets"])
+        self.assertAlmostEqual(result["x"][index - 1] + 304, 0.63 * 1920, delta=2)
+        self.assertAlmostEqual(result["x"][index] + 304, 0.31 * 1920, delta=2)
+        self.assertLessEqual(
+            max(steps(result["x"], result["resets"])), self.limit + 1e-6
+        )
+
+    def test_a_face_found_again_nearby_or_a_visible_walk_keeps_panning(self):
+        def near(t):
+            return 0.5 if t < 1.0 else None if t < 1.5 else 0.42
+
+        self.assertEqual(plan(samples(4, near))["resets"], [0])
+        walk = plan(samples(4, lambda t: 0.25 + 0.5 * min(1, t / 3)))
+        self.assertEqual(walk["resets"], [0])
+        short = plan(
+            samples(4, lambda t: 0.63 if t < 1.0 else None if t < 1.1 else 0.31)
+        )
+        self.assertEqual(
+            short["resets"], [0], "a blink of a lost face is no camera change"
+        )
+
     def test_largest_face_wins_unless_a_smaller_face_is_talking(self):
         def quiet(t):
             return [face(0.2, size=0.3, mouth=0.02), face(0.8, size=0.15, mouth=0.02)]
