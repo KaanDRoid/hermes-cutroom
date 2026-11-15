@@ -2043,3 +2043,34 @@ test('Record with OBS explains how to turn OBS on when it cannot connect', async
   assert.match(shown, /Open OBS and turn on its WebSocket server/);
   assert.doesNotMatch(shown, /hermes:api/);
 });
+
+test('J, K and L control playback like an editor: back, pause, play and faster', async () => {
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+  URL.createObjectURL = () => 'blob:jkl'; URL.revokeObjectURL = () => {};
+  try {
+    jobRows = [];
+    const ui = await studio(async path => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : selectedProject);
+    await choice(ui.draw(), 'Original').props.onClick();
+    const fake = { paused: true, currentTime: 8, playbackRate: 1, play() { this.paused = false; }, pause() { this.paused = true; } };
+    nodes(ui.draw()).find(n => n.type === 'video').props.ref.current = fake;
+    const press = (key, tagName = 'DIV') => { let stopped = false; labelled(ui.draw(), 'Project editing workspace').props.onKeyDown({ key, target: { tagName }, preventDefault() { stopped = true; } }); return stopped; };
+    assert.equal(press('l'), true);
+    assert.deepEqual([fake.paused, fake.playbackRate], [false, 1]);
+    press('l');
+    assert.equal(fake.playbackRate, 2, 'L again plays faster');
+    press('L'); press('l');
+    assert.equal(fake.playbackRate, 4, 'never faster than 4x');
+    press('k');
+    assert.deepEqual([fake.paused, fake.playbackRate], [true, 1], 'K pauses and resets the speed');
+    press('j');
+    assert.equal(fake.currentTime, 3, 'J jumps back 5 seconds');
+    press('j'); press('j');
+    assert.equal(fake.currentTime, 0, 'never before the start');
+    fake.currentTime = 6;
+    assert.equal(press('j', 'INPUT'), false, 'typing a j in a field does nothing');
+    assert.equal(fake.currentTime, 6);
+    assert.equal(press('l', 'TEXTAREA'), false);
+    assert.equal(fake.paused, true);
+    assert.match(text(ui.draw()), /J back 5 s · K pause · L play/);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});

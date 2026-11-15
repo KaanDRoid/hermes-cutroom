@@ -807,6 +807,15 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
     const typing = ['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || event?.target?.isContentEditable;
     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && String(event.key).toLowerCase() === 'z' && !typing) { event.preventDefault?.(); undoLast(); return; }
     if (event.key === ' ' && !typing && !['BUTTON', 'A', 'SUMMARY'].includes(tag) && togglePlay()) event.preventDefault?.();
+    // Editor keys: J back 5 s, K pause, L play (again: 2x, then 4x).
+    const key = String(event.key || '').toLowerCase();
+    if (typing || event.ctrlKey || event.metaKey || event.altKey || !['j', 'k', 'l'].includes(key)) return;
+    const video = videoRef.current;
+    if (!video) return;
+    event.preventDefault?.();
+    if (key === 'k') { video.pause?.(); video.playbackRate = 1; return; }
+    if (key === 'j') { try { video.currentTime = Math.max(0, (Number(video.currentTime) || 0) - 5); } catch { /* Before metadata. */ } return; }
+    if (video.paused) { video.playbackRate = 1; video.play?.(); } else video.playbackRate = Math.min(4, (video.playbackRate || 1) * 2);
   };
 
   const correctWord = (id, text) => {
@@ -1198,6 +1207,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
           'Safe area', el('span', { style: hidden, children: zoneLabel })] }),
         el('label', { style: { ...row, flexWrap: 'nowrap', gap: 6, whiteSpace: 'nowrap' }, children: [jsx(Tick, { 'aria-label': 'Show captions', checked: captionsShown && original && style !== 'off', disabled: !original || style === 'off', onCheckedChange: checked => setCaptionsShown(checked === true), style: { borderColor: ON_STAGE } }), 'Captions'] }),
       ] }, 'transport'),
+      media?.kind === 'source' ? el('p', { style: { margin: 0, width: '100%', fontSize: 11, opacity: 0.75 }, children: 'Keys: Space play or pause · J back 5 s · K pause · L play (again: 2×, 4×)' }, 'keys') : null,
     ] }, 'stage'),
     captionsShown && original && style !== 'off' ? el('p', { style: muted, children: 'Approximate caption preview. The rendered preview shows the exact result.' }, 'approximate') : null,
     jsx(Notice, { error }, 'error'),
