@@ -25,10 +25,35 @@ Two recordings were provided for local acceptance:
 
 | Local filename | Properties | Valid coverage |
 |---|---|---|
-| `12511-239934660.mp4` | 3840×2160, approximately 22.37 s, no audio | Metadata, generic edits, graphics, covers and export |
+| `1416529-uhd_3840_2160_30fps.mp4` | 3840×2160, 12.23 s, 30 fps, no audio, aerial coastline without people | Metadata, generic edits, graphics, covers, export and the no-face check |
 | `4439224-uhd_2160_3840_25fps.mp4` | 2160×3840, 10.56 s, 264 frames, visible woman, no audio | Face/mouth metrics, person segmentation and portrait export |
 
 They belong in ignored `raw_vids/` and are not distributed through GitHub. Permission for local testing is not permission to publish footage.
+
+The landscape clip replaces an earlier local river clip that is no longer available. It is "Seawater" by Vincenzo Malagoli (https://www.pexels.com/@zenzazione/), Pexels video 1416529, under the Pexels License:
+
+```bash
+curl -fL https://videos.pexels.com/video-files/1416529/1416529-uhd_3840_2160_30fps.mp4 -o raw_vids/1416529-uhd_3840_2160_30fps.mp4
+```
+
+- Observed SHA-256: `30513f61352bba3dde774b2da791a2ab3db76e721c795164709899ee61e781eb`.
+
+## Long talk for clip-finder acceptance
+
+- **Title:** *Climate change is simple* — David Roberts at TEDxTheEvergreenStateCollege.
+- **Publisher / attribution:** TEDx Talks, speaker David Roberts.
+- **Source:** https://commons.wikimedia.org/wiki/File:Climate_change_is_simple_David_Roberts_at_TEDxTheEvergreenStateCollege.webm
+- **Licence:** Creative Commons Attribution 3.0 (CC BY 3.0); credit the title,
+  speaker and publisher, link the source and licence, and identify edits when
+  distributing excerpts. Licence: https://creativecommons.org/licenses/by/3.0/
+- **Observed SHA-1:** `d57f97f373fc8912b597c7d46174db5f74894994`.
+- **Observed properties:** 1920×1080, 30000/1001 fps, VP8/Vorbis, 1063.221 s.
+- **Local file:** `raw_vids/roberts-tedx.webm` (ignored, not bundled).
+- **Use:** F5 sentence-boundary and clip-render acceptance and F6 chapters,
+  subtitles file and thumbnail acceptance, with a local tiny Whisper model.
+  F5 previews are excerpted, fitted to a vertical frame and captioned; the F6
+  preview is the whole talk at 16:9. They are local evidence, not an
+  endorsement or fact-check of the talk.
 
 ## Model assets
 

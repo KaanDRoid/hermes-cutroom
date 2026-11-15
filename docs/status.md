@@ -1,5 +1,201 @@
 # Implementation status
 
+## November 15 — Release checks for 0.2.0 (`feat/ui-redesign`)
+
+- **Security review** of the Python side and of the Desktop page with the HTTP
+  API. Fixed: Try again could send a failed cloud copy again without the Send
+  now confirmation; a video the host cannot play reloaded in a loop; scrubbing
+  or choosing a destination cleared an approval; OBS could be held open by
+  another program on its port; the OBS password could come back in an error;
+  signed links in cloud errors kept their query string; jobs without a runner
+  saved their options; chat tools allowed larger changes than the HTTP API; in
+  a chat on a messaging service, finished renders were offered for sharing
+  without asking. Each fix has a test that failed first.
+- **Native Desktop run** in Hermes Desktop against the real gateway, on a
+  75-second excerpt of a CC BY 3.0 TEDx talk: import, transcription, word
+  edits, YouTube Shorts with Face track and pop captions, face analysis,
+  preview, checks, approval, final, delivery package and the Drive
+  confirmation (not sent). The approval was clicked by the agent for the
+  screenshots; the person ran the workflow separately and accepted it.
+- Found and fixed on that run: Face track panned slowly after a camera change
+  the scene detector missed and left the speaker out of frame for about a
+  second (the crop now moves where the face is found again, from the frame it
+  was lost); the original player showed a centre crop for Face track; Original,
+  Preview and Final could not be switched while a video loaded; a caption
+  problem was labelled "Captions are present" with no place or fix; the cloud
+  list showed `captions_ass`.
+- **Clean install** from a fresh clone (`c0c552e`) in a new Python 3.12
+  environment with all optional extras: imports and `scripts/check.py` pass
+  (643 tests, 14 skipped; Ruff; Desktop; whitespace).
+- Gates: 652 Python tests OK (14 skipped) on FFmpeg 9.0.2 and 7.1.1, 92/92
+  Desktop tests, Ruff clean, `hermes plugins validate` 16/16.
+- Known limits: `/obs` status accepts any local port and its error tells a
+  closed port from other failures. In a profile other than the one the gateway
+  started with, plugin requests pass through a separate plugin host; there the
+  player loaded media at about 0.8 MB/s.
+
+## November 14–15 — Cloud copy, OBS, speech and performance (`feat/ui-redesign`)
+
+- **Send to the cloud:** Export copies an approved final and its files to a new
+  folder on an rclone remote (Google Drive tested live), with progress, cancel
+  and a size/hash check of the copy. Person only (`confirmed: true`).
+- **Record with OBS:** a built-in obs-websocket v5 client (no extra package)
+  starts and stops OBS recording on this computer and imports the file. Live
+  check with OBS Studio on Windows: a 1920×1080 recording with sound imported
+  as a project. The password stays in Desktop settings.
+- **Speech:** music and noise give an empty transcript; segments Whisper is
+  unsure of are dropped; a fixed seed makes transcripts repeatable. Real speech
+  kept every word on four recordings.
+- **Editor:** J, K and L playback keys, subfolders in Browse, a readable video
+  loading bar, the new logo.
+- **Performance:** every cut read the whole recording, so 557 cuts of a
+  17-minute talk did not finish the loudness pass in 15 minutes. Cuts now read
+  only their part (sample- and frame-identical output); the same edit renders
+  in 6 min 17 s at 1080p and 16 min 31 s at 2160p with no lost or repeated
+  frames. Details: [performance](performance.md).
+- Gates: 643 Python tests OK (14 skipped) on FFmpeg 9.0.2 and 7.1.1, 84/84
+  Desktop tests, Ruff clean, `hermes plugins validate` 16/16.
+- Open: native Desktop acceptance per platform (A28) by a person, and live
+  media download (A08).
+
+## November 13 — Timing fixes from the pre-release review (branch `feat/review-timeline`)
+
+- FFmpeg 7.1: crossfade and dip transitions failed (`xfade` refused an unset frame rate), and a WebM whose sound starts before the picture lost 7 ms of sync. Both are fixed; the full suite passes on 7.1.1 and 9.0.2 (539 tests, 14 skipped).
+- Kept frames are now one list of source frame numbers shared by the video trims, sound, pacing and crops, instead of being rebuilt from rounded times.
+- Sources whose header claims a constant rate but which lost frames during recording were shifted after the gap (333 ms for 10 frames). They are now detected from packet timestamps and placed by time.
+- Time-placed sources (lost frames, irregular timing) drifted with every cut (30 ms after 12 cuts). They now start each range at its first real frame with a whole number of output frames: at most 0.5 ms with lost frames, under half a frame for irregular timing, without growth.
+- Sound that starts after the cut (late sound track, dropped codec priming) played early in the first range (43–57 ms). It is now placed by the requested start, with silence before its first sample.
+- Details and limits: [creator formats](creator-formats.md#frame-identity-lost-frames-and-late-sound-pre-release-review).
+
+## November 13 — review fixes R01, R04, R05 and R06 (`feat/review-search-delivery`)
+
+- **R01:** clip discovery checks input and window budgets before scoring,
+  scores each window once into a small tuple and builds text and reasons only
+  for the picked clips. Dense 1,000-word timestamps are rejected before scoring
+  (565,616 peak traced bytes, 0.156 s) instead of allocating all windows. On
+  the real 17-minute talk, a three-hour repeat of it and synthetic recordings
+  up to three hours, the picks for 1, 8 and 20 clips are identical to the
+  unbounded search. Three hours of short sentences take 0.66 s for 8 clips
+  (4.46 s when every pick rescored all windows), and 20 clips are no longer
+  refused.
+- **R04:** chat currentness uses the facade's artifact/digest/publication-byte
+  validation; approval also matches the current review digest. Historical
+  output never receives a `MEDIA:` handover hint. The retained real-render
+  music-swap repro now reports `current: false`, `approved: false`, no hint;
+  tampered/missing outputs are covered separately. Synthetic automated approval
+  in that repro is guard testing, not human-approval acceptance.
+- **R05:** subtitle text too large to fit losslessly is explicitly rejected,
+  never truncated. QA independently compares delivered text with the original
+  transcript. Co-timed zero-length words survive SRT and VTT; unrepresentable
+  cue durations are errors rather than silent skips.
+- **R06:** thumbnail cache pairs are limited to 32 entries / 32 MiB per project,
+  pruned by recency under a per-project interprocess lock covering generation
+  and reads. Tests cover byte/count limits, same/different-key concurrency,
+  recency, abandoned namespaced temporaries and refusal to unlink outside the
+  cache. Unrelated poster files are preserved.
+- Failing-first logs for each finding and the final verification are retained
+  under `artifacts/review-fixes/`: **545 Python tests OK (14 skipped)** on
+  FFmpeg/ffprobe **9.0.2**, **67/67 Desktop checks**, Ruff check/format and
+  `node --check desktop/plugin.js` pass. The original four RED logs precede
+  source fixes; later missing-file and abandoned-temporary RED logs cover the
+  additional guards. Expanded cache checks were added after the first GREEN.
+- Limits: cooperative synchronous search budgets, not an OS-isolated worker;
+  separate optional audio-analysis timeout; no global cache budget; legacy
+  anonymous poster/thumbnail temporary files are not reaped. The R02/R03
+  timeline and FFmpeg 7.1 findings are fixed separately (entry above). No
+  native Desktop, external-service or publishing acceptance is claimed.
+
+## November 13 — F7 local delivery packages (branch `feat/f7-packages`)
+
+- Approved-current-final delivery folders with hard-link/copy video, 9:16 short-form reference covers, YouTube final thumbnail/SRT/description chapters, sourced post limits, a checksum manifest and a plain README. Nothing is posted.
+- Added post-only settings outside video approval, local package verification, REST and existing-tool actions, Export live counters and Check package, and chat guidance.
+- Real 32-second Sandra Reels and YouTube previews/finals were packaged and verified; both one-byte-tampered copies failed verification while originals stayed intact. Test/evidence fixture approval uses the Studio internal review/approve path, not person-watch acceptance. Both cover images were opened and inspected.
+- Local gates: **552 Python tests OK** (14 skipped), **71/71 Desktop tests**, Ruff check/format and `node --check` clean. Sources: [creator formats F7](creator-formats.md#f7--local-delivery-packages), `artifacts/f7/red.log`, `artifacts/f7/green.log`, `artifacts/f7/evidence/report.json`.
+- Open: native Desktop/per-platform acceptance (A28), live media download, OBS and rclone, all pending owner consent. No external integration was exercised.
+
+## November 13 — F5 clip finder (branch `feat/f5-clip-finder`)
+
+- Added deterministic local discovery of whole-sentence 20–90 s clips, scored
+  0–100 with signed plain-language reasons, non-overlapping picks and a temporal
+  diversity preference; Shorts defaults to at most 60 s. Optional sound and
+  existing face samples add delivery signals, with no network or new assets.
+- Selected clips become independent source-range projects. Cuts, exclusions and
+  timed words stay inside the range through later edits and transcription; a
+  clip of a clip cannot reopen its parent's padding. Captions use program time,
+  approvals are separate, and transcript changes invalidate saved suggestions.
+- Added `find_clips` / `create_clip` to `cutroom_project` (still three default
+  tools), REST routes, the Edit-step Find clips list with source posters and
+  range playback, Make clip with platform selection, and chat skill guidance.
+- Real 1063.221 s talk: tiny-model transcription in 67.59 s, discovery in 2.73 s,
+  **8 candidates**, all punctuation-bounded with no cut words and quiet-gap
+  edges (−46.16 dB or quieter). Two 1080×1920 Shorts/Reels previews rendered
+  28.762067 / 27.160479 s; QA has no failed checks (one Shorts freeze warning),
+  and measured A/V residual against the original is at most **3.25 ms**.
+  Evidence: `artifacts/f5/evidence/`; [candidate texts and editorial judgement](creator-formats.md#f5--clip-finder).
+- Local gates: **501 Python tests OK** (14 skipped without local fixtures),
+  **62/62 Desktop tests**, Ruff check/format and `node --check` pass.
+  Logs: `artifacts/f5/red.log`, `artifacts/f5/green.log`.
+- Open: native Desktop acceptance (A28/F8), recognition cleanup, and editorial
+  judgement. The highest scoring clips are not necessarily standalone arguments;
+  candidates 3, 4, 6 and 7 read better alone than the first two. Quiet-gap checks
+  are a listen-proxy, not a complete listening review. Nothing was approved or uploaded.
+
+## November 13 — F6 long-form YouTube (branch `feat/f6-long-form`)
+
+- Added YouTube chapters in program time (first at 0:00, at least three, each at least 10 s, from YouTube Help, checked 2026-11-13) that move with later cuts and block a final export while they break a rule; local chapter suggestions from the transcript (sentence starts with the least word overlap, titles from distinctive words); `chapters.txt` plus chapters embedded in the MP4; a sentence-based `captions.srt` (two lines of 42, 5/6–7 s, no overlaps); a 16:9 JPEG thumbnail under 2 MB from a face-forward frame with optional text beside the face; and an optional end screen of 5–20 s. QA adds `chapters`, `subtitles_file`, `thumbnail` and `end_screen`; Desktop gets YouTube extras in Export and an end-screen mark in the player; chat reads chapters and problems from `cutroom_project get`. Details: [creator formats F6](creator-formats.md#f6--long-form-youtube).
+- Fixed on the way: words timed with zero length by the recogniser were missing from the subtitles file (26 of 2,577 on the real talk).
+- On a real 17:43 TEDx talk (full-length 1080p YouTube preview): seven suggested chapters read back by `ffprobe` and matching `chapters.txt`, the shortest 85 s; 220 SRT cues holding every kept word, each starting on its first word; a 1920×1080, 106,982-byte thumbnail; all four new checks pass. The chapter boundaries match the talk's sections; several titles need renaming.
+- Local gates: **487 Python tests OK** (14 skipped without local models and media), **61/61 Desktop tests**, Ruff check and format clean. Logs: `artifacts/f6/red.log`, `artifacts/f6/green.log`.
+- Not yet done: a native Desktop check of the new controls.
+
+## November 13 — F3 pacing (branch `feat/f3-pacing`)
+
+- Added `settings.pacing`: alternating punch-ins on edit cuts, centred on the face and kept under a total enlargement limit (default 2×, zooms are reduced and reported rather than exceeding it); an optional eased push-in on long ranges; a maximum pause between kept words that rebuilds the segments; and crossfade or dip transitions built from handles so program length, captions and sync do not change. QA adds `pacing_upscale`, `pacing_face`, `pacing_transitions` and `pacing_max_pause`; Desktop gets a Pacing group in Style; the chat skill suggests pacing for talking heads and asks first. Details: [creator formats F3](creator-formats.md#f3--pacing).
+- Fixed on the way: QA's `captions` check failed a caption that ended with the program when frame alignment made the video up to half a frame shorter than the edit.
+- On real speech (Sandra clip, Reels preview with face tracking, punch-ins, 0.5 s pause limit and crossfades): longest pause 0.86 s → 0.50 s, zoom 1.12× for a total of 1.99×, the redetected face 1.125× taller in zoomed ranges and inside the safe area in every checked frame, audio and picture offsets 0 against a plain render, all pacing checks pass.
+- Local gates: **456 Python tests OK** (14 skipped without local models and media), **49/49 Desktop tests**, Ruff check and format clean. Logs: `artifacts/f3/red.log`, `artifacts/f3/green.log`.
+- Not yet done: push-in on real footage, and a native Desktop check of the new controls.
+
+## November 13 — chat integration (branch `feat/chat-integration`)
+
+- Bundled the `cutroom:edit-video` skill (`skills/edit-video/SKILL.md`): import, transcribe with progress, propose and apply cuts, platform, captions, framing and music, preview and QA, `MEDIA:` lines, plain QA wording (`warning` means ready with notes), approval only by the person in Cutroom Studio, final, derived versions and platform limits. Older hosts without plugin skills still load the tools.
+- Completed `preview`, `final` and `cover` jobs from `cutroom_job` now carry a bounded `media` summary (path, kind, project, platform, duration, size, QA status from check statuses, approval) and a `display_hint`; `cutroom_project get` summarises the current preview and final. Details: [media summaries](studio-jobs.md#media-summaries-in-tool-results).
+- Chat now gets `cutroom_inspect`, `cutroom_project` and `cutroom_job` by default. The older plan tools (`cutroom_draft`, `cutroom_review`, `cutroom_render`) stay in the CLI and are offered in chat only with the plugin setting `legacy_tools: true` or `CUTROOM_LEGACY_TOOLS=1`. `plugin.yaml` declares the default set and the setting.
+- The `cutroom_project` and `cutroom_job` descriptions now state the step order and that only a person approves, in Cutroom Studio.
+- Local gates without inherited `PYTHONPATH`: **398 Python tests OK** (14 skipped without local models and media), **27/27 Desktop tests**, Ruff check and format clean, `hermes plugins validate` passed (declared tools match registrations). Logs: `artifacts/chat/red.log`, `artifacts/chat/green.log`, `artifacts/chat/validate.log`.
+- Not yet done: a native Desktop check of the card with a live chat session.
+
+## November 12 — F1 animated captions (branch `feat/f1-animated-captions`)
+
+- Added `caption_style` (`classic`, `highlight`, `pop`, `one_word`), `caption_highlight_color` and `caption_word_y`, with per-word ASS events timed in whole frames and a glyph-measured two-line layout inside the safe zone at no less than the BBC reading size. Studio publishes the burned script as the `captions_ass` artifact, QA adds `caption_timing` and `caption_bounds`, Desktop gets style controls, and YouTube delivery uses SRT/VTT sidecars first. Details: [creator formats F1](creator-formats.md#f1--animated-word-captions).
+- A second review found words one frame late at 25, 30 and 60 fps, QA checking a final against a later preview's script, and lost same-frame words. All are fixed; a decoded-pixel probe finds 0 mismatches at 23.976, 25, 29.97, 30 and 60 fps and on variable-rate video.
+- On real speech (Sandra clip, 1080×1920 Reels preview, 24 words) every word starts within one frame and stays inside the safe zone.
+- Local gates: **307 Python tests OK** (14 skipped without local models and media), **24/24 Desktop tests**, Ruff clean.
+- Not yet done: a native Desktop check of the caption controls, and reframing (F2) so landscape sources fill vertical frames.
+
+## November 12 — F4 music, cut sounds and voice clean-up (branch `feat/f4-music-voice`)
+
+- Added optional local music (ducking, fades, loop, offset, source note), a cut sound and voice clean-up presets. Files are hashed into the digest. When linear loudness gain would exceed the true-peak limit, Cutroom limits peaks first and labels the method honestly; every normalised export is measured after encoding and re-limited if it is over −1 dBTP. QA compares the render-stage ducking measurement with the request. Desktop gets audio controls. Details: [creator formats F4](creator-formats.md#f4--music-cut-sounds-and-voice-clean-up).
+- Fixed in every constant-frame-rate export: audio ran half a frame plus the video start offset behind the picture, drifted about 0.4 ms per cut on millisecond-timestamped sources, and could end before the last frame. A flash/click test now holds sync within 0.5 ms across twelve cuts.
+- On real speech (Sandra clip, 24 s Reels preview), the mix measured −14.1 LUFS and −1.3 dBTP, 15.75 dB of ducking measured on the delivered file by the evidence script (QA reports the render-stage stem figure, 15.95 dB), and sync within one sample. Re-run after the review fixes with the same figures (`artifacts/f4/evidence-fix/`).
+- Review fixes on the same branch: a piecewise ducking envelope bounded by the render timeout (30 min with 750 speech runs in 0.14 s; the review measured about 4.5 s of CPU per program second at 300 runs), loops that repeat the segment from `start_offset`, short unlooped music that fades out where it ends, deliveries kept at or under −1 dBTP after encoding with QA warning above it, the `music` check labelled as render-stage evidence, and relative audio paths refused. Details: [creator formats F4, review fixes](creator-formats.md#review-fixes-1).
+- Local gates: **297 Python tests OK** (14 skipped without local models and media), **22/22 Desktop tests**, Ruff check and format clean. Before the review fixes the suite had 285 tests.
+
+## November 12 — F2 reframing (branch `feat/f2-reframing`)
+
+- Added `blur_fill`, `center_crop` and `face_track` framing with smoothed, speed- and acceleration-limited crop paths, resets on edit and scene cuts, and manual keyframes in program time (`cutroom/reframe.py`).
+- QA checks planned frames, smoothness, crop upscaling (`platform_upscale` on platform renders, `framing_upscale` otherwise), face coverage and the face inside the safe area, counting only frames with a fresh face sample.
+- Review fixes on the same branch: resets use only samples of the new shot (look-ahead at scene cuts and edit starts), the tracker runs before and after pins with blended ramps, pinned pans cross cuts, crops are planned in square display pixels with even sizes, low face coverage warns, shortened edits drop late pins with a note, the expression limit is explained, and trim edges and frame planning share FFmpeg's filter timeline (a video start of 1.3 s no longer shifts the first segment). Details: [creator formats, F2 review fixes](creator-formats.md#review-fixes-1).
+- On the Sandra clip (a still speaker) reframed for Reels, 415 of 415 fresh face frames are inside the safe area by plan and 83 of 85 by detection on the output. With the clip at 1280 px sliding across a 1920 px canvas, 304 of 304 by plan and 328 of 329 by detection on every output frame; at 960 px Vision found no face and the render and QA warned.
+- Local gates: **317 Python tests OK** (14 skipped without local models and media), **21/21 Desktop tests**, Ruff clean. Logs: `artifacts/f2/fix/red.log`, `artifacts/f2/fix/green.log`.
+
+## November 12 — F0 platform profiles (merged, pull request #12)
+
+- Added sourced platform profiles (`cutroom/platforms.py`) for Instagram Reels, YouTube Shorts, TikTok and YouTube, the `platform` / `final_resolution` settings, safe-zone text placement, per-platform QA checks, derived sibling projects (`Studio.derive`, the `derive` tool action, `POST /projects/{id}/derive`, `GET /platforms`) and Desktop controls: platform and resolution selectors, a safe-zone overlay on loaded renders and **Create version for …** buttons. Details and open items: [creator formats](creator-formats.md#f0--platform-profiles-and-derived-projects).
+- Review fixes on the same branch: captions and lower thirds clamped into the safe zone for every brand-valid position, burned cues split into two-line events, NTSC frame rates accepted and variable-rate video checked by its slowest frame interval, a `platform_upscale` QA check with rotation-aware source sizes, corrected and current source links, cover data as stated by the platforms, frames marked as Cutroom's choice, `derive` resetting the final resolution (optional `final_resolution`) and stripping names, missing files reported as REST 422, and a Desktop overlay that follows the render's recorded platform after its metadata loads. Details: [creator formats, review fixes](creator-formats.md#review-fixes).
+- Local gates without inherited `PYTHONPATH`, FFmpeg 9: **259 Python tests OK** — 14 skipped on a checkout without the local models and consented media, 5 skipped with them (`models/` and `raw_vids/` present); **20/20 Desktop tests**; Ruff check and format clean. The skip count depends on the environment. Before the review fixes the suite had 242 tests (14 or 5 skipped likewise). Logs: `artifacts/f0/red.log`, `artifacts/f0/green.log`, `artifacts/f0/fix-red.log`, `artifacts/f0/fix-green.log`, reviewer probes `artifacts/f0/fix-probes.log`.
+- Not yet done: native Desktop acceptance of the new controls, source-range derivation (F5) and the YouTube thumbnail (F6).
+
 ## November 11 native Desktop acceptance — import through approved final
 
 - Opened the packaged Hermes Desktop application in a separate user-data instance and exercised the `cutroom-test` backend profile. This is real Electron/React, not the SDK fake. The test profile uses a local source clone and the existing development virtual environment; this is **not a clean dependency-install acceptance**. Hermes inventories the Desktop half at app level, while project/job data remain in the test profile.

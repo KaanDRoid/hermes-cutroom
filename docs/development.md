@@ -2,10 +2,10 @@
 
 ## Prerequisites
 
-- Git and access to the private repository.
+- Git.
 - Python 3.12 for the tested native-model runtime; the dependency-free core also runs on Python 3.14.
 - `uv`, Node.js 20+ and maintained `ffmpeg` / `ffprobe` executables in PATH.
-- FFmpeg with H.264/AAC, libass and drawtext support. FFmpeg 9.0.2 is the local reference build; CI checks its own installed build.
+- FFmpeg with H.264/AAC, libass and drawtext support. FFmpeg 9.0.2 is the reference build; the suite also passes on FFmpeg 7.1.1.
 - An output filesystem with hard-link support, such as NTFS or ext4. FAT/exFAT output is not currently supported.
 
 ## Clone and install
@@ -59,7 +59,7 @@ Open the generated HTML review before approving. These are the existing core com
 
 ## Native models
 
-Models are not committed or downloaded by ordinary inference. Place verified local assets at:
+Models are not committed or downloaded by ordinary inference. A project uses the model path in its settings; when that is empty, Cutroom looks in `models/` inside the Studio workspace and then in `models/` beside the package, and takes the most accurate speech model it finds (`faster-whisper-large-v3` or `whisper-large-v3`, then medium, small, base, tiny), `face_landmarker.task` and `selfie_segmenter.tflite`. A speech model folder needs `config.json`, `model.bin` and `tokenizer.json`. When nothing is found, the error names the folder to use. Place verified local assets at:
 
 ```text
 models/whisper-tiny/{config.json,model.bin,tokenizer.json,vocabulary.txt}
@@ -67,7 +67,7 @@ models/face_landmarker.task
 models/selfie_segmenter.tflite
 ```
 
-The tested Whisper source is `Systran/faster-whisper-tiny`. FaceLandmarker and selfie ImageSegmenter assets come from the official MediaPipe model bucket. The model configuration/setup UX and reproducible downloader remain release tasks; do not copy a private cache or redistribute model files without checking their licenses.
+The tested Whisper source is `Systran/faster-whisper-tiny`. It is fast and enough for tests, but it can invent or drop short words; for editing by words use `Systran/faster-whisper-small` (see [where a removed word is cut](studio-jobs.md#where-a-removed-word-is-cut)). FaceLandmarker and selfie ImageSegmenter assets come from the official MediaPipe model bucket. The model configuration/setup UX and reproducible downloader remain release tasks; do not copy a private cache or redistribute model files without checking their licenses.
 
 ## Hermes validation
 

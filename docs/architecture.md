@@ -11,9 +11,12 @@
 | `cutroom/speech.py` | Local transcription, word exclusions, filler suggestions, timeline remapping and subtitle files |
 | `cutroom/narrative.py` | Extractive hook/storyboard/caption drafts grounded in timed source text |
 | `cutroom/vision.py` | Face/head-facing/mouth review and person-layer compositing |
-| `cutroom/postproduction.py` | Brand validation, preview/final export, covers and quality reports |
+| `cutroom/captions.py` | Word-timed ASS caption scripts (highlight, pop, one-word), glyph measurement, script-based timing and bounds checks |
+| `cutroom/audio.py` | Local music and cut-sound validation and hashing, voice clean-up filters, speech detection, ducking envelope, mix rendering and peak limiting |
+| `cutroom/platforms.py` | Sourced, dated platform profiles (frame, length, frame rate, safe zone, loudness, text and cover limits) |
+| `cutroom/postproduction.py` | Brand validation, preview/final export, platform safe-zone layout, covers and quality reports |
 | `cutroom/integrations.py` | Consent-gated download, OBS, rclone, local package and ICS adapters |
-| `cutroom/studio.py` | Versioned project persistence, revision checks, artifact access and job facade |
+| `cutroom/studio.py` | Versioned project persistence, revision checks, derived projects, artifact access and job facade |
 | `cutroom/job_worker.py` | Detached per-workspace job supervisor |
 | `cutroom/runtime.py`, `worker.py` | Bounded isolated engine process and allowlisted engine entry point |
 | `dashboard/plugin_api.py` | Profile-scoped REST facade and authenticated media chunks |
@@ -25,6 +28,16 @@
 The working core uses `plan.json` and `approval.json` inside a caller-selected new project directory. The evolving Studio uses version-2 `studio.json` records under a workspace's `projects/<id>/` directory, plus `jobs/<id>/` records and snapshots.
 
 Do not confuse these formats. The Studio supervisor and engine dispatcher execute every editing action (`inspect`, `silence`, `transcribe`, `vision`, `segment`, `storyboard`, `preview`, `final`, `cover`, `qa`); see [Studio jobs](studio-jobs.md) for options, prerequisites and publication rules. External adapters are not part of the Studio pipeline.
+
+## Platform profiles and derived projects
+
+Platform specifications are data, not logic: `cutroom/platforms.py` is the only place that knows frame sizes, limits, safe zones and loudness targets, and each value cites its source. Studio passes the profile name and final resolution into the render settings; `postproduction` resolves the profile and uses one geometry function (`platform_layout`) both to place text and to check it in QA, so the renderer and the report cannot disagree; `platform_caption_cues` splits burned cues to the layout's two-line band. Render results record the source size in display orientation (`source_video`), and Studio passes it into the QA settings of that render so `platform_upscale` can compare it with the fitted picture. The render's lineage records its platform for the Desktop overlay. `custom` bypasses the platform geometry and checks and keeps the 0.1 code path.
+
+A project targets exactly one profile. Other platforms are sibling projects created by `Studio.derive`: a new record in `projects/<id>/` that copies the edit, starts at revision 1 without artifacts, approval or jobs, and records `derived_from` (parent id, revision and digest). Because the sibling is an ordinary project, revision checks, artifact lineage and the human approval of an exact digest apply to it unchanged. Clips use the same derivation: `Studio.create_clip` records a source-time `derived_from.range`, intersects the copied cuts/exclusions, limits the transcript while retaining source word IDs, clears program-time pins/story selections and rebuilds the segments. Later edits and transcript replacements remain confined to that range. `cutroom/clips.py` supplies local sentence-bounded discovery and explained scores; persisted suggestions are fingerprinted by timed words but excluded from the edit digest.
+
+## Animated captions
+
+`Studio._caption_words` turns kept transcript words into program-time words. `captions.build` turns them into an ASS script with one event per caption state, timed in whole frames (`frame_edge`) and placed with the same `platform_layout` geometry as other text. `export_video` burns that script, and Studio publishes it as `captions_ass` and stores its hash in the render job. QA reads the script from the job of the render being checked, verified by that hash, so the check covers the events burned into that video; `quality_report` also refuses a script made for another frame size. Timing is compared with decoded frame timestamps, and bounds with measured glyph boxes. `classic` keeps the earlier libass cue path.
 
 ## Planned execution path
 
@@ -43,6 +56,12 @@ Verified artifacts + project update + review checkpoint
 ```
 
 Native dependencies stay in a dedicated runtime rather than being injected into Hermes's interpreter. That interpreter comes only from user-owned sources: `CUTROOM_PYTHON`, then the bundled `.venv`, then Hermes' own interpreter. It is never project data, so a model-writable project cannot make a later job execute an arbitrary file. Every child process (job supervisor, model worker, FFmpeg, consented integrations) starts from the allowlist in `cutroom/childenv.py` rather than the parent environment. Import and tool registration must not load models, execute media jobs or start network requests.
+
+## Audio path
+
+For constant-frame-rate sources, `export_video` trims audio from each range's first kept frame. Each range lasts exactly as many samples as its frames, counted cumulatively, and the audio is joined separately from the video, so sync holds across any number of cuts.
+
+When `settings.audio` is set, `audio.prepare_mix` renders the cut voice, the music stem and the cut sounds to a 32-bit float mix before loudness normalisation. Normalisation then reads that file. If linear gain would push the true peak over the limit, `audio.limit_peaks` applies the gain and an oversampled limiter first. QA reads the measured mix report from the render job.
 
 ## Persistence and concurrency
 

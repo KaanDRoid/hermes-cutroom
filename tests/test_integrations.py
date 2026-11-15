@@ -352,23 +352,22 @@ class IntegrationTests(unittest.TestCase):
         with (
             patch.object(integrations.shutil, "which", return_value="rclone.exe"),
             patch.object(integrations.subprocess, "run") as run,
+            patch.object(integrations, "_copy_with_progress") as copy,
         ):
-            run.side_effect = [
-                MagicMock(stdout=""),
-                MagicMock(stdout=json.dumps(metadata)),
-            ]
+            run.side_effect = [MagicMock(stdout=json.dumps(metadata))]
             result = integrations.upload_rclone(local, remote, confirmed=True)
             self.assertTrue(result["verified"])
             self.assertEqual(result["hash_verified"], ["MD5"])
-            upload, verify = run.call_args_list
+            upload = copy.call_args
+            (verify,) = run.call_args_list
             self.assertIn("--immutable", upload.args[0])
             self.assertIn("--ignore-existing", upload.args[0])
             self.assertEqual(upload.args[0][-2:], [str(local), remote])
             self.assertEqual(verify.args[0][-1], remote)
             self.assertIn("--stat", verify.args[0])
             self.assertIn("--hash", verify.args[0])
-            self.assertIs(upload.kwargs["shell"], False)
-            self.assertLessEqual(upload.kwargs["timeout"], 300)
+            self.assertIs(verify.kwargs["shell"], False)
+            self.assertLessEqual(upload.kwargs["timeout"], 6 * 3600)
             for bad in (
                 "--config=secret",
                 ":http,url=https://evil:/x",
@@ -384,10 +383,7 @@ class IntegrationTests(unittest.TestCase):
                 with self.subTest(remote=bad), self.assertRaises(ValueError):
                     integrations.upload_rclone(local, bad, confirmed=True)
             metadata["Size"] = 999
-            run.side_effect = [
-                MagicMock(stdout=""),
-                MagicMock(stdout=json.dumps(metadata)),
-            ]
+            run.side_effect = [MagicMock(stdout=json.dumps(metadata))]
             with self.assertRaisesRegex(RuntimeError, "verification"):
                 integrations.upload_rclone(local, remote, confirmed=True)
             run.side_effect = subprocess.TimeoutExpired(["rclone", "secret"], 300)
@@ -416,11 +412,9 @@ class IntegrationTests(unittest.TestCase):
                 patch.object(
                     integrations.subprocess,
                     "run",
-                    side_effect=[
-                        MagicMock(stdout=""),
-                        MagicMock(stdout=json.dumps(metadata)),
-                    ],
+                    side_effect=[MagicMock(stdout=json.dumps(metadata))],
                 ) as run,
+                patch.object(integrations, "_copy_with_progress") as copy,
                 patch.object(
                     integrations,
                     "_hash_file",
@@ -433,8 +427,8 @@ class IntegrationTests(unittest.TestCase):
                 self.assertEqual(result["hash_verified"], [])
                 self.assertEqual(result["remote"], remote)
                 self.assertEqual(result["size"], metadata["Size"])
-                self.assertIn("--ignore-existing", run.call_args_list[0].args[0])
-                self.assertEqual(run.call_count, 2)
+                self.assertIn("--ignore-existing", copy.call_args.args[0])
+                self.assertEqual(run.call_count, 1)
                 hash_file.assert_not_called()
 
     def test_rclone_rejects_matching_metadata_with_mismatched_supported_hash(self):
@@ -464,20 +458,16 @@ class IntegrationTests(unittest.TestCase):
                 patch.object(
                     integrations.subprocess,
                     "run",
-                    side_effect=[
-                        MagicMock(stdout=""),
-                        MagicMock(stdout=json.dumps(metadata)),
-                    ],
+                    side_effect=[MagicMock(stdout=json.dumps(metadata))],
                 ),
+                patch.object(integrations, "_copy_with_progress"),
                 self.assertRaisesRegex(RuntimeError, "verification failed"),
             ):
                 integrations.upload_rclone(local, remote, confirmed=True)
 
-    def test_obs_validates_before_import_and_calls_real_client_contract(self):
-        import sys
-        import types
-        from unittest.mock import MagicMock
-
+    def test_obs_validates_before_connecting(self):
+        # Recording behaviour is tested against a protocol server in
+        # test_obs_client.
         for kwargs in (
             {"host": "192.168.1.2"},
             {"host": "evil.invalid"},
@@ -487,41 +477,6 @@ class IntegrationTests(unittest.TestCase):
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 integrations.obs_record(**({"action": "status"} | kwargs))
-        recording = self.root / "recording.mkv"
-        recording.write_bytes(b"OBS response path fixture")
-        client = MagicMock()
-        client.get_record_status.return_value = types.SimpleNamespace(
-            output_active=True, output_paused=False, output_timecode="00:00:01.000"
-        )
-        client.stop_record.return_value = types.SimpleNamespace(
-            output_path=str(recording)
-        )
-        sdk = types.SimpleNamespace(ReqClient=MagicMock(return_value=client))
-        with patch.dict(sys.modules, {"obsws_python": sdk}):
-            status = integrations.obs_record("status", password="secret")
-            self.assertTrue(status["recording"])
-            integrations.obs_record("start", password="secret", confirmed=True)
-            self.assertEqual(client.start_record.call_count, 1)
-            client.get_record_status.return_value.output_active = False
-            stopped = integrations.obs_record("stop", password="secret", confirmed=True)
-            self.assertEqual(stopped["output"], str(recording))
-            self.assertTrue(stopped["file_verified"])
-            password = sdk.ReqClient.call_args.kwargs["password"]
-            self.assertNotIn("secret", str(password))
-            self.assertEqual(password + "salt", "secretsalt")
-            self.assertEqual(sdk.ReqClient.call_args.kwargs["timeout"], 5)
-            client.stop_record.return_value.output_path = str(self.root / "missing.mkv")
-            with self.assertRaises(FileNotFoundError):
-                integrations.obs_record("stop", confirmed=True)
-            client.get_record_status.return_value.output_active = False
-            with self.assertRaises(RuntimeError):
-                integrations.obs_record("start", confirmed=True)
-            self.assertGreaterEqual(client.disconnect.call_count, 4)
-            sdk.ReqClient.side_effect = RuntimeError("secret connection failure")
-            with self.assertRaisesRegex(
-                RuntimeError, "OBS connection or request failed"
-            ):
-                integrations.obs_record("status", password="secret")
 
     def test_local_package_copies_real_files_and_hashes_without_sharing(self):
         video = self.root / "video.mp4"

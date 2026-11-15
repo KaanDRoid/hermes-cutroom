@@ -88,6 +88,14 @@ class StudioTests(unittest.TestCase):
             self.assertEqual(reopened["revision"], 1)
             self.assertEqual(reopened["segments"], [{"start": 0.0, "end": 4.0}])
             self.assertEqual(studio.list()[0]["id"], project["id"])
+            # The list carries the save time for display; it is not project data.
+            listed = studio.list()[0]
+            self.assertIsInstance(listed["modified_at"], float)
+            self.assertNotIn("modified_at", reopened)
+            self.assertEqual(
+                studio.review(project["id"])["digest"],
+                studio.review(project["id"])["digest"],
+            )
             self.assertEqual(reopened["source_sha256"], project["source_sha256"])
             with self.assertRaises(ValueError):
                 studio.get("../escape")
@@ -182,9 +190,11 @@ class StudioTests(unittest.TestCase):
             ):
                 studio = Studio(root / "workspace")
                 project = studio.create(source)
-            for action in ("final", "download", "publish", "obs"):
-                with self.subTest(action=action), self.assertRaises(PermissionError):
-                    studio.submit(project["id"], action)
+            with self.assertRaises(PermissionError):
+                studio.submit(project["id"], "final")
+            for action in ("download", "publish", "obs", "calendar"):
+                with self.subTest(action=action), self.assertRaises(ValueError):
+                    studio.submit(project["id"], action, {"confirmed": True})
             self.assertEqual(studio.jobs(), [])
             with self.assertRaises(ValueError):
                 studio.update(project["id"], {"source": "replacement.mp4"}, 1)

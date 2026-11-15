@@ -21,6 +21,7 @@ OPERATIONS = {
     "final",
     "cover",
     "qa",
+    "longform",
     "download",
     "publish",
     "calendar",

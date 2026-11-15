@@ -1,16 +1,49 @@
-# Cutroom
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/cutroom-wordmark-reversed.svg">
+    <img src="docs/brand/cutroom-wordmark.svg" alt="Cutroom" width="420">
+  </picture>
+</h1>
 
-A local-first video editing studio for Hermes Agent.
+<p align="center">A local-first video editing studio for Hermes Agent.</p>
 
 Cutroom turns a local recording into a reviewable edit: word-timed transcript cuts and filler review, silence removal, face/gaze/mouth review, person segmentation for graphics behind the subject, three source-quoted hook options with a storyboard, a preview render, a human-approved final export, a cover and automated quality checks. Media and models stay on your machine, and source files are never overwritten.
 
 It ships three surfaces:
 
-- **Hermes Desktop Studio page** — import, edit words, captions and ranges, pick a hook, run jobs, play previews, review the exact digest and approve the final export.
+- **Hermes Desktop Studio page** — import, edit words, captions and ranges, pick a hook, choose a platform profile, create platform versions, run jobs, play previews with an optional safe-zone overlay, review the exact digest and approve the final export.
 - **Agent tools** — `cutroom_project` and `cutroom_job` let Hermes create projects, edit settings and run allowlisted background jobs. There is no approval tool: only a person can approve a final export.
 - **CLI** — `cutroom doctor`, `cutroom setup-models` and the plan-file commands below.
 
 See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md) and [current status](docs/status.md) for exact contracts and limits.
+
+## A look at the Studio
+
+Start from a file on your computer, or record one with OBS and edit it straight away.
+
+<img src="docs/screenshots/home.png" alt="Cutroom home: import a video or record with OBS" width="720">
+
+**Edit by text.** Click a word to jump there; select words and press Delete to cut them. Long pauses and repeats come as suggestions you apply or keep. Removed words stay visible, struck through, so nothing is lost.
+
+<img src="docs/screenshots/edit.png" alt="Editing a talk by deleting words in its transcript" width="900">
+
+**Style it for a platform.** Pick YouTube Shorts, Reels, TikTok or YouTube, a caption style and a framing. Face track keeps the speaker in a 9:16 crop of a 16:9 recording.
+
+<img src="docs/screenshots/style.png" alt="YouTube Shorts with face-tracked framing and pop-in captions" width="900">
+
+**Review, then approve.** Cutroom renders a preview and checks it: frame, timing, loudness, captions, safe zone and framing. A problem says what is wrong, where, and how to fix it. Only a person can approve, and any later change needs a new approval.
+
+<img src="docs/screenshots/review.png" alt="Preview with automatic checks and the approval box" width="900">
+
+**Export and deliver.** The final is made from exactly the approved version. Download the files, make a local delivery package, or send them to a Google Drive folder.
+
+<img src="docs/screenshots/export.png" alt="Export with downloads, cloud copy and delivery package" width="900">
+
+Nothing leaves your computer without a second, explicit click that says what goes where.
+
+<img src="docs/screenshots/cloud.png" alt="Confirmation before sending files to Google Drive" width="900">
+
+<sub>Screenshots are from Hermes Desktop. The footage is an excerpt of <a href="https://commons.wikimedia.org/wiki/File:Climate_change_is_simple_David_Roberts_at_TEDxTheEvergreenStateCollege.webm"><i>Climate change is simple</i></a>, David Roberts at TEDxTheEvergreenStateCollege, published by TEDx Talks under <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>. It was cut, reframed and captioned in Cutroom.</sub>
 
 ## Studio workflow
 
@@ -18,11 +51,28 @@ See the [documentation index](docs/README.md), [Studio jobs](docs/studio-jobs.md
 2. `silence` → trims pauses while preserving manual cuts.
 3. `storyboard` → three hook options quoted from the transcript; choose one, run again for scenes.
 4. `vision` (MediaPipe face landmarks) → review-only gaze/mouth intervals. `segment` → person layer to place graphics or a background behind the subject.
-5. `preview` → a fast render with word-timed captions and SRT/VTT sidecars.
+5. `preview` → a fast render with word-timed captions (classic, highlighted word, pop-in words or one large word at a time) and SRT/VTT sidecars.
 6. Human review and approval of the exact digest in the Desktop Studio page.
-7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area).
+7. `final`, `cover`, `qa` (resolution, decode, black/freeze frames, timing, loudness, clipping, captions, safe area; platform frame, length, frame rate, upscaling, loudness and safe zone for platform projects).
+
+**Delivery package** in Export makes a local per-platform folder from an approved final with video, cover, bounded post text and verifiable checksums; nothing is posted.
 
 Every job is bound to the project revision and its input files. Edits revoke approval and unlink stale renders; published files carry SHA-256 lineage.
+
+## Platform formats
+
+A project renders for one platform profile, or for `custom` (the original behaviour: frame from the aspect setting, −16 LUFS, no platform checks). Choose the profile in the Studio settings (`settings.platform`, plus `settings.final_resolution` `"1080"` or `"2160"`). To deliver the same edit elsewhere, create a **version**: a sibling project that copies the transcript, cuts, story and brand but has its own settings, review digest and human approval.
+
+| Profile | Frame (default final; 4K opt-in) | Length | Safe zone top / bottom / left / right |
+|---|---|---|---|
+| `instagram_reels` | 1080×1920; 2160×3840 | ≤ 20 min, warning above 3 min | 14 / 35 / 6 / 6 % |
+| `youtube_shorts` | 1080×1920; 2160×3840 | ≤ 3 min | 15 / 35 / 5 / 18 % |
+| `tiktok` | 1080×1920; 2160×3840 | ≤ 60 min | 13 / 35 / 12 / 28 % |
+| `youtube` | 1920×1080; 3840×2160 | no limit | 5 % each side |
+
+Every profile targets −14 LUFS and −1 dBTP. The frame sizes are Cutroom's choice within each platform's published rule. Titles, lower thirds and burned captions (at most two lines per event) are placed inside the safe zone, and QA adds frame, length, frame-rate, upscaling, loudness and safe-zone checks for the profile. A final export longer than the profile's limit is refused. Burned captions can be classic, highlight the spoken word, pop words in or show one large word at a time; each word starts and ends within one frame of its timestamp, which QA checks. YouTube versions get SRT/VTT sidecars, and burning captions in is opt-in. Optional local music is ducked under speech, faded and looped; a cut sound can mark each cut; voice clean-up reduces hum and hiss; the mix is normalised to the platform target, and QA measures ducking depth and loudness. Optional pacing adds punch-ins on cuts centred on the face (never enlarging the source past a set limit), shortens long pauses and puts crossfades or dips on cuts. Long YouTube videos get chapters that follow YouTube's rules (suggested from the transcript, embedded and written as description text), a sentence-based SRT, a 16:9 thumbnail under 2 MB and optional end-screen room. Each value cites its source in `cutroom/platforms.py`; choices and open items are in [creator formats](docs/creator-formats.md).
+
+**Find clips** in Edit turns long recordings into scored, sentence-bounded 20–90 s suggestions; **Make clip** opens a separate platform project limited to that source range, with its own review and approval.
 
 ## Models
 
@@ -40,7 +90,7 @@ The original plan-file workflow remains available for simple silence edits.
 - A local video file. The core needs no API keys or Python runtime dependencies; advanced modules use the optional environments described in [development setup](docs/development.md).
 - An output filesystem with hard-link support (for example NTFS or ext4), used for atomic no-overwrite publication. FAT/exFAT outputs are not currently supported.
 
-Verified on native Windows with FFmpeg 9.0.2; CI runs the test suite on Windows and Ubuntu.
+Verified on native Windows with FFmpeg 9.0.2 and 7.1.1.
 
 ## Quick start
 
@@ -81,18 +131,51 @@ hermes plugins validate /absolute/path/hermes-cutroom --install-deps
 
 For local development, link this directory as `<active-HERMES_HOME>/plugins/cutroom`, then explicitly enable `cutroom` using `hermes plugins enable cutroom`. Installing/enabling modifies the active profile; this checkout does not do that automatically.
 
+By default chat gets three tools:
+
 | Tool | Behavior |
 | --- | --- |
 | `cutroom_inspect` | Read media dimensions, duration and audio availability |
+| `cutroom_project` | Create, list, read, update, review and derive platform versions of Studio projects (no approval) |
+| `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs; completed previews, finals and covers carry a `media` summary |
+
+The older plan-file tools are hidden from chat unless you opt in, because they overlap with the Studio tools. They stay available in the `python -m cutroom` CLI. To offer them in chat as well, set the plugin setting `legacy_tools: true` (`plugins.entries.cutroom.settings.legacy_tools` in the Hermes config) or start Hermes with `CUTROOM_LEGACY_TOOLS=1`:
+
+| Tool (opt-in) | Behavior |
+| --- | --- |
 | `cutroom_draft` | Detect silence, preserve configurable padding, save an editable plan and local HTML review in a new directory inside the Cutroom workspace |
 | `cutroom_review` | Regenerate review and digest after plan edits; refuses plans outside the workspace and any `review.html` Cutroom did not write |
 | `cutroom_render` | Render an approved plan inside the workspace; reject stale approval and existing output |
-| `cutroom_project` | Create, list, read, update and review Studio projects (no approval) |
-| `cutroom_job` | Submit, list, read and cancel allowlisted Studio jobs |
+
+The plugin also bundles the skill `cutroom:edit-video` (`skills/edit-video/SKILL.md`), which sets out the chat workflow. Hosts without plugin skills still load the tools.
 
 Agent tools write only inside the Cutroom workspace (`CUTROOM_WORKSPACE`, otherwise Hermes' plugin data directory for `cutroom`); the legacy plan tools use its `plans/` subdirectory. The user-run `python -m cutroom` CLI keeps writing where you point it.
 
 There is deliberately **no approval tool**. Show the draft to the user and let them confirm locally. Receipts are an accidental-stale-render guard, **not** an authenticated approval mechanism: another program with filesystem access can write receipts. Do not describe them as a security sandbox.
+
+## Using Cutroom from chat
+
+Ask for the edit in plain words and give a local path. The `cutroom:edit-video` skill walks through import, transcription, cuts, platform, captions, framing, preview and QA, then hands approval to you in Cutroom Studio. Nothing is uploaded or published.
+
+Example conversation:
+
+> **You:** Turn C:/Videos/talk.mp4 into an Instagram Reel with highlighted captions.
+>
+> **Hermes:** Imported "talk" (4:12). Transcribing, 40 %… done. I suggest cutting 14 pauses over 0.6 s, the repeated intro and the aside about parking (about 1:05 in total), which brings it to 2:41. Apply these cuts?
+>
+> **You:** Yes, but keep the parking joke.
+>
+> **Hermes:** Done: Reels format, highlighted captions, blurred background to fill the vertical frame. Here is the preview:
+>
+> `MEDIA:C:\Users\you\AppData\Local\hermes\plugins\cutroom\jobs\…\outputs\preview.mp4`
+>
+> It is ready with one note: the picture was enlarged from a smaller source, so it may look slightly softer. Anything to change? When you are happy, review and approve it in Cutroom Studio, and I will export the final.
+>
+> **You:** I approved it in Studio. Also make a YouTube Shorts version.
+>
+> **Hermes:** Final exported (`MEDIA:…\final.mp4`). I created a Shorts version; it starts unapproved, so it needs its own preview and approval.
+
+In Hermes Desktop the `MEDIA:` line becomes a Cutroom card with the player, QA status and buttons to open the project in Studio. Other surfaces show their standard player for the same file. Only you can approve, and only in Cutroom Studio or the local REST API; the chat tools cannot approve and the final export is refused if the edit changed after approval.
 
 ## Editing semantics
 

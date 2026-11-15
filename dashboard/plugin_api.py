@@ -21,7 +21,7 @@ router = APIRouter()
 _import_lock = threading.Lock()
 
 
-def get_studio():
+def _module(name):
     """Load our adjacent package, not a same-named package on the host path.
 
     Hermes loads this file as a standalone module with spec_from_file_location,
@@ -45,8 +45,11 @@ def get_studio():
             except Exception:
                 sys.modules.pop(key, None)
                 raise
-        studio = importlib.import_module(key + ".studio")
-    return studio.get_studio()
+        return importlib.import_module(key + "." + name)
+
+
+def get_studio():
+    return _module("studio").get_studio()
 
 
 class RequestModel(BaseModel):
@@ -64,7 +67,12 @@ ProjectId = Annotated[str, PathParam(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
 def invoke(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
-    except (KeyError, FileNotFoundError) as error:
+    except FileNotFoundError as error:
+        if isinstance(error, _module("studio").MissingAssetError):
+            # The project exists; one of its files does not.
+            raise HTTPException(422, str(error)) from error
+        raise HTTPException(404, "Project, job or artifact not found") from error
+    except KeyError as error:
         raise HTTPException(404, "Project, job or artifact not found") from error
     except PermissionError as error:
         raise HTTPException(403, str(error)) from error
@@ -105,6 +113,11 @@ class UpdateProject(RequestModel):
         for key in ("settings", "transcript"):
             if key in value and not isinstance(value[key], dict):
                 raise ValueError(f"{key} must be an object")
+        if "settings" in value:
+            _module("captions").validate_settings(value["settings"], allow_reset=True)
+            if "pacing" in value["settings"]:
+                _module("pacing").validate_settings(value["settings"]["pacing"])
+            _module("longform").normalize_settings(value["settings"])
         for key in ("segments", "gaze_exclusions", "excluded_word_ids"):
             if key in value and (
                 not isinstance(value[key], list) or len(value[key]) > 100_000
@@ -145,6 +158,66 @@ def list_projects(studio=Depends(get_studio)):
     return invoke(studio.list)
 
 
+PlatformName = Literal[
+    "custom", "instagram_reels", "youtube_shorts", "tiktok", "youtube"
+]
+
+
+class DeriveProject(RequestModel):
+    platform: PlatformName
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    final_resolution: Literal["1080", "2160"] | None = None
+
+
+@router.post("/projects/{project_id}/derive", status_code=201)
+def derive_project(
+    project_id: ProjectId, body: DeriveProject, studio=Depends(get_studio)
+):
+    """A sibling for another platform; it never carries the parent's approval."""
+    return invoke(
+        studio.derive,
+        project_id,
+        body.platform,
+        name=body.name,
+        final_resolution=body.final_resolution,
+    )
+
+
+class FindClips(RequestModel):
+    min_s: float | None = Field(default=None, ge=20, le=90, allow_inf_nan=False)
+    max_s: float | None = Field(default=None, ge=20, le=90, allow_inf_nan=False)
+    count: int | None = Field(default=None, ge=1, le=20)
+    platform: PlatformName | None = None
+
+
+class CreateClip(RequestModel):
+    platform: PlatformName
+    candidate_id: str | None = Field(
+        default=None, pattern=r"^clip-[0-9]{1,10}-[0-9]{1,10}$"
+    )
+    start: float | None = Field(default=None, ge=0, le=10800, allow_inf_nan=False)
+    end: float | None = Field(default=None, ge=0, le=10800, allow_inf_nan=False)
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    final_resolution: Literal["1080", "2160"] | None = None
+
+
+@router.post("/projects/{project_id}/find-clips")
+def find_clips(project_id: ProjectId, body: FindClips, studio=Depends(get_studio)):
+    return invoke(studio.find_clips, project_id, **body.model_dump(exclude_none=True))
+
+
+@router.post("/projects/{project_id}/clips", status_code=201)
+def create_clip(project_id: ProjectId, body: CreateClip, studio=Depends(get_studio)):
+    invoke(_module("clips").validate_pick, body.candidate_id, body.start, body.end)
+    return invoke(studio.create_clip, project_id, **body.model_dump(exclude_none=True))
+
+
+@router.get("/platforms")
+def platform_profiles():
+    """Sourced profile data for the Desktop selector and safe-zone overlay."""
+    return _module("platforms").public_profiles()
+
+
 Action = Literal[
     "inspect",
     "silence",
@@ -156,8 +229,7 @@ Action = Literal[
     "final",
     "cover",
     "qa",
-    "download",
-    "publish",
+    "upload",
 ]
 
 
@@ -187,12 +259,41 @@ class ApproveProject(RequestModel):
 
 @router.post("/projects/{project_id}/jobs", status_code=202)
 def submit_job(project_id: ProjectId, body: SubmitJob, studio=Depends(get_studio)):
-    if (
-        body.action in ("download", "publish")
-        and body.options.get("confirmed") is not True
-    ):
+    if body.action == "upload" and body.options.get("confirmed") is not True:
         raise HTTPException(422, "Explicit consent is required for remote adapters")
     return invoke(studio.submit, project_id, body.action, body.options)
+
+
+class ObsRequest(RequestModel):
+    action: Literal["status", "start", "stop"]
+    # Checked in the route: a validation error would echo the value back.
+    password: Any = None
+    port: int = Field(default=4455, ge=1, le=65535)
+    confirmed: bool = False
+
+
+@router.post("/obs")
+def obs(body: ObsRequest, studio=Depends(get_studio)):
+    """Record with OBS on this computer; start and stop need explicit consent."""
+    if body.password is not None and (
+        not isinstance(body.password, str) or len(body.password) > 512
+    ):
+        raise HTTPException(422, "The OBS password is text of at most 512 characters")
+    if body.action != "status" and body.confirmed is not True:
+        raise HTTPException(422, "Explicit consent is required to start or stop OBS")
+    return invoke(
+        studio.obs,
+        body.action,
+        password=body.password,
+        port=body.port,
+        confirmed=body.confirmed,
+    )
+
+
+@router.get("/cloud/remotes")
+def cloud_remotes(studio=Depends(get_studio)):
+    """Cloud folders set up in rclone on this computer (name and type only)."""
+    return invoke(studio.cloud_remotes)
 
 
 @router.get("/jobs")
@@ -244,6 +345,8 @@ ArtifactKind = Literal[
     "qa",
     "captions",
     "subtitles",
+    "chapters",
+    "thumbnail",
 ]
 MediaKind = Literal["source", "preview", "final", "cover"]
 MEDIA_TYPES = {
@@ -258,6 +361,7 @@ MEDIA_TYPES = {
     ".srt": "text/plain",
     ".ass": "text/plain",
     ".vtt": "text/vtt",
+    ".txt": "text/plain",
 }
 
 
@@ -291,6 +395,33 @@ def file_artifact(
     )
 
 
+@router.get("/projects/{project_id}/poster")
+def project_poster(
+    project_id: ProjectId,
+    at: Annotated[float, Query(ge=0, le=1, allow_inf_nan=False)] = 0.1,
+    studio=Depends(get_studio),
+):
+    """A small JPEG source frame (data URL) for project cards and the player."""
+    return invoke(studio.poster, project_id, at)
+
+
+@router.post("/projects/{project_id}/chapters/suggest")
+def suggest_chapters(project_id: ProjectId, studio=Depends(get_studio)):
+    """Chapter suggestions from the transcript, in program time; nothing is saved."""
+    return invoke(studio.suggest_chapters, project_id)
+
+
+@router.get("/projects/{project_id}/thumbnail-preview")
+def thumbnail_preview(
+    project_id: ProjectId,
+    time: Annotated[float | None, Query(ge=0, allow_inf_nan=False)] = None,
+    text: Annotated[str | None, Query(max_length=100)] = None,
+    studio=Depends(get_studio),
+):
+    """A 1280x720 JPEG (data URL) of the YouTube thumbnail for a frame and text."""
+    return invoke(studio.thumbnail_preview, project_id, time, text)
+
+
 @router.get("/projects/{project_id}/artifact-info/{kind}")
 def artifact_info(
     project_id: ProjectId, kind: ArtifactKind, studio=Depends(get_studio)
@@ -319,7 +450,8 @@ def media_chunk(
     """JSON transport for ctx.rest, which does not expose binary responses.
 
     Native grants never enter media URLs. The renderer builds and revokes a
-    local Blob URL from bounded, authenticated chunks after an explicit click.
+    local Blob URL from bounded, authenticated chunks: files up to 64 MiB load
+    when a project opens, larger ones after a click (256 MiB at most).
     """
     return artifact_chunk(
         studio, project_id, kind, offset, length, version, media_only=True
@@ -370,3 +502,45 @@ def artifact_chunk(
         "mime": mime,
         "version": current,
     }
+
+
+class PostText(RequestModel):
+    title: str = Field(default="", max_length=1000)
+    caption: str = Field(default="", max_length=20000)
+    hashtags: list[str] = Field(default_factory=list, max_length=100)
+
+
+class MakePackage(RequestModel):
+    post: PostText | None = None
+    cover_time: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+@router.get("/projects/{project_id}/post")
+def post_text(project_id: ProjectId, studio=Depends(get_studio)):
+    return invoke(studio.post_text, project_id)
+
+
+@router.put("/projects/{project_id}/post")
+def set_post(project_id: ProjectId, body: PostText, studio=Depends(get_studio)):
+    return invoke(studio.set_post, project_id, body.model_dump())
+
+
+@router.get("/projects/{project_id}/packages")
+def list_packages(project_id: ProjectId, studio=Depends(get_studio)):
+    return invoke(studio.packages, project_id)
+
+
+@router.post("/projects/{project_id}/packages", status_code=201)
+def make_package(project_id: ProjectId, body: MakePackage, studio=Depends(get_studio)):
+    return invoke(
+        studio.package,
+        project_id,
+        post=body.post.model_dump() if body.post else None,
+        cover_time=body.cover_time,
+    )
+
+
+@router.post("/projects/{project_id}/packages/{name}/verify")
+def verify_package(project_id: ProjectId, name: str, studio=Depends(get_studio)):
+    path = invoke(studio.package_path, project_id, name)
+    return invoke(studio.verify_package, path)

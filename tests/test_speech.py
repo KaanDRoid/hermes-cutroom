@@ -50,6 +50,8 @@ class TranscriptTests(unittest.TestCase):
             transcript([word(), word(1, 0.05, 0.2)]),
             transcript([word(text="")]),
             transcript([word(text=4)]),
+            transcript([word(text="bad\ud800")]),
+            transcript([word(text="tab\there")]),
         ]
         for data in invalid:
             with self.subTest(data=data), self.assertRaises(ValueError):
@@ -336,7 +338,10 @@ class TranscribeTests(unittest.TestCase):
                 raise AssertionError("A silent video must not load a model")
             return original_import(name, *args, **kwargs)
 
-        for name in ("12511-239934660.mp4", "4439224-uhd_2160_3840_25fps.mp4"):
+        for name in (
+            "1416529-uhd_3840_2160_30fps.mp4",
+            "4439224-uhd_2160_3840_25fps.mp4",
+        ):
             source = self.root / "raw_vids" / name
             if not source.is_file():
                 self.skipTest("Consented user video is not available locally")

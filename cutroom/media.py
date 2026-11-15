@@ -9,11 +9,16 @@ import tempfile
 from pathlib import Path
 
 try:
+    from . import fanout
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
+    from cutroom import fanout
     from cutroom.childenv import child_env
 
 PROCESS_TIMEOUT = 300
+# One still frame should take seconds; a stuck decoder must not hold a request.
+POSTER_TIMEOUT = 60
+POSTER_MAX_SIDE = 480
 
 
 def _local_path(value, *, must_exist=True):
@@ -73,6 +78,7 @@ def render(source: str | Path, segments: list[dict], output: str | Path) -> dict
         raise ValueError("At least one segment is required")
     filters = []
     labels = []
+    spans = []
     previous_end = 0.0
     for index, segment in enumerate(segments):
         if (
@@ -87,13 +93,27 @@ def render(source: str | Path, segments: list[dict], output: str | Path) -> dict
                 "Segments must be ordered, non-overlapping, and within the source duration"
             )
         previous_end = end
+        spans.append((start, end))
+    # Each segment reads only its part of the streams (see fanout).
+    video_tree, video_inputs = fanout.cut_inputs(
+        "[0:v:0]", spans, video=True, by_frame=False, prefix="mv"
+    )
+    filters.extend(video_tree)
+    if has_audio:
+        audio_tree, audio_inputs = fanout.cut_inputs(
+            "[0:a:0]", spans, video=False, prefix="ma"
+        )
+        filters.extend(audio_tree)
+    for index, (start, end) in enumerate(spans):
         filters.append(
-            f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
+            f"{video_inputs[index][0]}trim=start={start}:end={end},"
+            f"setpts=PTS-STARTPTS[v{index}]"
         )
         labels.append(f"[v{index}]")
         if has_audio:
             filters.append(
-                f"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]"
+                f"{audio_inputs[index][0]}atrim=start={start}:end={end},"
+                f"asetpts=PTS-STARTPTS[a{index}]"
             )
             labels.append(f"[a{index}]")
     filters.append(
@@ -179,6 +199,52 @@ def detect_silences(source: str | Path, noise_db=-35.0, min_duration=0.5) -> lis
     if start is not None and start < duration:
         intervals.append({"start": start, "end": duration})
     return intervals
+
+
+def poster_frame(source: str | Path, time, output: str | Path) -> None:
+    """Write one JPEG frame at ``time`` seconds, at most 480 px on its longest side."""
+    time = _number(time)
+    if time < 0:
+        raise ValueError("Poster time must not be negative")
+    source = _local_path(source)
+    side = POSTER_MAX_SIDE
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file",
+            "-ss",
+            f"{time:.3f}",
+            "-i",
+            str(source),
+            "-frames:v",
+            "1",
+            "-an",
+            "-vf",
+            f"scale=w='min({side},iw)':h='min({side},ih)'"
+            ":force_original_aspect_ratio=decrease",
+            "-q:v",
+            "4",
+            "-f",
+            "image2",
+            "-c:v",
+            "mjpeg",
+            "-y",
+            str(output),
+        ],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+        timeout=POSTER_TIMEOUT,
+        shell=False,
+        env=child_env(python=False),
+    )
 
 
 def probe(source: str | Path) -> dict:

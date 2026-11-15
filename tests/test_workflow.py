@@ -63,7 +63,10 @@ class WorkflowTests(unittest.TestCase):
             timeout=30,
         )
         original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-        workspace = patch.dict(os.environ, {"CUTROOM_WORKSPACE": str(root / "studio")})
+        workspace = patch.dict(
+            os.environ,
+            {"CUTROOM_WORKSPACE": str(root / "studio"), "CUTROOM_LEGACY_TOOLS": "1"},
+        )
         workspace.start()
         self.addCleanup(workspace.stop)
         ctx = ToolContext()

@@ -12,8 +12,10 @@ from fractions import Fraction
 from pathlib import Path
 
 try:
+    from . import audio, fanout, pacing, platforms, reframe
     from .childenv import child_env
 except ImportError:  # loaded as a standalone module file
+    from cutroom import audio, fanout, pacing, platforms, reframe
     from cutroom.childenv import child_env
 
 
@@ -164,6 +166,69 @@ def _render_graph(arguments, *, cwd, timeout):
         return _run(legacy, cwd=cwd, timeout=timeout)
 
 
+def _quarter_turn(video):
+    """True when the stream's display rotation swaps width and height."""
+    rotation = next(
+        (
+            item.get("rotation", 0)
+            for item in video.get("side_data_list", [])
+            if "rotation" in item
+        ),
+        video.get("tags", {}).get("rotate", 0),
+    )
+    try:
+        return abs(float(rotation)) % 180 == 90
+    except (TypeError, ValueError):
+        return False
+
+
+def _sample_aspect(video):
+    """Sample (pixel) aspect ratio of a stream; 1 when absent or invalid."""
+    try:
+        numerator, denominator = str(video.get("sample_aspect_ratio") or "1:1").split(
+            ":"
+        )
+        sar = float(numerator) / float(denominator)
+    except (ValueError, ZeroDivisionError):
+        return 1.0
+    return sar if math.isfinite(sar) and sar > 0 else 1.0
+
+
+def _source_video(info):
+    """Source grid in display orientation and square display pixels.
+
+    Anamorphic storage widths are scaled by the sample aspect ratio (to an even
+    width), so crops and upscaling checks work on what the viewer sees.
+    """
+    video = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    width, height = info["width"], info["height"]
+    sar = _sample_aspect(video)
+    if abs(sar - 1) > 1e-6:
+        width = max(2, round(width * sar / 2) * 2)
+    if _quarter_turn(video):
+        width, height = height, width
+    return dict(
+        width=width, height=height, display_aspect_ratio=info["display_aspect_ratio"]
+    )
+
+
+def _content_size(ratio, width, height):
+    """Size of the fitted (padded, never cropped) picture inside a frame."""
+    return (
+        max(2, min(width, math.floor(height * ratio / 2) * 2)),
+        max(2, min(height, math.floor(width / ratio / 2) * 2)),
+    )
+
+
+def _content_upscale(source, width, height):
+    """Fitted content size and its enlargement over the source pixel grid."""
+    content = _content_size(source["display_aspect_ratio"], width, height)
+    factor = max(content[0] / source["width"], content[1] / source["height"])
+    return list(content), factor
+
+
 def _probe(source, timeout=300):
     data = json.loads(
         _run(
@@ -196,15 +261,7 @@ def _probe(source, timeout=300):
     except (ValueError, IndexError, ZeroDivisionError):
         sar = 1
     display_ratio = int(video["width"]) * sar / int(video["height"])
-    rotation = next(
-        (
-            item.get("rotation", 0)
-            for item in video.get("side_data_list", [])
-            if "rotation" in item
-        ),
-        video.get("tags", {}).get("rotate", 0),
-    )
-    if abs(float(rotation)) % 180 == 90:
+    if _quarter_turn(video):
         display_ratio = 1 / display_ratio
     return dict(
         duration=duration,
@@ -235,11 +292,30 @@ def _settings(settings):
         "silence_min_duration",
         "max_caption_chars",
         "max_caption_cps",
+        "platform",
+        "final_resolution",
+        "source_video",
+        "caption_style",
+        "caption_highlight_color",
+        "caption_word_y",
+        "audio",
+        "audio_mix",
+        "framing",
+        "framing_keyframes",
+        "framing_analysis",
+        "framing_report",
+        "pacing",
+        "pacing_analysis",
+        "pacing_report",
+        "pacing_words",
     }
     if settings is None:
         settings = {}
     if not isinstance(settings, dict) or set(settings) - allowed:
         raise ValueError("Unknown settings fields")
+    from cutroom.captions import DEFAULT_HIGHLIGHT, validate_settings
+
+    validate_settings(settings)
     brand = validate_brand(settings.get("brand", {}))
     result = dict(
         preset=brand["preset"],
@@ -258,9 +334,25 @@ def _settings(settings):
         silence_min_duration=0.5,
         max_caption_chars=84,
         max_caption_cps=25,
+        platform="custom",
+        final_resolution=None,
+        source_video=None,
+        caption_style="classic",
+        caption_highlight_color=DEFAULT_HIGHLIGHT,
+        caption_word_y=0.8,
+        audio=None,
+        audio_mix=None,
     )
+    entry = platforms.profile(settings.get("platform", "custom"))
+    if entry["loudness"] is not None:
+        # A platform profile supplies the delivery loudness unless set explicitly.
+        result["loudness_lufs"] = entry["loudness"]["integrated_lufs"]
+        result["true_peak_db"] = entry["loudness"]["true_peak_db"]
     result.update(settings)
     result["brand"] = brand
+    result["audio"] = audio.validate_settings(result["audio"])
+    if result["final_resolution"] not in (None, *platforms.FINAL_RESOLUTIONS):
+        raise ValueError("final_resolution must be '1080' or '2160'")
     validate_brand({**brand, "preset": result["preset"], "aspect": result["aspect"]})
     for key in ("title_animation", "normalize_audio"):
         if not isinstance(result[key], bool):
@@ -276,6 +368,45 @@ def _settings(settings):
     _number(result["max_caption_cps"], 1, 100)
     if result["expected_duration"] is not None:
         _number(result["expected_duration"], 0.000001)
+    source = result["source_video"]
+    if source is not None:
+        if not isinstance(source, dict) or set(source) != {
+            "width",
+            "height",
+            "display_aspect_ratio",
+        }:
+            raise ValueError(
+                "source_video needs width, height and display_aspect_ratio"
+            )
+        for key in ("width", "height"):
+            if isinstance(source[key], bool) or not isinstance(source[key], int):
+                raise ValueError("source_video width and height must be integers")
+            _number(source[key], 1, 100000)
+        _number(source["display_aspect_ratio"], 0.0001, 10000)
+    reframe.validate_framing(result.get("framing", "fit"))
+    if "framing_keyframes" in result:
+        reframe.validate_keyframes(result["framing_keyframes"])
+    if "framing_analysis" in result:
+        reframe.validate_analysis(result["framing_analysis"])
+    if "framing_report" in result:
+        reframe.validate_report(result["framing_report"])
+    result["pacing"] = pacing.validate_settings(result.get("pacing"))
+    if result.get("pacing_analysis") is not None:
+        analysis = result["pacing_analysis"]
+        if not isinstance(analysis, dict) or set(analysis) != {"faces"}:
+            raise ValueError("pacing_analysis needs faces only")
+        reframe.validate_analysis({"faces": analysis["faces"], "scene_cuts": []})
+    if result.get("pacing_report") is not None:
+        pacing.validate_report(result["pacing_report"])
+    words = result.get("pacing_words")
+    if words is not None:
+        if not isinstance(words, list) or len(words) > pacing.MAX_WORDS:
+            raise ValueError("pacing_words must be a bounded list")
+        for pair in words:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise ValueError("pacing_words entries are [start, end]")
+            _number(pair[0], 0)
+            _number(pair[1], 0)
     return result
 
 
@@ -315,7 +446,17 @@ def _captions(captions, duration):
     return result
 
 
+def _platform_entry(settings):
+    """The settings' platform profile, or None for the 0.1 `custom` behaviour."""
+    entry = platforms.profile(settings.get("platform") or "custom")
+    return None if entry["frame"] is None else entry
+
+
 def _dimensions(info, settings):
+    if _platform_entry(settings) is not None:
+        return platforms.frame_size(
+            settings["platform"], settings["preset"], settings.get("final_resolution")
+        )
     base = 1080 if settings["preset"] == "preview" else 2160
     aspect = settings["aspect"]
     if aspect == "portrait":
@@ -333,14 +474,212 @@ def _dimensions(info, settings):
 
 
 def _fit_filter(info, width, height):
-    ratio = info["display_aspect_ratio"]
-    content_width = max(2, min(width, math.floor(height * ratio / 2) * 2))
-    content_height = max(2, min(height, math.floor(width / ratio / 2) * 2))
+    content_width, content_height = _content_size(
+        info["display_aspect_ratio"], width, height
+    )
     return [
         f"scale={content_width}:{content_height}",
         "setsar=1",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
     ]
+
+
+# Conservative line height (multiple of the font size) for layout boxes.
+_LINE = 1.25
+
+
+def platform_layout(settings, width, height, *, title=None, captions=False):
+    """Pixel boxes for title, lower third and caption band inside the safe zone.
+
+    Returns None for `custom`. The renderer draws text from these boxes and the
+    quality report recomputes them, so both use one geometry. Widths assume a
+    full em per character, which bounds real glyphs from above.
+    """
+    entry = _platform_entry(settings)
+    if entry is None:
+        return None
+    zone, brand = entry["safe_zone"], settings["brand"]
+    margin = brand["safe_margin"]
+    pad = max(2.0, 0.01 * min(width, height))
+    x0 = width * max(zone["left"], margin) + pad
+    x1 = width * (1 - max(zone["right"], margin)) - pad
+    y0 = height * max(zone["top"], margin) + pad
+    y1 = height * (1 - max(zone["bottom"], margin)) - pad
+    available = x1 - x0
+    short = min(width, height)
+    boxes = {}
+    # Captions are a two-line band; platform_caption_cues keeps events to it.
+    caption_size = min(
+        brand["subtitle_size"] * short / 1080, (y1 - y0) / (2 * _LINE), available
+    )
+    band = 2 * _LINE * caption_size
+    caption_bottom = min(
+        max(height * brand["subtitle_y"] + 2 * caption_size, y0 + band), y1
+    )
+    caption_top = max(caption_bottom - band, y0)
+    text = settings["title"] if title is None else title
+    if text:
+        lines = text.split("\n")
+        longest = max(1, max(map(len, lines)))
+        size = min(brand["title_size"] * short / 1080, available / longest)
+        y = min(max(height * brand["title_y"], y0), y1 - len(lines) * _LINE * size)
+        if y < y0:
+            y = y0
+            size = min(size, (y1 - y0) / (len(lines) * _LINE))
+        w = longest * size
+        x = {
+            "left": x0,
+            "center": x0 + (available - w) / 2,
+            "right": x1 - w,
+        }[brand["alignment"]]
+        boxes["title"] = dict(x=x, y=y, w=w, h=len(lines) * _LINE * size, size=size)
+    if settings.get("lower_third"):
+        h = 0.09 * height
+        if y1 - y0 < h + (pad + band if captions else 0) - 1e-9:
+            raise ValueError("No safe band is available for lower-third and captions")
+        if captions:
+            # The lower third sits above the captions; push both down if needed.
+            if caption_top - h - pad < y0:
+                caption_top = y0 + h + pad
+                caption_bottom = caption_top + band
+            y = caption_top - h - pad
+        else:
+            y = min(max(height * (brand["subtitle_y"] - 0.015), y0), y1 - h)
+        lines = settings["lower_third"].split("\n")
+        longest = max(1, max(map(len, lines)))
+        size = min(
+            brand["subtitle_size"] * short / 1080,
+            (available - 2 * pad) / longest,
+            (h - pad) / (len(lines) * _LINE),
+        )
+        boxes["lower_third"] = dict(
+            x=x0,
+            y=y,
+            w=available,
+            h=h,
+            size=size,
+            text_y=y + (h - len(lines) * _LINE * size) / 2,
+        )
+    if captions:
+        boxes["captions"] = dict(
+            x=x0,
+            y=caption_top,
+            w=available,
+            h=caption_bottom - caption_top,
+            size=caption_size,
+            # Full-em widths bound real glyphs, so lines this long never wrap.
+            chars_per_line=max(1, math.floor(available / caption_size)),
+        )
+    return dict(
+        platform=settings["platform"],
+        safe=dict(x0=x0, y0=y0, x1=x1, y1=y1),
+        boxes=boxes,
+    )
+
+
+def platform_caption_cues(captions, layout, *, measure=None):
+    """Split cues so every burned event fits the two-line caption band.
+
+    Words are wrapped at the band's characters per line (longer words are
+    broken), lines are paired into events, and each event gets a share of the
+    cue's time proportional to its characters. No text is dropped.
+    """
+    band = (layout or {}).get("boxes", {}).get("captions")
+    if band is None:
+        return [dict(item) for item in captions]
+    import textwrap
+
+    width = band["chars_per_line"]
+    result = []
+    for item in captions:
+        lines = [
+            line
+            for paragraph in item["text"].split("\n")
+            for line in textwrap.wrap(
+                paragraph, width, break_long_words=True, break_on_hyphens=False
+            )
+        ] or [item["text"].strip()]
+        if measure is not None:
+            from cutroom.captions import wrap_lines
+
+            lines = wrap_lines(item["text"], band["w"] - 16, band["size"], measure)
+        events = [
+            "\n".join(lines[index : index + 2]) for index in range(0, len(lines), 2)
+        ]
+        weights = [max(1, len(event.replace("\n", ""))) for event in events]
+        total, done = sum(weights), 0
+        start, span = item["start"], item["end"] - item["start"]
+        for index, (event, weight) in enumerate(zip(events, weights)):
+            done += weight
+            end = (
+                item["end"]
+                if index == len(events) - 1
+                else (item["start"] + span * done / total)
+            )
+            result.append(dict(start=start, end=end, text=event))
+            start = end
+    return result
+
+
+def safe_zone_findings(boxes, zone, width, height):
+    """List every box that reaches into the profile's unsafe margins."""
+    limits = dict(
+        left=zone["left"] * width,
+        right=(1 - zone["right"]) * width,
+        top=zone["top"] * height,
+        bottom=(1 - zone["bottom"]) * height,
+    )
+    findings = []
+    for name, box in boxes.items():
+        sides = [
+            side
+            for side, outside in (
+                ("left", box["x"] < limits["left"] - 0.5),
+                ("right", box["x"] + box["w"] > limits["right"] + 0.5),
+                ("top", box["y"] < limits["top"] - 0.5),
+                ("bottom", box["y"] + box["h"] > limits["bottom"] + 0.5),
+            )
+            if outside
+        ]
+        if sides:
+            findings.append(dict(box=name, sides=sides, bounds=box))
+    return findings
+
+
+def _platform_text(
+    directory, text, filename, color, size, box, alignment, y, *, animated=False
+):
+    """drawtext placed inside a layout box; real glyphs are narrower than the box."""
+    (directory / filename).write_text(text, encoding="utf-8")
+    left, width = box["x"], box["w"]
+    x = {
+        "left": f"{left}",
+        "center": f"{left}+({width}-text_w)/2",
+        "right": f"{left + width}-text_w",
+    }[alignment]
+    alpha = ":alpha='min(1,t/0.35)'" if animated else ""
+    return (
+        f"drawtext=fontfile=font.ttf:textfile={filename}:expansion=none:fontsize={size}"
+        f":fontcolor={color}:x={x}:y={y}:fix_bounds=1{alpha}"
+    )
+
+
+def _platform_title(directory, text, settings, layout, *, animated=False):
+    brand = settings["brand"]
+    box = layout["boxes"]["title"]
+    safe = layout["safe"]
+    span = dict(x=safe["x0"], w=safe["x1"] - safe["x0"])
+    return _platform_text(
+        directory,
+        text,
+        "title.txt",
+        brand["title_color"],
+        box["size"],
+        span,
+        brand["alignment"],
+        box["y"],
+        animated=animated,
+    )
 
 
 def _font(directory, family):
@@ -378,7 +717,7 @@ def _draw_text(
     )
 
 
-def _ass(directory, captions, brand, width, height):
+def _ass(directory, captions, brand, width, height, layout=None):
     def timestamp(value):
         ticks = round(value * 100)
         return f"{ticks // 360000}:{ticks // 6000 % 60:02}:{ticks // 100 % 60:02}.{ticks % 100:02}"
@@ -387,15 +726,25 @@ def _ass(directory, captions, brand, width, height):
     color = "&H00" + color[4:6] + color[2:4] + color[:2]
     size = brand["subtitle_size"] * min(width, height) / 1080
     margin = round(width * brand["safe_margin"])
+    margin_left = margin_right = margin
+    margin_vertical = round(height * (1 - brand["subtitle_y"]) - size * 2)
+    # Platform cues are pre-wrapped to the band; libass must not add lines.
+    wrap_style = 0 if layout is None else 2
+    if layout is not None:
+        band = layout["boxes"]["captions"]
+        size = band["size"]
+        margin_left = math.ceil(band["x"])
+        margin_right = math.ceil(width - band["x"] - band["w"])
+        margin_vertical = math.ceil(height - band["y"] - band["h"])
     alignment = {"left": 1, "center": 2, "right": 3}[brand["alignment"]]
     content = (
-        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n"
+        f"[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: {wrap_style}\n"
         "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
         f"Style: Default,{brand['font']},{size},{color},{color},&H00000000,&H80000000,"
-        f"0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin},{margin},"
-        f"{round(height * (1 - brand['subtitle_y']) - size * 2)},1\n"
+        f"0,0,0,0,100,100,0,0,1,2,0,{alignment},{margin_left},{margin_right},"
+        f"{margin_vertical},1\n"
         "[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
     for item in captions:
@@ -424,14 +773,77 @@ def _output_path(output, suffixes):
     return path
 
 
+# Encoded deliveries are measured and, when over the true-peak limit, rendered
+# again through an oversampled limiter whose ceiling drops by the overshoot.
+DELIVERY_PEAK_ATTEMPTS = 3
+DELIVERY_PEAK_MARGIN = 0.2
+
+
+def _peak_limiter(ceiling_db):
+    limit = min(1.0, max(0.0625, 10 ** (ceiling_db / 20)))
+    # latency=1 compensates the look-ahead, so the audio stays on its frames.
+    return (
+        "aresample=192000,"
+        f"alimiter=limit={limit:.6f}:attack=1:release=50:level=0:latency=1,"
+        "aresample=48000"
+    )
+
+
+def _true_peak(path, timeout):
+    """ebur128 true peak of the first audio stream, as delivery QA reads it."""
+    text = _run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-v",
+            "info",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-af",
+            "ebur128=peak=true",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=timeout,
+    ).stderr
+    values = re.findall(r"Peak:\s*([-+\d.inf]+) dBFS", text or "")
+    value = float(values[-1]) if values else None
+    return value if value is not None and math.isfinite(value) else None
+
+
+def _linear_fits(measured, settings):
+    """FFmpeg's loudnorm applies a linear gain only if the gained true peak fits the limit.
+
+    When it does not, loudnorm silently switches to dynamic mode even with
+    linear=true, so the delivered loudness can miss the target.
+    """
+    gain = settings["loudness_lufs"] - measured["input_i"]
+    return measured["input_tp"] + gain <= settings["true_peak_db"]
+
+
 def _measure_loudness(source, audio_graph, directory, settings):
     """First loudnorm pass over the exact cut audio; returns FFmpeg's measurements."""
     script = directory / "measure.txt"
+    calibrated = bool(settings.get("audio"))
+    if calibrated:
+        audio_graph = audio_graph + [
+            "[audio]asplit=2[loudness_input][ebu_input]",
+            "[ebu_input]ebur128=peak=true[ebu_measured]",
+        ]
     script.write_text(
         ";\n".join(
             audio_graph
             + [
-                f"[audio]loudnorm=I={settings['loudness_lufs']}:"
+                ("[loudness_input]" if calibrated else "[audio]")
+                + f"loudnorm=I={settings['loudness_lufs']}:"
                 f"TP={settings['true_peak_db']}:LRA=11:print_format=json[measured]"
             ]
         ),
@@ -453,6 +865,7 @@ def _measure_loudness(source, audio_graph, directory, settings):
             "measure.txt",
             "-map",
             "[measured]",
+            *(["-map", "[ebu_measured]"] if calibrated else []),
             "-f",
             "null",
             "-",
@@ -480,18 +893,107 @@ def _measure_loudness(source, audio_graph, directory, settings):
     # Silent or near-silent programs report -inf; linear correction is undefined.
     if not all(math.isfinite(value) for value in values.values()):
         return None
+    if calibrated:
+        # Use the same EBU integrated scan as delivery QA. Short gated mixtures
+        # can differ from loudnorm's oversampled first-pass gate by over 1 LU.
+        matches = re.findall(r"I:\s*([-+\d.inf]+) LUFS", text)
+        if matches and math.isfinite(float(matches[-1])):
+            # Dynamic mode needs loudnorm's own figures; linear mode uses the EBU scan.
+            values["loudnorm"] = dict(values)
+            values["input_i"] = float(matches[-1])
+            values["target_offset"] = 0.0
     return values
 
 
-def _frame_aligned(ranges, rate, source_duration, start_time=None):
-    """Snap kept ranges to whole source frames without cumulative drift.
+def _timeline(info):
+    """(format start, video offset) in seconds.
 
-    Each trimmed range otherwise rounds to whole frames independently and the
-    concat filter pads audio to match, so many cuts lengthen the program. Frame
-    counts follow the rounded running total, keeping the output within half a
-    frame of the requested duration. Boundaries sit halfway between frame
-    timestamps so small container jitter cannot change which frames are kept.
-    Ranges shorter than one frame at their position are dropped.
+    FFmpeg's filter graph timeline starts at the container's earliest stream
+    start, so segment times, trim edges and planned crop frames all use that
+    timeline; the video's first frame sits `video offset` seconds into it.
+    """
+    starts, video = [], None
+    for stream in info.get("streams", []):
+        try:
+            value = float(stream.get("start_time"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        starts.append(value)
+        if video is None and stream.get("codec_type") == "video":
+            video = value
+    base = min(starts) if starts else 0.0
+    return base, max(0.0, (base if video is None else video) - base)
+
+
+def _video_frame_times(source, base, timeout=300):
+    """Sorted video frame times on the filter timeline, or None if unreadable.
+
+    Packet timestamps are read without decoding. Packets the demuxer marks as
+    discarded (edit lists) never reach the filters and are left out.
+    """
+    try:
+        result = _run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "packet=pts,flags:stream=time_base",
+                "-of",
+                "json",
+                str(source),
+            ],
+            timeout=timeout,
+        )
+        data = json.loads(result.stdout)
+        unit = Fraction(data["streams"][0]["time_base"])
+        origin = Fraction(str(base))
+        times = sorted(
+            int(packet["pts"]) * unit - origin
+            for packet in data.get("packets", [])
+            if str(packet.get("pts", "N/A")).lstrip("-").isdigit()
+            and "D" not in str(packet.get("flags", ""))
+        )
+    except (
+        subprocess.SubprocessError,
+        OSError,
+        ValueError,
+        KeyError,
+        IndexError,
+        ZeroDivisionError,
+    ):
+        return None
+    return times or None
+
+
+def _evenly_spaced(times, rate):
+    """True when every frame sits on the nominal grid: no gaps, no repeats.
+
+    Frame-indexed trims assume frame n is shown at origin + n / rate. A header
+    can report a constant rate while frames were lost during recording (the
+    timestamps then jump); such sources use time-based placement instead.
+    """
+    if not times:
+        return False
+    fps = Fraction(rate)
+    first = times[0]
+    return all(round((time - first) * fps) == index for index, time in enumerate(times))
+
+
+def _frame_aligned(ranges, rate, source_duration, start_time=None):
+    """Return canonical (first source frame, kept frame count) per range.
+
+    Counts follow the rounded running duration, avoiding cumulative per-cut
+    drift. Dropped sub-frame ranges still contribute to that budget. The video
+    origin is in FFmpeg's normalized filter timeline, not absolute stream time.
+    Time edges may be derived from this plan, but must never be used to recover
+    frame identities: their six-decimal serialization is lossy.
     """
     numerator, _, denominator = rate.partition("/")
     fps = Fraction(int(numerator), int(denominator or 1))
@@ -510,14 +1012,307 @@ def _frame_aligned(ranges, rate, source_duration, start_time=None):
             continue
         emitted += stop - first
 
-        def edge(frame):
-            return max(0.0, float(origin + (frame - Fraction(1, 2)) / fps))
-
-        aligned.append((round(edge(first), 6), round(edge(stop), 6)))
+        aligned.append((first, stop - first))
     return aligned
 
 
-def export_video(source, segments, output, settings=None, captions=None):
+def _frame_edges(frames, rate, origin):
+    """Half-frame time edges for time-based consumers, never a frame identity."""
+    fps = Fraction(rate)
+    origin = Fraction(str(origin))
+
+    def edge(frame):
+        return round(max(0.0, float(origin + (frame - Fraction(1, 2)) / fps)), 6)
+
+    return [(edge(first), edge(first + count)) for first, count in frames]
+
+
+def _audio_ranges(frames, rate, start_time=None, sample_rate=48000):
+    """Audio intervals that start at each range's first kept video frame.
+
+    Frame-aligned video ranges begin half a frame before their first frame, and
+    concat drops the video stream's start offset. Trimming audio at those edges
+    would put it half a frame (plus that offset) behind the picture. Each audio
+    interval therefore starts at its first frame's timestamp. Its sample count
+    follows the running total of kept frames, so per-range rounding to whole
+    samples cannot accumulate across many cuts.
+    """
+    numerator, _, denominator = rate.partition("/")
+    fps = Fraction(int(numerator), int(denominator or 1))
+    try:
+        origin = Fraction(str(float(start_time or 0)))
+    except ValueError:
+        origin = Fraction(0)
+    result, total, emitted = [], Fraction(0), 0
+    for first, count in frames:
+        stop = first + count
+        total += count / fps
+        samples = round(total * sample_rate) - emitted
+        emitted += samples
+        result.append(
+            (
+                round(float(origin + first / fps), 6),
+                round(float(origin + stop / fps), 6),
+                samples,
+            )
+        )
+    return result
+
+
+def _timed_ranges(ranges, rate, times, sample_rate=48000):
+    """Frame-anchored ranges for video whose frames are not evenly spaced.
+
+    Frames are not re-numbered; each keeps its source time. A range starts at
+    its first real frame and lasts a whole number of output frames, following
+    the rounded running duration as on the constant-rate path, so cuts cannot
+    accumulate drift. The sound starts at that same frame and has exactly the
+    range's length. Frames on their own grid (lost frames leave gaps but do not
+    move the rest) therefore land exactly on output frames; truly irregular
+    frames land within half a frame. Returns (start, end, sound start, sound
+    end, samples, program offset, first frame) for the ranges that keep a frame.
+    Without frame times or a usable rate, ranges start at the cut instead.
+    """
+    import bisect
+
+    fps = Fraction(rate) if rate else None
+    result, total, frames_out, samples_out = [], Fraction(0), 0, 0
+    for start, end in ranges:
+        low, high = Fraction(str(start)), Fraction(str(end))
+        total += high - low
+        if fps is None or not times:
+            first, count = low, None
+            length = high - low
+        else:
+            index = bisect.bisect_left(times, low)
+            first = times[index] if index < len(times) else None
+            count = round(total * fps) - frames_out
+            if first is None or first >= high or count <= 0:
+                continue  # No frame to show; its time still counts in the budget.
+            length = count / fps
+        offset = (
+            Fraction(frames_out) / fps
+            if count is not None
+            else Fraction(samples_out, sample_rate)
+        )
+        if count is not None:
+            frames_out += count
+            stop = Fraction(frames_out) / fps
+        else:
+            stop = total
+        samples = round(stop * sample_rate) - samples_out
+        samples_out += samples
+        result.append(
+            (
+                start,
+                end,
+                round(float(first), 6),
+                round(float(first + length), 6),
+                samples,
+                offset,
+                first,
+            )
+        )
+    return result
+
+
+STANDARD_RATES = tuple(
+    Fraction(value)
+    for value in (
+        "24000/1001",
+        "24",
+        "25",
+        "30000/1001",
+        "30",
+        "48",
+        "50",
+        "60000/1001",
+        "60",
+        "100",
+        "120000/1001",
+        "120",
+    )
+)
+
+
+def _timed_rate(video, times=None):
+    """Output rate for time-placed frames.
+
+    Measured from the real frames and snapped to a standard rate within 2 %;
+    headers of unevenly timed files often report a timebase guess (120/1,
+    90000/1) or nothing. The median spacing finds lost frames (gaps over 1.5
+    of it); the rate is the mean over all other spacings, so millisecond
+    timestamps (33, 34, 33 ms at 29.97 fps) do not bias it. Without frame times
+    the header is used when it is plausible.
+    """
+    if times and len(times) >= 3:
+        gaps = sorted(b - a for a, b in zip(times, times[1:]) if b > a)
+        regular = [gap for gap in gaps if gap <= gaps[len(gaps) // 2] * Fraction(3, 2)]
+        if regular:
+            measured = len(regular) / sum(regular)
+            nearest = min(STANDARD_RATES, key=lambda rate: abs(rate - measured) / rate)
+            if abs(nearest - measured) / nearest <= Fraction(2, 100):
+                return f"{nearest.numerator}/{nearest.denominator}"
+            if 1 <= measured <= 120:
+                rate = measured.limit_denominator(1001)
+                return f"{rate.numerator}/{rate.denominator}"
+    for key in ("r_frame_rate", "avg_frame_rate"):
+        try:
+            rate = Fraction(str(video.get(key) or "0/0"))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if 1 <= rate <= 120:
+            return f"{rate.numerator}/{rate.denominator}"
+    return None
+
+
+def _timed_video(ranges):
+    """One select/setpts chain that keeps each frame at its source-time offset."""
+    keep, place = [], []
+    for start, end, _, _, _, offset, first in ranges:
+        # select names the frame time t; setpts names it T. The window is the
+        # cut itself, as in the crop planner, so joined frame numbers agree.
+        inside = f"gte({{t}},{start:.6f})*lt({{t}},{end:.6f})"
+        keep.append(inside.format(t="t"))
+        shift = float(offset - first)
+        place.append(f"{inside.format(t='T')}*(T{shift:+.9f})")
+    return f"select='{'+'.join(keep)}',setpts='({'+'.join(place)})/TB'"
+
+
+def _sar_text(video):
+    try:
+        numerator, denominator = str(video.get("sample_aspect_ratio") or "1:1").split(
+            ":"
+        )
+        if int(numerator) > 0 and int(denominator) > 0:
+            return f"{int(numerator)}/{int(denominator)}"
+    except ValueError:
+        pass
+    return "1"
+
+
+def _pacing_zone(settings):
+    """Safe area for face checks: the platform zone, at least the brand margin."""
+    margin = settings["brand"]["safe_margin"]
+    entry = platforms.profile(settings.get("platform", "custom"))
+    zone = entry["safe_zone"]
+    if zone:
+        return {
+            side: max(zone[side], margin) for side in ("left", "right", "top", "bottom")
+        }
+    return {side: margin for side in ("left", "right", "top", "bottom")}
+
+
+def _pacing_planner(info, ranges, rate, settings, frames=None):
+    """Pacing plan factory; the frame size and crop path are known only later.
+
+    Canonical source indices/counts are shared with the video trims and audio.
+    Variable-rate sources (max_pause only) are planned at their nominal rate.
+    """
+    origin = Fraction(str(_timeline(info)[1]))
+    fps = Fraction(rate) if rate else Fraction(str(_frame_rate(info) or 30))
+    firsts, counts = [], []
+    if frames is not None:
+        firsts = [first for first, _ in frames]
+        counts = [count for _, count in frames]
+    else:
+        for start, end in ranges:
+            first = max(
+                0, round((Fraction(str(start)) - origin) * fps + Fraction(1, 2))
+            )
+            stop = round((Fraction(str(end)) - origin) * fps + Fraction(1, 2))
+            firsts.append(first)
+            counts.append(max(1, stop - first))
+    last_frame = int((Fraction(str(info["duration"])) - origin) * fps)
+    video = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    grid = [info["width"], info["height"]]
+    if _quarter_turn(video):
+        grid.reverse()
+    choice = settings["pacing"]
+    faces = (settings.get("pacing_analysis") or {}).get("faces") or []
+
+    def build(mode, width, height, framing_report, cuts_only=False):
+        common = dict(
+            counts=counts,
+            firsts=firsts,
+            fps=float(fps),
+            last_frame=last_frame,
+            zone=_pacing_zone(settings),
+        )
+        if cuts_only:
+            return pacing.plan(
+                choice,
+                window=tuple(grid),
+                base_upscale=1.0,
+                output_box=[0, 0, 1, 1],
+                **common,
+            )
+        if framing_report is not None:
+            cw, ch = framing_report["crop"]
+            sw, sh = framing_report["source"]
+            xs, ys = framing_report["x"], framing_report["y"]
+
+            def offsets(index):
+                # Matches crop's even-pixel rounding of the planned position.
+                return int(xs[index]) // 2 * 2, int(ys[index]) // 2 * 2
+
+            scaffold = pacing.plan(
+                {**choice, "punch_in": "off", "push_in": False},
+                window=(cw, ch),
+                base_upscale=1.0,
+                output_box=[0, 0, 1, 1],
+                **common,
+            )
+            points = pacing.face_points(
+                faces, scaffold["ranges"], float(fps), (sw, sh), offsets
+            )
+            report = pacing.plan(
+                choice,
+                window=(cw, ch),
+                base_upscale=max(width / cw, height / ch),
+                output_box=[0, 0, 1, 1],
+                faces=points,
+                **{**common, "zone": framing_report["zone"]},
+            )
+        else:
+            source_video = _source_video(info)
+            _, base = reframe.content_upscale(source_video, width, height, mode)
+            cw, ch = _content_size(info["display_aspect_ratio"], width, height)
+            box = [(width - cw) / 2 / width, (height - ch) / 2 / height]
+            box += [cw / width, ch / height]
+            scaffold = pacing.plan(
+                {**choice, "punch_in": "off", "push_in": False},
+                window=tuple(grid),
+                base_upscale=1.0,
+                output_box=box,
+                **common,
+            )
+            points = pacing.face_points(faces, scaffold["ranges"], float(fps), grid)
+            report = pacing.plan(
+                choice,
+                window=tuple(grid),
+                base_upscale=base,
+                output_box=box,
+                faces=points,
+                **common,
+            )
+        report["source_ranges"] = [[start, end] for start, end in ranges]
+        report["max_pause"] = choice["max_pause"]
+        return report
+
+    return build
+
+
+def export_video(
+    source,
+    segments,
+    output,
+    settings=None,
+    captions=None,
+    caption_words=None,
+    caption_script=None,
+):
     """Render ordered source intervals. Approval is the caller's responsibility.
 
     Explicit aspects fit/pad, never crop. Source aspect fits its long-side target.
@@ -525,6 +1320,9 @@ def export_video(source, segments, output, settings=None, captions=None):
     """
     source = _path(source)
     output = _output_path(output, {".mp4", ".mkv", ".mov"})
+    script_output = (
+        _output_path(caption_script, {".ass"}) if caption_script is not None else None
+    )
     settings = _settings(settings)
     info = _probe(source, settings["timeout"])
     if not isinstance(segments, list) or not segments:
@@ -550,38 +1348,157 @@ def export_video(source, segments, output, settings=None, captions=None):
     constant_rate = bool(
         rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0"
     )
+    frame_times = _video_frame_times(
+        source, _timeline(info)[0], timeout=settings["timeout"]
+    )
     if constant_rate:
-        ranges = _frame_aligned(
-            ranges, rate, info["duration"], video_stream.get("start_time")
+        constant_rate = _evenly_spaced(frame_times, rate)
+    pacing_settings = settings["pacing"]
+    paced = pacing.video_active(pacing_settings)
+    if paced and not constant_rate:
+        raise ValueError(
+            "Punch-ins, push-ins and transitions require constant-rate media; "
+            "conform variable-rate sources first"
         )
+    frames = None
+    origin = _timeline(info)[1]
+    if constant_rate:
+        frames = _frame_aligned(ranges, rate, info["duration"], origin)
+        ranges = _frame_edges(frames, rate, origin)
         if not ranges:
             raise ValueError("Segments are shorter than one video frame")
+    pacing_plan = (
+        _pacing_planner(info, ranges, rate if constant_rate else None, settings, frames)
+        if pacing_settings is not None
+        else None
+    )
+    # Audio fades need the cut plan before the trims are written.
+    early_plan = pacing_plan(None, None, None, None, cuts_only=True) if paced else None
     # Loudness processing can extend the tail; never let audio outlast the cut.
     program = sum(end - start for start, end in ranges)
-    for index, (start, end) in enumerate(ranges):
-        graph.append(
-            f"[0:v:0]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{index}]"
+    audio_stream = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "audio"), {}
+    )
+    try:
+        sample_rate = int(audio_stream.get("sample_rate") or 48000)
+    except ValueError:
+        sample_rate = 48000
+    timed = timed_rate = None
+    if not constant_rate:
+        timed_rate = _timed_rate(video_stream, frame_times)
+        timed = _timed_ranges(ranges, timed_rate, frame_times, sample_rate)
+        if not timed:
+            raise ValueError("Segments are shorter than one video frame")
+        # Only cuts that keep a frame are rendered, as on the constant-rate path.
+        ranges = [(item[0], item[1]) for item in timed]
+    sound_ranges = (
+        _audio_ranges(frames, rate, origin, sample_rate)
+        if constant_rate
+        else [(item[2], item[3], item[4]) for item in timed]
+    )
+    # The kept frames (or exact source times), not the half-frame edges.
+    program = sum(samples for _, _, samples in sound_ranges) / sample_rate
+    # Each cut reads only its part of the stream (see fanout): with every cut
+    # reading the whole stream, hundreds of cuts take hours.
+    video_inputs = audio_inputs = None
+    if not paced and frames is not None:
+        lines, video_inputs = fanout.cut_inputs(
+            "[0:v:0]",
+            [(first, first + count) for first, count in frames],
+            video=True,
+            prefix="vf",
         )
-        labels.append(f"[v{index}]")
+        graph.extend(lines)
+    if info["has_audio"]:
+        lines, audio_inputs = fanout.cut_inputs(
+            "[0:a:0]",
+            [(sound_start, sound_end) for sound_start, sound_end, _ in sound_ranges],
+            video=False,
+            prefix="af",
+        )
+        graph.extend(lines)
+        audio_graph.extend(lines)
+    for index, ((start, end), (sound_start, sound_end, samples)) in enumerate(
+        zip(ranges, sound_ranges)
+    ):
+        if not paced:
+            if frames is not None:
+                first, count = frames[index]
+                stream, offset = video_inputs[index]
+                timebase = 1 / Fraction(rate)
+                trim_video = (
+                    f"trim=start_frame={first - offset}:"
+                    f"end_frame={first + count - offset},"
+                    f"settb={timebase.numerator}/{timebase.denominator},setpts=N"
+                )
+                graph.append(f"{stream}{trim_video}[v{index}]")
+                labels.append(f"[v{index}]")
         if info["has_audio"]:
+            # Place sound by the requested start, not by its first sample: when
+            # the sound starts after the cut (it begins after the picture, or a
+            # decoder drops codec priming), rebasing on the first sample would
+            # pull it early. The gap before that sample becomes silence. The
+            # rate is pinned: unpinned, aresample takes the rate a later filter
+            # asks for (loudnorm works at 192 kHz) and the sample counts below
+            # would cut a quarter of the sound.
             trim = (
-                f"[0:a:0]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{index}]"
+                f"{audio_inputs[index][0]}atrim=start={sound_start}:end={sound_end},"
+                f"asetpts=PTS-{sound_start}/TB,"
+                f"aresample={sample_rate}:async=1:first_pts=0"
             )
+            if samples is not None:
+                # Exact length; a joint concat would pad audio to the video's
+                # container timestamps, which are often rounded to milliseconds.
+                trim += f",apad,atrim=end_sample={samples}"
+                if paced:
+                    trim += pacing.audio_fades(
+                        index, len(ranges), samples, sample_rate, early_plan
+                    )
+            trim += f"[a{index}]"
             graph.append(trim)
-            labels.append(f"[a{index}]")
             audio_graph.append(trim)
             audio_labels.append(f"[a{index}]")
-    graph.append(
-        "".join(labels)
-        + f"concat=n={len(ranges)}:v=1:a={int(info['has_audio'])}[joined]"
-        + ("[audio]" if info["has_audio"] else "")
-    )
+    if constant_rate:
+        if not paced:
+            graph.append("".join(labels) + f"concat=n={len(ranges)}:v=1:a=0[joined]")
+        if info["has_audio"]:
+            graph.append(
+                "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
+            )
+    else:
+        graph.append(f"[0:v:0]{_timed_video(timed)}[joined]")
+        if info["has_audio"]:
+            graph.append(
+                "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
+            )
     if info["has_audio"]:
         audio_graph.append(
             "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
         )
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
+    layout = platform_layout(settings, width, height, captions=bool(captions))
+    from cutroom import captions as animated_captions
+
+    measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
+    events = (
+        platform_caption_cues(captions, layout, measure=measure) if layout else captions
+    )
+    animated = settings["caption_style"] != "classic"
+    caption_plan = None
+    if animated and captions:
+        caption_plan = animated_captions.build(
+            caption_words
+            if caption_words is not None
+            else animated_captions.words_from_cues(captions),
+            settings,
+            width,
+            height,
+            layout,
+            frame_rate=rate or "30/1",
+            duration=duration,
+        )
+        events = caption_plan["events"]
     effects = []
     lower_y = None
     with tempfile.TemporaryDirectory(
@@ -589,10 +1506,91 @@ def export_video(source, segments, output, settings=None, captions=None):
     ) as temp:
         directory = Path(temp)
         filters = _fit_filter(info, width, height)
+        # Reframing changes only the picture, never the trim/concat audio timeline.
+        framing_report = None
+        mode = settings.get("framing", "fit")
+        if mode == "blur_fill":
+            cw, ch = _content_size(info["display_aspect_ratio"], width, height)
+            background_w = (
+                math.ceil(max(width, height * info["display_aspect_ratio"]) / 2) * 2
+            )
+            background_h = (
+                math.ceil(max(height, width / info["display_aspect_ratio"]) / 2) * 2
+            )
+            graph.append(
+                "[joined]split=2[blur_src][fit_src];"
+                f"[blur_src]scale={background_w}:{background_h},setsar=1,"
+                f"crop={width}:{height},gblur=sigma=35[blur_bg];"
+                f"[fit_src]scale={cw}:{ch},setsar=1[blur_fg];"
+                "[blur_bg][blur_fg]overlay=(W-w)/2:(H-h)/2[framed]"
+            )
+            filters = ["null"]
+        elif mode in {"center_crop", "face_track"}:
+            framing_report = reframe.prepare_path(
+                source, info, ranges, settings, width, height, frame_ranges=frames
+            )
+            crop_w, crop_h = framing_report["crop"]
+            display_w, display_h = framing_report["source"]
+            square = abs(_sample_aspect(video_stream) - 1) <= 1e-6
+            # Anamorphic sources are first resampled to square display pixels.
+            prefilters = (
+                [] if square else [f"scale={display_w}:{display_h}", "setsar=1"]
+            )
+            if paced:
+                # Each range carries its own crop and zoom; see pacing.build_graph.
+                filters = ["null"]
+            else:
+                xexpr, xp = reframe.path_expression(
+                    framing_report["x"], framing_report["resets"]
+                )
+                yexpr, yp = reframe.path_expression(
+                    framing_report["y"], framing_report["resets"]
+                )
+                framing_report["expression_pieces"] = [xp, yp]
+                filters = prefilters + [
+                    f"crop={crop_w}:{crop_h}:x='{xexpr}':y='{yexpr}'",
+                    f"scale={width}:{height}",
+                    "setsar=1",
+                ]
+        pacing_report = None
+        if pacing_plan is not None:
+            pacing_report = pacing_plan(mode, width, height, framing_report)
+            if paced:
+                cropped = framing_report is not None
+                lines, pieces = pacing.build_graph(
+                    pacing_report,
+                    rate=rate,
+                    origin=_timeline(info)[1],
+                    out_size=(width, height) if cropped else pacing_report["window"],
+                    crop={
+                        "x": framing_report["x"],
+                        "y": framing_report["y"],
+                        "resets": framing_report["resets"],
+                        "size": framing_report["crop"],
+                    }
+                    if cropped
+                    else None,
+                    prefilters=prefilters if cropped else (),
+                    sar="1" if cropped else _sar_text(video_stream),
+                )
+                graph.extend(lines)
+                if cropped:
+                    framing_report["expression_pieces"] = pieces
         brand = settings["brand"]
         if settings["title"] or settings["lower_third"] or captions:
             _font(directory, brand["font"])
-        if settings["title"]:
+        if settings["title"] and layout is not None:
+            filters.append(
+                _platform_title(
+                    directory,
+                    settings["title"],
+                    settings,
+                    layout,
+                    animated=settings["title_animation"],
+                )
+            )
+            effects.append("title_fade" if settings["title_animation"] else "title")
+        elif settings["title"]:
             filters.append(
                 _draw_text(
                     directory,
@@ -605,7 +1603,27 @@ def export_video(source, segments, output, settings=None, captions=None):
                 )
             )
             effects.append("title_fade" if settings["title_animation"] else "title")
-        if settings["lower_third"]:
+        if settings["lower_third"] and layout is not None:
+            box = layout["boxes"]["lower_third"]
+            lower_y = box["y"] / height
+            filters.append(
+                f"drawbox=x={box['x']}:y={box['y']}:w={box['w']}:h={box['h']}"
+                f":color={brand['graphic_color']}@0.85:t=fill"
+            )
+            filters.append(
+                _platform_text(
+                    directory,
+                    settings["lower_third"],
+                    "lower.txt",
+                    brand["subtitle_color"],
+                    box["size"],
+                    box,
+                    brand["alignment"],
+                    box["text_y"],
+                )
+            )
+            effects.append("lower_third")
+        elif settings["lower_third"]:
             margin = brand["safe_margin"]
             lower_y = max(margin, min(brand["subtitle_y"] - 0.015, 1 - margin - 0.09))
             if captions:
@@ -641,34 +1659,128 @@ def export_video(source, segments, output, settings=None, captions=None):
                 )
             )
             effects.append("lower_third")
-        if captions:
-            filters.append(_ass(directory, captions, brand, width, height))
+        if caption_plan is not None:
+            (directory / "captions.ass").write_text(
+                caption_plan["script"], encoding="utf-8-sig"
+            )
+            filters.append("ass=filename=captions.ass:fontsdir=.")
+        elif captions:
+            filters.append(_ass(directory, events, brand, width, height, layout))
+        mix_path, mix_report = None, None
+        has_audio = info["has_audio"]
+        if settings["audio"]:
+            mix_ranges = ranges
+            mix_audio_graph = audio_graph
+            if constant_rate:
+                fps = float(Fraction(rate))
+                lengths = [
+                    math.ceil((end - start) * fps - 0.001) / fps
+                    for start, end in ranges
+                ]
+                mix_ranges = [
+                    (start, start + length)
+                    for (start, _), length in zip(ranges, lengths)
+                ]
+                program = sum(lengths)
+                # audio_graph already holds exact-length ranges from each first frame.
+            mix_path, mix_report = audio.prepare_mix(
+                source,
+                mix_audio_graph,
+                directory,
+                program,
+                settings["audio"],
+                mix_ranges,
+                has_audio=has_audio,
+                timeout=settings["timeout"],
+            )
+            if has_audio:
+                graph.append("[audio]anullsink")
+            graph.append("[1:a:0]anull[audio]")
+            has_audio = True
         normalization_method = "no audio"
-        if info["has_audio"] and settings["normalize_audio"]:
-            measured = _measure_loudness(source, audio_graph, directory, settings)
+        if has_audio and (settings["normalize_audio"] or mix_path):
+            measured = _measure_loudness(
+                mix_path or source,
+                ["[0:a:0]anull[audio]"] if mix_path else audio_graph,
+                directory,
+                settings,
+            )
+            limited = False
+            if mix_path and measured and not _linear_fits(measured, settings):
+                # Limiting lowers loudness too, so the ceiling is recomputed from each
+                # result, always limiting the original mix. If it never fits, the
+                # unlimited mix goes through dynamic loudnorm and is labelled so.
+                original, original_measured = mix_path, measured
+                gain = settings["loudness_lufs"] - measured["input_i"]
+                for attempt in range(3):
+                    # 0.3 dB under the limit leaves room for the residual linear gain.
+                    mix_path = audio.limit_peaks(
+                        original,
+                        directory,
+                        gain,
+                        settings["true_peak_db"] - 0.3,
+                        settings["timeout"],
+                        f"mix-limited-{attempt}.wav",
+                    )
+                    measured = _measure_loudness(
+                        mix_path, ["[0:a:0]anull[audio]"], directory, settings
+                    )
+                    if not measured or _linear_fits(measured, settings):
+                        break
+                    gain += settings["loudness_lufs"] - measured["input_i"]
+                if measured and _linear_fits(measured, settings):
+                    limited = True
+                else:
+                    mix_path, measured = original, original_measured
             loudnorm = (
                 f"loudnorm=I={settings['loudness_lufs']}:"
                 f"TP={settings['true_peak_db']}:LRA=11"
             )
             if measured:
+                linear = _linear_fits(measured, settings)
+                values = measured if linear else measured.get("loudnorm", measured)
                 loudnorm += (
-                    f":measured_I={measured['input_i']}"
-                    f":measured_TP={measured['input_tp']}"
-                    f":measured_LRA={measured['input_lra']}"
-                    f":measured_thresh={measured['input_thresh']}"
-                    f":offset={measured['target_offset']}:linear=true"
+                    f":measured_I={values['input_i']}"
+                    f":measured_TP={values['input_tp']}"
+                    f":measured_LRA={values['input_lra']}"
+                    f":measured_thresh={values['input_thresh']}"
+                    f":offset={values['target_offset']}:linear=true"
                 )
-                normalization_method = "two-pass measured loudnorm"
+                if not linear:
+                    normalization_method = "dynamic loudnorm (linear gain would exceed the true-peak limit)"
+                elif limited:
+                    normalization_method = (
+                        "two-pass measured loudnorm (true-peak limited)"
+                    )
+                else:
+                    normalization_method = "two-pass measured loudnorm"
             else:
                 normalization_method = "single-pass dynamic loudnorm"
-            graph.append(
-                f"[audio]{loudnorm},aresample=48000,"
-                f"atrim=duration={program:.6f}[normalized]"
-            )
-        elif info["has_audio"]:
+            normalized_at = len(graph)
+            graph.append(None)
+        elif has_audio:
             normalization_method = "disabled"
-        graph.append("[joined]" + ",".join(filters) + "[video]")
-        (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
+        if timed is not None and timed_rate:
+            # Frames carry their source times; place each on the nearest slot
+            # of the output grid here, after crops that count joined frames.
+            # The encoder would otherwise round and push colliding frames. The
+            # picture then holds exactly as many frames as the sound lasts.
+            output_rate = timed_rate
+            output_frames = round(
+                Fraction(sum(item[4] for item in timed), sample_rate)
+                * Fraction(output_rate)
+            )
+            filters.append(
+                f"fps={output_rate},tpad=stop_mode=clone:stop=2,"
+                f"trim=end_frame={output_frames}"
+            )
+            if framing_report is not None:
+                framing_report["output_frames"] = output_frames
+        graph.append(
+            ("[framed]" if mode == "blur_fill" else "[joined]")
+            + ",".join(filters)
+            + "[video]"
+        )
         temporary = directory / ("render" + output.suffix)
         args = [
             "ffmpeg",
@@ -681,6 +1793,7 @@ def export_video(source, segments, output, settings=None, captions=None):
             "file",
             "-i",
             str(source),
+            *(["-protocol_whitelist", "file", "-i", str(mix_path)] if mix_path else []),
             "-filter_complex_threads",
             "2",
             "-/filter_complex",
@@ -688,10 +1801,12 @@ def export_video(source, segments, output, settings=None, captions=None):
             "-map",
             "[video]",
         ]
-        if info["has_audio"]:
+        if has_audio:
             args += [
                 "-map",
-                "[normalized]" if settings["normalize_audio"] else "[audio]",
+                "[normalized]"
+                if settings["normalize_audio"] or mix_path
+                else "[audio]",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -718,28 +1833,101 @@ def export_video(source, segments, output, settings=None, captions=None):
             args += ["-fps_mode", "cfr", "-r", rate]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
-        _render_graph(
-            args + [str(temporary)], cwd=directory, timeout=settings["timeout"]
-        )
+        delivered_peak, ceiling = None, None
+        normalized = has_audio and (settings["normalize_audio"] or bool(mix_path))
+        for attempt in range(DELIVERY_PEAK_ATTEMPTS):
+            if normalized:
+                line = f"[audio]{loudnorm},aresample=48000,"
+                if ceiling is not None:
+                    # Resampling and AAC encoding can push peaks over the limit
+                    # loudnorm met; an oversampled limiter keeps the delivery under it.
+                    line += _peak_limiter(ceiling) + ","
+                graph[normalized_at] = (
+                    line + f"atrim=duration={program:.6f}[normalized]"
+                )
+            (directory / "filters.txt").write_text(";\n".join(graph), encoding="utf-8")
+            temporary.unlink(missing_ok=True)
+            _render_graph(
+                args + [str(temporary)], cwd=directory, timeout=settings["timeout"]
+            )
+            if not normalized:
+                break
+            delivered_peak = _true_peak(temporary, settings["timeout"])
+            if delivered_peak is None or delivered_peak <= settings["true_peak_db"]:
+                break
+            if attempt + 1 < DELIVERY_PEAK_ATTEMPTS:
+                excess = delivered_peak - settings["true_peak_db"]
+                ceiling = (
+                    (settings["true_peak_db"] if ceiling is None else ceiling)
+                    - excess
+                    - DELIVERY_PEAK_MARGIN
+                )
         result = _probe(temporary, settings["timeout"])
         result.pop("streams")
         os.link(temporary, output)
+        if script_output is not None and captions:
+            os.link(directory / "captions.ass", script_output)
+    extra = {"audio_mix": mix_report} if mix_report else {}
+    if pacing_report is not None:
+        extra["pacing"] = pacing_report
+    if layout is not None:
+        extra.update(
+            {
+                "platform": settings["platform"],
+                "final_resolution": settings["final_resolution"],
+                "safe_zone_layout": layout,
+            }
+        )
+    source_video = _source_video(info)
+    content, factor = reframe.content_upscale(source_video, width, height, mode)
+    if framing_report is not None:
+        if factor > 1.0001:
+            framing_report["warnings"].append(
+                f"Crop upscale factor {factor:.4f}; detail is interpolated, not recorded"
+            )
+        extra["framing"] = framing_report
+    elif mode == "blur_fill":
+        extra["framing"] = {
+            "mode": mode,
+            "background_upscale_factor": max(
+                width / source_video["width"], height / source_video["height"]
+            ),
+        }
     return {
         **result,
+        **extra,
         "output": str(output),
         "preset": settings["preset"],
         "aspect": settings["aspect"],
-        "fit": "pad",
-        "upscaled": min(width / info["width"], height / info["height"]) > 1.0001,
+        "fit": "pad"
+        if mode == "fit"
+        else "blur_fill"
+        if mode == "blur_fill"
+        else "crop",
+        "upscaled": factor > 1.0001,
+        "upscale_factor": factor,
+        "content_size": content,
         "source_resolution": [info["width"], info["height"]],
+        "source_video": source_video,
         "captions_burned": len(captions),
+        "caption_events": len(events),
+        **(
+            {
+                "caption_style": settings["caption_style"],
+                "caption_measurement": measure.method,
+            }
+            if animated
+            else {}
+        ),
         "effects": effects,
         "lower_third_y": lower_y,
         "expected_duration": duration,
         "audio_normalization": {
-            "enabled": info["has_audio"] and settings["normalize_audio"],
+            "enabled": has_audio and (settings["normalize_audio"] or bool(mix_path)),
             "target_lufs": settings["loudness_lufs"],
             "true_peak_db": settings["true_peak_db"],
+            "delivered_true_peak_db": delivered_peak,
+            "delivered_peak_ceiling_db": ceiling,
             "method": normalization_method,
         },
     }
@@ -761,7 +1949,11 @@ def make_cover(video, output, title="", settings=None, time=0):
     ) as temp:
         directory = Path(temp)
         filters = _fit_filter(info, width, height)
-        if title:
+        layout = platform_layout(settings, width, height, title=title)
+        if title and layout is not None:
+            _font(directory, settings["brand"]["font"])
+            filters.append(_platform_title(directory, title, settings, layout))
+        elif title:
             _font(directory, settings["brand"]["font"])
             filters.append(
                 _draw_text(
@@ -884,7 +2076,129 @@ def _signal_evidence(path):
     )
 
 
-def quality_report(video, settings=None, captions=None):
+def _frame_rate(info):
+    stream = next(
+        (s for s in info.get("streams", []) if s.get("codec_type") == "video"), {}
+    )
+    numerator, _, denominator = str(stream.get("avg_frame_rate") or "0/0").partition(
+        "/"
+    )
+    try:
+        rate = float(numerator) / float(denominator or 1)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return rate if math.isfinite(rate) and rate > 0 else None
+
+
+def _platform_checks(add, entry, info, settings, actual_resolution):
+    """Frame, length and frame-rate checks against the settings' profile."""
+    name = settings["platform"]
+    expected = list(_dimensions(info, settings))
+    add(
+        "platform_frame",
+        "pass" if expected == actual_resolution else "fail",
+        dict(
+            platform=name,
+            actual=actual_resolution,
+            expected=expected,
+            preset=settings["preset"],
+            final_resolution=settings["final_resolution"],
+            source=entry["frame"]["source"],
+        ),
+    )
+    limit = entry["max_duration_s"]["value"]
+    recommended = (entry["recommended_max_s"] or {}).get("value")
+    duration = info["duration"]
+    add(
+        "platform_duration",
+        "fail"
+        if limit is not None and duration > limit
+        else "warning"
+        if recommended is not None and duration > recommended
+        else "pass",
+        dict(
+            platform=name,
+            actual=duration,
+            max_seconds=limit,
+            recommended_max_seconds=recommended,
+            source=entry["max_duration_s"]["source"],
+        ),
+    )
+    source = settings["source_video"]
+    if source is None:
+        add(
+            "platform_upscale",
+            "skip",
+            dict(platform=name, reason="Source video size was not supplied"),
+        )
+    else:
+        content, factor = reframe.content_upscale(
+            source, *actual_resolution, settings.get("framing", "fit")
+        )
+        add(
+            "platform_upscale",
+            "warning" if factor > 1.0001 else "pass",
+            dict(
+                platform=name,
+                source=[source["width"], source["height"]],
+                content=content,
+                **(
+                    {"crop": settings["framing_report"]["crop"]}
+                    if settings.get("framing_report")
+                    else {}
+                ),
+                frame=actual_resolution,
+                factor=factor,
+                upscaled=factor > 1.0001,
+                preset=settings["preset"],
+                final_resolution=settings["final_resolution"],
+                meaning="the fitted picture is larger than the source pixel grid "
+                "(display orientation); detail is interpolated, not recorded",
+            ),
+        )
+
+
+def _platform_fps(add, entry, info, settings, deltas):
+    """Frame-rate check; NTSC 30000/1001 meets a 30 fps minimum."""
+    minimum = entry["min_fps"]["value"]
+    rate = _frame_rate(info)
+    slowest = variable = None
+    if deltas:
+        typical = sorted(deltas)[len(deltas) // 2]
+        slowest = 1 / max(deltas)
+        variable = (
+            max(deltas) > typical * 1.05 + 0.0005
+            or min(deltas) < typical * 0.95 - 0.0005
+        )
+    threshold = None if minimum is None else minimum * 1000 / 1001 - 0.001
+    low = threshold is not None and (
+        rate is None or rate < threshold or bool(variable) and slowest < threshold
+    )
+    add(
+        "platform_fps",
+        "skip" if minimum is None else "warning" if low else "pass",
+        dict(
+            platform=settings["platform"],
+            actual=rate,
+            min_fps=minimum,
+            threshold_fps=threshold,
+            min_instantaneous_fps=slowest,
+            variable_frame_rate=variable,
+            method="average frame rate, and for variable-rate video the "
+            "slowest frame interval; NTSC 30000/1001 counts as 30",
+            source=entry["min_fps"]["source"],
+        ),
+    )
+
+
+def quality_report(
+    video,
+    settings=None,
+    captions=None,
+    caption_words=None,
+    caption_script=None,
+    longform=None,
+):
     """Decode all frames; findings are heuristics, never editorial certification."""
     from statistics import median
 
@@ -953,6 +2267,11 @@ def quality_report(video, settings=None, captions=None):
         else "pass",
         dict(actual=info["duration"], expected=expected, tolerance_seconds=0.12),
     )
+    entry = _platform_entry(settings)
+    if entry is not None:
+        _platform_checks(add, entry, info, settings, actual_resolution)
+    deltas = None
+    points = []
     with tempfile.TemporaryDirectory(
         prefix=".postproduction-qa-", dir=os.environ.get("TMPDIR")
     ) as temp:
@@ -1075,8 +2394,26 @@ def quality_report(video, settings=None, captions=None):
             KeyError,
         ) as error:
             add("frame_timing", "fail", {"error": str(error)})
+    if settings.get("framing") == "face_track" or settings.get("framing_report"):
+        reframe.quality_checks(
+            add,
+            settings.get("framing_report"),
+            len(points) if deltas is not None else None,
+            report_upscale=entry is None,
+        )
+    if settings.get("pacing"):
+        pacing.quality_checks(
+            add,
+            settings.get("pacing_report"),
+            settings["pacing"],
+            settings.get("pacing_words"),
+        )
+    if entry is not None:
+        _platform_fps(add, entry, info, settings, deltas)
     if not info["has_audio"]:
         add("audio", "skip", {"reason": "No audio stream; no silence added"})
+        if entry is not None:
+            add("platform_loudness", "skip", {"reason": "No audio stream"})
     else:
         try:
             analysis = _run(
@@ -1141,7 +2478,7 @@ def quality_report(video, settings=None, captions=None):
                 integrated is not None
                 and abs(integrated - settings["loudness_lufs"]) > 1
                 or peak is not None
-                and peak > settings["true_peak_db"] + 0.3
+                and peak > settings["true_peak_db"]
             )
             add(
                 "audio_loudness",
@@ -1154,6 +2491,69 @@ def quality_report(video, settings=None, captions=None):
                     tolerance_lu=1,
                 ),
             )
+            if entry is not None:
+                target = entry["loudness"]
+                off_target = (
+                    integrated is None
+                    or abs(integrated - settings["loudness_lufs"]) > 1
+                    or peak is not None
+                    and peak > settings["true_peak_db"]
+                )
+                add(
+                    "platform_loudness",
+                    "warning" if off_target else "pass",
+                    dict(
+                        platform=settings["platform"],
+                        integrated_lufs=integrated,
+                        target_lufs=settings["loudness_lufs"],
+                        true_peak_dbfs=peak,
+                        target_peak_db=settings["true_peak_db"],
+                        tolerance_lu=1,
+                        source=target["source"],
+                    ),
+                )
+            if settings["audio_mix"] is not None:
+                music = settings["audio_mix"].get("music") or {}
+                duck = music.get("ducking")
+                depth = duck.get("depth_db") if duck else None
+                add(
+                    "music",
+                    "skip"
+                    if not music.get("present")
+                    else "warning"
+                    if duck
+                    and (
+                        depth is None
+                        or depth < max(12, (duck.get("requested_db") or 12) - 0.5)
+                    )
+                    else "pass",
+                    dict(
+                        present=bool(music.get("present")),
+                        depth_db=depth,
+                        ducking=duck,
+                        stage="render",
+                        method="render-stage evidence: RMS of the rendered music stem before "
+                        "final normalization and encoding; not measured on the delivered "
+                        "file, whose final mix cannot isolate arbitrary music",
+                    ),
+                )
+                mix_issue = (
+                    integrated is None
+                    or abs(integrated - settings["loudness_lufs"]) > 0.5
+                    or peak is not None
+                    and peak > settings["true_peak_db"]
+                )
+                add(
+                    "mix_loudness",
+                    "warning" if mix_issue else "pass",
+                    dict(
+                        integrated_lufs=integrated,
+                        target_lufs=settings["loudness_lufs"],
+                        true_peak_dbfs=peak,
+                        target_peak_db=settings["true_peak_db"],
+                        tolerance_lu=0.5,
+                    ),
+                )
             silences = _intervals(analysis, "silence", info["duration"])
             add(
                 "audio_gaps",
@@ -1171,17 +2571,37 @@ def quality_report(video, settings=None, captions=None):
                 {"error": str(error), "stderr": getattr(error, "stderr", "")},
             )
     issues = []
+    layout = None
     try:
-        valid = _captions(captions, info["duration"])
+        if entry is not None:
+            layout = platform_layout(
+                settings, info["width"], info["height"], captions=bool(captions)
+            )
+        # Frame-aligned renders can end up to half a frame before the edited
+        # length the cues were timed against; allow one frame.
+        valid = _captions(captions, info["duration"] + 1 / (_frame_rate(info) or 30))
         brand = settings["brand"]
         size = brand["subtitle_size"] * min(info["width"], info["height"]) / 1080
         available = info["width"] * (1 - 2 * brand["safe_margin"])
+        if entry is not None:
+            zone = entry["safe_zone"]
+            available = info["width"] * (
+                1
+                - max(zone["left"], brand["safe_margin"])
+                - max(zone["right"], brand["safe_margin"])
+            )
         for index, item in enumerate(valid):
             cps = len(item["text"]) / (item["end"] - item["start"])
             estimated_lines = sum(
                 max(1, math.ceil(len(line) * size / available))
                 for line in item["text"].split("\n")
             )
+            if layout is not None:
+                # Platform renders split long cues into two-line events.
+                estimated_lines = max(
+                    len(event["text"].split("\n"))
+                    for event in platform_caption_cues([item], layout)
+                )
             if (
                 len(item["text"]) > settings["max_caption_chars"]
                 or cps > settings["max_caption_cps"]
@@ -1220,6 +2640,108 @@ def quality_report(video, settings=None, captions=None):
             method="validated normalized positions; renderer auto-fits title; caption estimates above",
         ),
     )
+    if entry is not None:
+        try:
+            layout = platform_layout(
+                settings, info["width"], info["height"], captions=bool(captions)
+            )
+            findings = safe_zone_findings(
+                layout["boxes"], entry["safe_zone"], info["width"], info["height"]
+            )
+            add(
+                "safe_zone",
+                "fail" if findings else "pass",
+                dict(
+                    platform=settings["platform"],
+                    zone={
+                        side: entry["safe_zone"][side]
+                        for side in ("top", "bottom", "left", "right")
+                    },
+                    boxes=layout["boxes"],
+                    findings=findings,
+                    source=entry["safe_zone"]["source"],
+                    method="render geometry of title, lower third and caption band; "
+                    "glyph pixels are not inspected",
+                ),
+            )
+        except ValueError as error:
+            add("safe_zone", "fail", {"error": str(error)})
+    if settings["caption_style"] != "classic" and captions:
+        from cutroom import captions as animated_captions
+
+        words = (
+            caption_words
+            if caption_words is not None
+            else animated_captions.words_from_cues(captions)
+        )
+        if caption_script is not None:
+            script = _path(caption_script).read_text(encoding="utf-8-sig")
+        else:
+            script = animated_captions.build(
+                words,
+                settings,
+                info["width"],
+                info["height"],
+                layout,
+                frame_rate=str(_frame_rate(info) or 30),
+                duration=info["duration"],
+            )["script"]
+        parsed = animated_captions.parse_script(script)
+        # A script made for another frame size (a preview's script checked
+        # against a final) cannot vouch for this video's timing or placement.
+        size_error = (
+            None
+            if parsed["play_res"] == (info["width"], info["height"])
+            else "Caption script was made for frame size {}x{}, not this video's "
+            "{}x{}".format(*parsed["play_res"], info["width"], info["height"])
+        )
+        timing = animated_captions.timing_report(parsed, words, points)
+        status = timing.pop("status")
+        if size_error:
+            status = "fail"
+            timing["error"] = size_error
+        timing["script"] = "render" if caption_script is not None else "reconstructed"
+        add("caption_timing", status, timing)
+        measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
+        boxes = animated_captions.event_boxes(parsed, measure)
+        zone = (
+            entry["safe_zone"]
+            if entry
+            else {
+                side: settings["brand"]["safe_margin"]
+                for side in ("top", "bottom", "left", "right")
+            }
+        )
+        findings = safe_zone_findings(
+            {str(i): box for i, box in enumerate(boxes)},
+            zone,
+            info["width"],
+            info["height"],
+        )
+        if size_error:
+            findings = [dict(error=size_error)]
+        add(
+            "caption_bounds",
+            "fail" if findings else "pass",
+            dict(
+                boxes=boxes,
+                findings=findings,
+                measurement=measure.method,
+                method="ASS event positions and measured glyph bounds, not decoded pixels",
+            ),
+        )
+    if longform is not None:
+        # Long-form YouTube: chapters, subtitles file, thumbnail, end screen.
+        from .longform import quality_checks
+
+        rate = _frame_rate(info)
+        quality_checks(
+            add,
+            video,
+            info,
+            {**longform, "frame_interval": 1 / rate if rate else 1 / 30},
+            captions,
+        )
     return dict(
         checks=checks,
         passed=all(c["status"] in ("pass", "skip") for c in checks),

@@ -1,0 +1,84 @@
+# Changelog
+
+## 0.2.0 — unreleased
+
+Creator formats, a redesigned Studio and faster renders.
+
+### Platform formats
+- Profiles for Instagram Reels, YouTube Shorts, TikTok and YouTube with sourced,
+  dated specifications, and quality checks per platform: frame, frame rate,
+  length limit, loudness and safe-zone placement.
+- Derived projects: one recording becomes a version per platform, each with its
+  own settings and approval.
+
+### Editing and style
+- Animated word captions (highlight, pop, one word) shown from each word's
+  exact frame, inside the platform's safe zone; SRT and VTT for long videos.
+- Reframing for tall and square videos: blurred fill, centre crop or a crop that
+  follows the speaker's face, with manual keyframes.
+- Pacing: punch-ins on cuts, slow push-ins, a maximum pause and crossfade or dip
+  transitions.
+- Music you supply, lowered under speech; voice clean-up; platform loudness.
+- Removed words are cut in the pause beside them, not inside a sound.
+
+### Finding and delivering
+- Clip finder: whole-sentence clips from long recordings with explained scores;
+  a picked clip becomes its own project.
+- Long-form YouTube: chapters, a 16:9 thumbnail, subtitles and end-screen space.
+- Delivery packages: a folder per platform with video, cover, post text and a
+  checksum manifest. Nothing is posted.
+- Send to the cloud: copy an approved export to Google Drive or another rclone
+  remote from Export, with progress, cancel and a check of the copy.
+- Record with OBS: start and stop OBS Studio recording from the home page and
+  edit the recording.
+
+### Studio in Hermes Desktop
+- Redesigned around four steps (Edit, Style, Sound, Export) with autosave, a
+  player with live captions, poster frames and a chat card for finished videos.
+- J, K and L playback keys; Browse opens subfolders.
+- Plain-sentence errors, including the name of an unsupported setting after an
+  update.
+- New logo, app icon and brand guide (`docs/brand/`).
+
+### Speech
+- Recordings without speech (music, noise) give no words instead of invented
+  ones; segments Whisper is unsure of are dropped; transcripts are repeatable.
+- Model files are found in the Cutroom models folder when a project names none.
+
+### Performance and fixes
+- Every cut used to read the whole recording, so render time grew with the
+  square of the number of cuts. Cuts now read only their part: 557 cuts of a
+  17-minute talk render in about 6 minutes at 1080p (see
+  `docs/performance.md`).
+- Sound and picture stay in sync on FFmpeg 7.1, on recordings that lost frames
+  and on sound that starts late.
+- The chat gets three tools by default; the older plan-file tools are opt-in.
+- Face track no longer pans slowly after a camera change the scene detector
+  missed: when the face is found again far away after a gap, the crop moves to
+  it at once; a new shot starts where its first face is.
+- The original player shows the Face track crop, not the centre; a person can
+  switch Original, Preview and Final while a video is loading.
+- Review explains caption problems (what, where, how to fix) and the cloud
+  list uses readable file names.
+
+### Safety
+- Try again repeats local jobs only, never a cloud copy and never with consent.
+- In a chat on Telegram, Discord and similar services, finished renders are not
+  shared automatically: the agent asks first, because sharing uploads the file
+  there.
+- An OBS request has one time budget; the OBS password never appears in an
+  error; signed links in cloud errors lose their query string.
+- Scrubbing or choosing a destination keeps an approval; a real edit clears it.
+
+### Known limits
+- `/obs` status takes any local port and its error tells a closed port from
+  another failure, so a local program could use it to probe local ports.
+- In a Hermes profile other than the one the gateway started with, plugin
+  requests go through a separate plugin host; there, loading a video into the
+  player measured about 0.8 MB/s (about 2.5 minutes for a 34 MB preview).
+
+## 0.1.1
+
+Catalog review fixes: interpreter selection, child process environment
+allowlist, legacy tools confined to the workspace.
+

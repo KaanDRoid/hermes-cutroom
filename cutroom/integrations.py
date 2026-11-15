@@ -2,7 +2,6 @@
 
 import hashlib
 import http.client
-import importlib.util
 import ipaddress
 import json
 import math
@@ -85,7 +84,18 @@ def _find_executable(name):
     if executable is not None:
         return executable
     sibling = Path(sys.executable).parent / (name + (".exe" if os.name == "nt" else ""))
-    return str(sibling) if sibling.is_file() else None
+    if sibling.is_file():
+        return str(sibling)
+    if name == "rclone" and os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        # A user-scope WinGet install, when Hermes started before it was added
+        # to PATH. Fixed location only; never a path from project data.
+        packages = (
+            Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Packages"
+        )
+        found = sorted(packages.glob("Rclone.Rclone_*/rclone-v*/rclone.exe"))
+        if found:
+            return str(found[-1])
+    return None
 
 
 def capability_report() -> dict:
@@ -98,10 +108,6 @@ def capability_report() -> dict:
             "path": executable,
             "live_verified": False,
         }
-    result["obsws_python"] = {
-        "available": importlib.util.find_spec("obsws_python") is not None,
-        "live_verified": False,
-    }
     return result
 
 
@@ -686,32 +692,176 @@ def _run(argv, *, timeout=PROCESS_TIMEOUT):
         ) from None
 
 
-def upload_rclone(local_file, remote_path, confirmed=False) -> dict:
-    """Copy to an explicitly approved configured remote; verify the exact object."""
-    _consent(confirmed)
-    local = _local(local_file, exists=True)
-    if not isinstance(remote_path, str) or not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}:[A-Za-z0-9][A-Za-z0-9._ /-]*", remote_path
-    ):
+def _rclone_env():
+    return child_env(python=False, forward=NETWORK, prefixes=("RCLONE_",))
+
+
+def list_remotes() -> list:
+    """Remotes configured in rclone (name and type); none when rclone is absent."""
+    executable = _find_executable("rclone")
+    if executable is None:
+        return []
+    response = _run([executable, "listremotes", "--long"], timeout=30)
+    remotes = []
+    for line in response.stdout.splitlines():
+        name, _, kind = line.partition(":")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", name.strip()):
+            remotes.append({"name": name.strip(), "type": kind.strip()})
+    return remotes
+
+
+def _remote_target(remote_path):
+    """Split ``remote:folder/file`` and refuse anything but a plain relative path.
+
+    Folder and file names may use any letters (project names are often not
+    English); control characters, backslashes, colons and dot segments are
+    refused.
+    """
+    if not isinstance(remote_path, str) or ":" not in remote_path:
         raise ValueError("Use a configured remote name and a relative object path")
     remote, key = remote_path.split(":", 1)
     if (
-        len(remote) == 1
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", remote)
+        or not key
+        or len(key) > 1000
+        or key.startswith("/")
         or key.endswith("/")
-        or any(part in ("", ".", "..") for part in key.split("/"))
+        or any(ord(c) < 32 or c in '\\:*?"<>|' for c in key)
+        or any(part.strip() in ("", ".", "..") for part in key.split("/"))
     ):
-        raise ValueError("Invalid remote object path")
+        raise ValueError("Use a configured remote name and a relative object path")
+    return remote, key
+
+
+def _upload_problem(detail):
+    """One plain sentence for a failed copy; provider JSON details are dropped."""
+    text = (detail or "").split("\nDetails:", 1)[0].strip()
+    lowered = text.lower()
+    if "quota exceeded" in lowered or "ratelimitexceeded" in lowered.replace(" ", ""):
+        return (
+            "Google Drive is limiting requests from rclone's shared app. Wait a "
+            "minute and send again; for steady use, give rclone its own client ID "
+            "(rclone.org/drive/#making-your-own-client-id). Nothing was verified as sent"
+        )
+    # Signed URLs carry tokens in their query string; never keep them.
+    text = re.sub(r"(https?://[^\s?\"']+)\?[^\s\"']*", r"\1?…", text)
+    text = re.sub(r"\s+", " ", text)[:240]
+    return (
+        f"Upload failed: {text}. Nothing was verified as sent"
+        if text
+        else ("Upload failed. Nothing was verified as sent")
+    )
+
+
+def _copy_with_progress(argv, *, timeout, progress, cancelled):
+    """Run ``rclone copyto`` and report its byte progress; stop on cancel."""
+    import queue
+
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+            env=_rclone_env(),
+        )
+    except OSError:
+        raise RuntimeError(
+            "rclone could not start; no success has been verified"
+        ) from None
+    lines = queue.Queue()
+
+    def read():
+        for line in process.stderr:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    deadline = time.monotonic() + timeout
+    problem = None
+    finished = False
+
+    def stop():
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    while not finished:
+        if cancelled is not None and cancelled():
+            stop()
+            raise InterruptedError("Upload cancelled")
+        if time.monotonic() > deadline:
+            stop()
+            raise RuntimeError("Upload timed out; no success has been verified")
+        try:
+            line = lines.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if line is None:
+            finished = True
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("level") in ("error", "critical") and entry.get("msg"):
+            problem = str(entry["msg"]).strip()[:300]
+        figures = entry.get("stats")
+        if progress is not None and isinstance(figures, dict):
+            done, total = figures.get("bytes"), figures.get("totalBytes")
+            if isinstance(done, int) and isinstance(total, int) and total > 0:
+                progress(min(1.0, done / total))
+    if process.wait(timeout=30) != 0:
+        raise RuntimeError(_upload_problem(problem))
+
+
+def upload_rclone(
+    local_file,
+    remote_path,
+    confirmed=False,
+    *,
+    progress=None,
+    cancelled=None,
+    remote_type=None,
+) -> dict:
+    """Copy to an explicitly approved configured remote; verify the exact object.
+
+    Never replaces a file already at the destination. ``progress`` receives
+    0..1 while bytes move; ``cancelled`` is polled and stops rclone. For
+    Google Drive remotes the result carries a link that only the owner of the
+    Drive can open: nothing is shared.
+    """
+    _consent(confirmed)
+    local = _local(local_file, exists=True)
+    remote, key = _remote_target(remote_path)
     executable = _executable("rclone")
-    _run(
+    size = local.stat().st_size
+    # At least 5 minutes, and enough for 100 kB/s; never more than 6 hours.
+    timeout = min(6 * 3600, max(300, size / 100_000))
+    _copy_with_progress(
         [
             executable,
             "copyto",
             "--immutable",
             "--ignore-existing",
+            "--use-json-log",
+            "--stats",
+            "1s",
+            "--stats-log-level",
+            "NOTICE",
+            # rclone backs off and retries when a provider limits the rate.
             "--retries",
-            "1",
+            "3",
             "--low-level-retries",
-            "1",
+            "10",
             "--contimeout",
             "10s",
             "--timeout",
@@ -719,69 +869,218 @@ def upload_rclone(local_file, remote_path, confirmed=False) -> dict:
             "--",
             str(local),
             remote_path,
-        ]
-    )
-    response = _run(
-        [
-            executable,
-            "lsjson",
-            "--stat",
-            "--hash",
-            "--retries",
-            "1",
-            "--low-level-retries",
-            "1",
-            "--contimeout",
-            "10s",
-            "--timeout",
-            "30s",
-            "--",
-            remote_path,
         ],
-        timeout=60,
+        timeout=timeout,
+        progress=progress,
+        cancelled=cancelled,
     )
+    try:
+        # Listing right after a copy can meet the same rate limit: let rclone retry.
+        response = _run(
+            [
+                executable,
+                "lsjson",
+                "--stat",
+                "--hash",
+                "--low-level-retries",
+                "10",
+                "--contimeout",
+                "10s",
+                "--timeout",
+                "30s",
+                "--",
+                remote_path,
+            ],
+            timeout=120,
+        )
+    except RuntimeError as error:
+        how = "timed out" if "timed out" in str(error) else "failed"
+        raise RuntimeError(
+            f"The file was sent, but checking it in the cloud {how}. Look in the "
+            "folder before sending again"
+        ) from None
     try:
         metadata = json.loads(response.stdout)
         if (
             metadata.get("IsDir") is not False
-            or metadata.get("Size") != local.stat().st_size
+            or metadata.get("Size") != size
             or metadata.get("Name") != key.rsplit("/", 1)[-1]
         ):
             raise ValueError
+        # rclone names hashes in lowercase ("md5"); accept the older spelling too.
+        hashes = {
+            re.sub(r"[^a-z0-9]", "", str(name).lower()): value
+            for name, value in (metadata.get("Hashes") or {}).items()
+        }
         checked = []
         for name, algorithm in (
             ("MD5", "md5"),
             ("SHA-1", "sha1"),
             ("SHA-256", "sha256"),
         ):
-            digest = metadata.get("Hashes", {}).get(name)
+            digest = hashes.get(algorithm)
             if digest:
-                if digest.lower() != _hash_file(local, algorithm):
+                if str(digest).lower() != _hash_file(local, algorithm):
                     raise ValueError
                 checked.append(name)
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError(
             "Remote object verification failed; upload may have occurred"
         ) from None
+    file_id = metadata.get("ID")
+    link = (
+        f"https://drive.google.com/file/d/{file_id}/view"
+        if remote_type == "drive"
+        and isinstance(file_id, str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{10,200}", file_id)
+        else None
+    )
     return {
         "remote": remote_path,
         "size": metadata["Size"],
         "verified": bool(checked),
         "verification": "hash" if checked else "metadata_only",
         "hash_verified": checked,
+        "link": link,
         "external_write": True,
     }
 
 
-class _Password(str):
-    def __str__(self):
-        return "[redacted]"
+class _ObsSession:
+    """A minimal obs-websocket v5 client (JSON over WebSocket) using the stdlib.
 
-    def __repr__(self):
-        return "'[redacted]'"
+    Protocol: https://github.com/obsproject/obs-websocket/blob/master/docs/generated/protocol.md
+    Hello (op 0) -> Identify (op 1, SHA-256 auth) -> Identified (op 2), then
+    Request (op 6) / RequestResponse (op 7). Events are not subscribed.
+    """
 
-    def __format__(self, spec):
-        return format("[redacted]", spec)
+    def __init__(self, host, port, password, timeout=5, budget=15):
+        import base64
+
+        # One deadline for the whole session: something else on the port that
+        # keeps sending must not hold the request open.
+        self.deadline = time.monotonic() + budget
+        self.timeout = timeout
+        self.sock = socket.create_connection((host, port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall(
+            (
+                f"GET / HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\n"
+                f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                "Sec-WebSocket-Protocol: obswebsocket.json\r\n\r\n"
+            ).encode()
+        )
+        response = b""
+        while b"\r\n\r\n" not in response:
+            if time.monotonic() > self.deadline:
+                raise ConnectionError("OBS did not answer in time")
+            chunk = self.sock.recv(4096)
+            if not chunk or len(response) > 65536:
+                raise ConnectionError("No WebSocket handshake")
+            response += chunk
+        head, _, self.buffer = response.partition(b"\r\n\r\n")
+        accept = base64.b64encode(
+            hashlib.sha1(
+                (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+            ).digest()
+        ).decode()
+        if not head.startswith(b"HTTP/1.1 101") or accept.encode() not in head:
+            raise ConnectionError("Not an obs-websocket server")
+        hello = self._message()
+        if hello.get("op") != 0:
+            raise ConnectionError("Unexpected first message")
+        identify = {"rpcVersion": 1, "eventSubscriptions": 0}
+        auth = hello.get("d", {}).get("authentication")
+        if auth:
+            if not password:
+                raise PermissionError("OBS asks for a password")
+            secret = base64.b64encode(
+                hashlib.sha256((password + auth["salt"]).encode()).digest()
+            )
+            identify["authentication"] = base64.b64encode(
+                hashlib.sha256(secret + auth["challenge"].encode()).digest()
+            ).decode()
+        self._send({"op": 1, "d": identify})
+        if self._message().get("op") != 2:
+            raise ConnectionError("Not identified")
+
+    def _read(self, size):
+        while len(self.buffer) < size:
+            left = self.deadline - time.monotonic()
+            if left <= 0:
+                raise ConnectionError("OBS did not answer in time")
+            self.sock.settimeout(min(self.timeout, left))
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("OBS closed the connection")
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:size], self.buffer[size:]
+        return data
+
+    def _frame(self):
+        first, second = self._read(2)
+        length = second & 0x7F
+        if length == 126:
+            length = int.from_bytes(self._read(2), "big")
+        elif length == 127:
+            length = int.from_bytes(self._read(8), "big")
+        if length > 16 * 1024 * 1024:
+            raise ConnectionError("Message too large")
+        mask = self._read(4) if second & 0x80 else None
+        payload = self._read(length)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        return first & 0x0F, payload
+
+    def _message(self):
+        while True:
+            opcode, payload = self._frame()
+            if opcode == 8:
+                code = int.from_bytes(payload[:2], "big") if len(payload) >= 2 else 0
+                if code == 4009:
+                    raise PermissionError("OBS refused the password")
+                raise ConnectionError(f"OBS closed the connection ({code})")
+            if opcode == 9:  # ping
+                self._send_raw(10, payload)
+                continue
+            if opcode == 1:
+                return json.loads(payload)
+
+    def _send_raw(self, opcode, data):
+        mask = os.urandom(4)
+        header = bytes([0x80 | opcode])
+        if len(data) < 126:
+            header += bytes([0x80 | len(data)])
+        elif len(data) < 65536:
+            header += bytes([0x80 | 126]) + len(data).to_bytes(2, "big")
+        else:
+            header += bytes([0x80 | 127]) + len(data).to_bytes(8, "big")
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(header + mask + masked)
+
+    def _send(self, message):
+        self._send_raw(1, json.dumps(message).encode())
+
+    def request(self, kind):
+        request_id = uuid.uuid4().hex
+        self._send({"op": 6, "d": {"requestType": kind, "requestId": request_id}})
+        while True:
+            message = self._message()
+            data = message.get("d", {})
+            if message.get("op") == 7 and data.get("requestId") == request_id:
+                status = data.get("requestStatus", {})
+                if not status.get("result"):
+                    raise RuntimeError(status.get("comment") or f"OBS refused {kind}")
+                return data.get("responseData") or {}
+
+    def close(self):
+        try:
+            self._send_raw(8, (1000).to_bytes(2, "big"))
+        except OSError:
+            pass
+        self.sock.close()
 
 
 def obs_record(
@@ -799,40 +1098,51 @@ def obs_record(
         raise ValueError("Invalid OBS port")
     if password is not None and not isinstance(password, str):
         raise ValueError("Password must be supplied as text by the credential provider")
-    try:
-        import obsws_python
-    except ImportError:
-        raise RuntimeError("Install the optional obsws-python dependency") from None
-    client = None
+    session = None
     output = None
     try:
-        client = obsws_python.ReqClient(
-            host=host, port=port, password=_Password(password or ""), timeout=5
-        )
+        session = _ObsSession(host, port, password)
         if action == "start":
-            client.start_record()
+            session.request("StartRecord")
         elif action == "stop":
-            output = client.stop_record().output_path
-        status = client.get_record_status()
-        active = bool(status.output_active)
+            output = session.request("StopRecord").get("outputPath")
+        status = session.request("GetRecordStatus")
+        active = bool(status.get("outputActive"))
+        if action in ("start", "stop"):
+            # OBS answers first and starts or stops the output a moment later.
+            deadline = time.monotonic() + 10
+            while active != (action == "start") and time.monotonic() < deadline:
+                time.sleep(0.2)
+                status = session.request("GetRecordStatus")
+                active = bool(status.get("outputActive"))
         if action in ("start", "stop") and active != (action == "start"):
             raise RuntimeError("OBS did not reach the requested recording state")
         result = {
             "action": action,
             "recording": active,
-            "paused": bool(status.output_paused),
-            "timecode": status.output_timecode,
+            "paused": bool(status.get("outputPaused")),
+            "timecode": status.get("outputTimecode"),
         }
+    except PermissionError:
+        raise RuntimeError(
+            "OBS refused the password. Copy it from OBS: Tools > WebSocket Server "
+            "Settings > Show Connect Info"
+        ) from None
+    except (ConnectionRefusedError, socket.timeout, TimeoutError):
+        raise RuntimeError(
+            "Open OBS and turn on its WebSocket server: Tools > WebSocket Server "
+            "Settings > Enable WebSocket server"
+        ) from None
+    except RuntimeError:
+        raise
     except Exception:
         raise RuntimeError(
-            "OBS connection or request failed; check local OBS and provider configuration"
+            "OBS connection or request failed; check that OBS is open and its "
+            "WebSocket server is on"
         ) from None
     finally:
-        if client is not None:
-            try:
-                client.disconnect()
-            except Exception:
-                pass
+        if session is not None:
+            session.close()
     if action == "stop":
         path = _local(output, exists=True)
         if path.stat().st_size == 0:

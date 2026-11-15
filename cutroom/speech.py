@@ -37,6 +37,10 @@ def _validate_words(words, duration=None):
             raise ValueError("Word probability must be between zero and one")
         if not isinstance(word.get("text"), str) or not word["text"].strip():
             raise ValueError("Word text must be non-empty")
+        # Control characters and lone surrogates cannot be written to subtitle
+        # files or caption scripts.
+        if any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in word["text"]):
+            raise ValueError("Word text must be printable")
         last_id, last_start = identifier, start
     return words
 
@@ -61,11 +65,14 @@ def validate_transcript(data, duration=None):
     return data
 
 
-def word_segments(words, excluded_ids=None, padding=0.04, duration=None):
+def word_segments(words, excluded_ids=None, padding=0.04, duration=None, energy=None):
     """Union kept word intervals, never padding across explicitly excluded audio.
 
     Overlapping excluded timestamps take precedence over kept timestamps. The
     caller must approve exclusions; this function does not identify fillers.
+    With ``energy`` (20 ms voice levels, see ``clips.energy_profile``) an edge
+    next to a removed word that falls inside a sound is moved out of it; see
+    ``_settle_cut_edges``.
     """
     _validate_words(words, duration)
     padding = _number(padding)
@@ -111,7 +118,104 @@ def word_segments(words, excluded_ids=None, padding=0.04, duration=None):
             merged[-1]["end"] = max(end, merged[-1]["end"])
         else:
             merged.append({"start": float(start), "end": float(end)})
+    if blocked and energy:
+        merged = _settle_cut_edges(merged, words, blocked, energy, duration)
     return merged
+
+
+# A cut edge is moved at most this far, so a misjudged sound never takes a
+# whole neighbouring word with it.
+CUT_EDGE_MAX_SHIFT_S = 0.35
+# A frame counts as a pause when it is this far below the loudest frame nearby.
+CUT_EDGE_PAUSE_DB = 20.0
+# Sound quieter than this everywhere nearby is treated as silence.
+CUT_EDGE_SILENCE_DB = -45.0
+
+
+def _settle_cut_edges(intervals, words, blocked, energy, duration):
+    """Move cut edges next to removed words out of the sound they land in.
+
+    Recognisers stamp word edges up to a few hundred milliseconds off, so a
+    cut at a stamp can leave the tail of a removed word or clip the start of a
+    kept one. When an edge falls inside a sound, that sound is given to the
+    word whose stamp overlaps it most: a removed word's sound is cut away
+    whole, a kept word's sound is kept whole. Edges already in a pause, edges
+    in continuous sound and moves over ``CUT_EDGE_MAX_SHIFT_S`` keep the stamp.
+    """
+    step = energy.get("step") if isinstance(energy, dict) else None
+    levels = energy.get("db") if isinstance(energy, dict) else None
+    if not isinstance(step, (int, float)) or step <= 0 or not levels:
+        return intervals
+    step = float(step)
+    removed = []
+    for item in sorted(blocked, key=lambda w: (w["start"], w["end"])):
+        if removed and item["start"] <= removed[-1][1] + 1e-6:
+            removed[-1][1] = max(removed[-1][1], item["end"])
+        else:
+            removed.append([item["start"], item["end"]])
+    excluded = {item["id"] for item in blocked}
+    kept_words = [w for w in words if w["id"] not in excluded and w["end"] > w["start"]]
+
+    def level(index):
+        return levels[min(max(index, 0), len(levels) - 1)]
+
+    def overlap(a, b):
+        return max(0.0, min(a[1], b[1]) - max(a[0], b[0]))
+
+    def settle(edge, gap, kept, side):
+        index = int(edge / step)
+        if not 0 <= index < len(levels) or kept is None:
+            return edge
+        reach = round(1.0 / step)
+        peak = max(levels[max(0, index - reach) : index + reach + 1])
+        if peak < CUT_EDGE_SILENCE_DB:
+            return edge
+        pause = peak - CUT_EDGE_PAUSE_DB
+        if level(index) <= pause:
+            return edge
+        limit = round(0.6 / step)
+        first = index
+        while first > 0 and level(first - 1) > pause:
+            first -= 1
+            if index - first > limit:
+                return edge
+        last = index
+        while last < len(levels) - 1 and level(last + 1) > pause:
+            last += 1
+            if last - index > limit:
+                return edge
+        sound = (first * step, (last + 1) * step)
+        to_removed = overlap(sound, gap)
+        to_kept = overlap(sound, (kept["start"], kept["end"]))
+        if to_removed == to_kept:
+            return edge
+        cut_away = to_removed > to_kept
+        if side == "start":
+            target = sound[1] if cut_away else sound[0]
+        else:
+            target = sound[0] if cut_away else sound[1]
+        if abs(target - edge) > CUT_EDGE_MAX_SHIFT_S:
+            return edge
+        return round(target, 3)
+
+    settled = []
+    for interval in intervals:
+        start, end = interval["start"], interval["end"]
+        inside = [w for w in kept_words if w["start"] < end and w["end"] > start]
+        for gap in removed:
+            if abs(gap[1] - start) < 1e-6 and inside:
+                start = settle(start, tuple(gap), inside[0], "start")
+            if abs(gap[0] - end) < 1e-6 and inside:
+                end = settle(end, tuple(gap), inside[-1], "end")
+        start = max(0.0, start)
+        if duration is not None:
+            end = min(float(duration), end)
+        settled.append({"start": float(start), "end": float(end)})
+    for k, interval in enumerate(settled):
+        previous = settled[k - 1]["end"] if k else 0.0
+        if interval["end"] <= interval["start"] or interval["start"] < previous:
+            return intervals
+    return settled
 
 
 def _validate_segments(segments):
@@ -418,14 +522,11 @@ def transcribe(source, model_path, language=None):
     if language is not None and (not isinstance(language, str) or not language.strip()):
         raise ValueError("Language must be a language code or null")
     try:
-        from faster_whisper import WhisperModel
+        import faster_whisper
     except ImportError as error:
         raise RuntimeError(
             "Local transcription requires the optional faster-whisper package"
         ) from error
-    model = WhisperModel(
-        str(model_path), device="cpu", compute_type="int8", local_files_only=True
-    )
     import numpy as np
 
     decoded = subprocess.run(
@@ -458,12 +559,41 @@ def transcribe(source, model_path, language=None):
         shell=False,
     )
     audio = np.frombuffer(decoded.stdout, dtype="<f4").copy()
+    duration = _number(float(metadata["format"]["duration"]))
+    # Whisper invents words on music and noise. When the bundled voice
+    # detector hears no speech at all, return an empty transcript without
+    # loading the model. Speech is still transcribed without the detector
+    # (filtering the audio with it drops short words such as "you know");
+    # only words far from any detected speech are discarded afterwards.
+    spans = _speech_spans(audio)
+    if sum(end - start for start, end in spans) < NO_SPEECH_S:
+        empty = dict(
+            language=None, words=[], text="", engine="faster-whisper", status="ok"
+        )
+        return validate_transcript(empty, duration=duration)
+    model = faster_whisper.WhisperModel(
+        str(model_path), device="cpu", compute_type="int8", local_files_only=True
+    )
+    # When unsure, Whisper retries with random sampling; a fixed seed makes the
+    # same recording always give the same transcript.
+    import ctranslate2
+
+    ctranslate2.set_random_seed(0)
     segments, info = model.transcribe(audio, language=language, word_timestamps=True)
-    words, texts = [], []
+    words, texts, invented = [], [], False
     for segment in segments:
+        if _unsure(segment):
+            invented = True
+            continue
         texts.append(segment.text.strip())
         for item in segment.words or []:
             if not item.word.strip():
+                continue
+            if not any(
+                item.start < end + SPEECH_PAD_S and item.end > start - SPEECH_PAD_S
+                for start, end in spans
+            ):
+                invented = True
                 continue
             words.append(
                 dict(
@@ -477,9 +607,48 @@ def transcribe(source, model_path, language=None):
     result = dict(
         language=info.language,
         words=words,
-        text=" ".join(texts).strip(),
+        text=(
+            " ".join(word["text"] for word in words)
+            if invented
+            else " ".join(texts).strip()
+        ),
         engine="faster-whisper",
         status="ok",
     )
-    duration = _number(float(metadata["format"]["duration"]))
+    if invented and not words:
+        result["language"] = None
     return validate_transcript(result, duration=duration)
+
+
+# Less detected speech than this in the whole recording counts as none.
+NO_SPEECH_S = 0.5
+# A word must lie within this distance of detected speech to be kept. On the
+# Sandra interview, the JFK reference and five minutes of a TEDx talk (about
+# 1,700 words with the tiny and small models) no real word was further away.
+SPEECH_PAD_S = 0.5
+# A segment is dropped when the model is unsure of it in both ways: a low
+# average log probability and low word probabilities. On music it wrote
+# "Медведь", "Звезды" and "We need" this way. Real speech never met both on
+# Sandra, the JFK reference, seven minutes of a TEDx talk and the Iliana
+# interview with the small model (both decoders, two runs each); "Hi." over
+# applause has a word probability of 0.05 but a log probability of -0.18.
+UNSURE_LOGPROB = -1.0
+UNSURE_WORD = 0.5
+
+
+def _unsure(segment):
+    logprob = getattr(segment, "avg_logprob", None)
+    words = [w.probability for w in (segment.words or []) if w.word.strip()]
+    if logprob is None or not words:
+        return False
+    return logprob < UNSURE_LOGPROB and sum(words) / len(words) < UNSURE_WORD
+
+
+def _speech_spans(audio, rate=16000):
+    """(start, end) seconds of speech the bundled Silero voice detector finds."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    return [
+        (span["start"] / rate, span["end"] / rate)
+        for span in get_speech_timestamps(audio, VadOptions(), sampling_rate=rate)
+    ]

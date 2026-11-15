@@ -74,6 +74,19 @@ class InterpreterSelectionTests(unittest.TestCase):
                 self.project["revision"],
             )
 
+    def test_an_unknown_setting_is_named_with_what_to_do(self):
+        # A Desktop page newer than the running Cutroom server sends settings
+        # the server does not know; the person must learn which and why.
+        with self.assertRaises(ValueError) as caught:
+            self.studio.update(
+                self.project["id"],
+                {"settings": {"zoom": 2, "aspect": "source"}},
+                self.project["revision"],
+            )
+        message = str(caught.exception)
+        self.assertIn("Unsupported settings: zoom", message)
+        self.assertIn("restart Hermes", message)
+
     def test_agent_tool_cannot_choose_the_interpreter(self):
         tools = {}
 
@@ -316,7 +329,10 @@ class LegacyToolConfinementTests(unittest.TestCase):
         self.outside = self.root / "outside"
         self.outside.mkdir()
         self.source = make_video(self.root / "in.mp4")
-        patcher = patch.dict(os.environ, {"CUTROOM_WORKSPACE": str(self.workspace)})
+        patcher = patch.dict(
+            os.environ,
+            {"CUTROOM_WORKSPACE": str(self.workspace), "CUTROOM_LEGACY_TOOLS": "1"},
+        )
         patcher.start()
         self.addCleanup(patcher.stop)
         self.tools = {}

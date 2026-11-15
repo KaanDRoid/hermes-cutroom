@@ -259,6 +259,55 @@ def _runtime():
         return {"path": None, "error": f"{type(error).__name__}: {error}"}
 
 
+# Names Cutroom looks for in a models folder, most accurate first. Nothing
+# is downloaded; these are only the folder and file names to recognise.
+MODEL_CANDIDATES = {
+    "whisper_model": tuple(
+        prefix + size
+        for size in ("large-v3", "medium", "small", "base", "tiny")
+        for prefix in ("faster-whisper-", "whisper-")
+    ),
+    "face_model": ("face_landmarker.task",),
+    "segmentation_model": ("selfie_segmenter.tflite",),
+}
+MODEL_LABELS = {
+    "whisper_model": (
+        "speech model",
+        "a Whisper model folder such as faster-whisper-small",
+    ),
+    "face_model": ("face model", "face_landmarker.task"),
+    "segmentation_model": ("background model", "selfie_segmenter.tflite"),
+}
+
+
+def find_model(key, roots):
+    """The best model for ``key`` in the first matching models folder, or None.
+
+    A speech model is a folder with config.json, model.bin and tokenizer.json;
+    face and background models are single files.
+    """
+    for name in MODEL_CANDIDATES.get(key, ()):
+        for folder in roots:
+            path = Path(folder) / name
+            if key == "whisper_model":
+                if all(
+                    (path / part).is_file()
+                    for part in ("config.json", "model.bin", "tokenizer.json")
+                ):
+                    return path
+            elif path.is_file():
+                return path
+    return None
+
+
+def missing_model_message(key, models_folder):
+    label, example = MODEL_LABELS[key]
+    return (
+        f"No {label} found. Put {example} in {models_folder}, or choose one in "
+        "Settings → Plugins → Cutroom. Nothing is downloaded automatically."
+    )
+
+
 def _model_status(root, asset):
     path = root / asset["path"]
     exists = path.is_file()

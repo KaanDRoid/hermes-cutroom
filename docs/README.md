@@ -12,5 +12,6 @@ Start here if you are joining development.
 8. [Integrations and privacy](integrations.md) — opt-in downloads, OBS, rclone and calendar boundaries.
 9. [Reference media](media-sources.md) — the speech test source, attribution and local-only fixtures.
 10. [Studio background jobs](studio-jobs.md) — executable inspection/silence routing, revision guards and current integration limits.
+11. [Creator formats plan](creator-formats.md) — the 0.2.0 work for Reels, Shorts, TikTok and YouTube: platform profiles, design decisions and work packages.
 
 The project is in development. A passing module test is not proof that the complete Desktop workflow is finished.
