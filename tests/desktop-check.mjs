@@ -226,7 +226,7 @@ test('home imports a local path, lists recent projects in plain words and scopes
   delete sdk.relativeTime;
 });
 
-test('home Browse lists only video files from a granted folder and fills the path', async () => {
+test('home Browse lists video files and folders from a granted folder and fills the path', async () => {
   hookStores.clear();
   projectRows = []; jobRows = [];
   const registrations = [];
@@ -240,7 +240,7 @@ test('home Browse lists only video files from a granted folder and fills the pat
   let tree = draw(route);
   assert.ok(button(tree, 'a.mp4'));
   assert.equal(button(tree, 'notes.txt'), undefined);
-  assert.equal(button(tree, 'raw'), undefined);
+  assert.ok(button(tree, '📁 raw'), 'folders can be opened');
   button(tree, 'a.mp4').props.onClick();
   tree = draw(route);
   assert.equal(field(tree, 'source').props.value, 'C:/clips/a.mp4');
@@ -2073,4 +2073,38 @@ test('J, K and L control playback like an editor: back, pause, play and faster',
     assert.equal(fake.paused, true);
     assert.match(text(ui.draw()), /J back 5 s · K pause · L play/);
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('home Browse opens subfolders, goes back up and fills the nested path', async () => {
+  hookStores.clear();
+  projectRows = []; jobRows = [];
+  const registrations = [], asked = [];
+  const tree0 = {
+    '': [{ name: 'raw', path: 'raw', isDirectory: true }, { name: 'a.mp4', path: 'a.mp4', isDirectory: false }, { name: 'notes.txt', path: 'notes.txt', isDirectory: false }],
+    raw: [{ name: 'day 2', path: 'raw/day 2', isDirectory: true }, { name: 'b.mov', path: 'raw/b.mov', isDirectory: false }],
+    'raw/day 2': [{ name: 'c.mp4', path: 'raw/day 2/c.mp4', isDirectory: false }],
+  };
+  const files = {
+    requestFolder: async () => ({ ok: true, folder: { id: 'f1', name: 'clips', path: 'C:/clips' } }),
+    list: async (id, path) => { asked.push(path); return { ok: true, entries: tree0[path] || [] }; },
+  };
+  (await load()).default.register({ register: entry => registrations.push(entry), files, storage: { get: (_k, f) => f, set() {} }, rest: async () => [] });
+  const route = registrations.find(r => r.area === sdk.ROUTES_AREA);
+  await button(draw(route), 'Browse').props.onClick();
+  let tree = draw(route);
+  assert.ok(button(tree, '📁 raw'), 'folders are listed before files');
+  await button(tree, '📁 raw').props.onClick();
+  tree = draw(route);
+  assert.match(text(tree), /clips › raw/);
+  assert.ok(button(tree, 'b.mov'));
+  await button(tree, '📁 day 2').props.onClick();
+  tree = draw(route);
+  assert.match(text(tree), /clips › raw › day 2/);
+  await button(tree, '‹ Up').props.onClick();
+  tree = draw(route);
+  assert.match(text(tree), /clips › raw/);
+  await button(tree, '📁 day 2').props.onClick();
+  button(draw(route), 'c.mp4').props.onClick();
+  assert.equal(field(draw(route), 'source').props.value, 'C:/clips/raw/day 2/c.mp4');
+  assert.deepEqual(asked, ['', 'raw', 'raw/day 2', 'raw', 'raw/day 2']);
 });

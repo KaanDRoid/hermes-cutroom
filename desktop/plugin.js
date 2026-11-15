@@ -170,26 +170,43 @@ const joinPath = (folder, relative) => {
   return `${folder.replace(/[\\/]+$/, '')}${separator}${relative}`;
 };
 
-// Lists matching files in a folder the person grants through the app's own picker.
+// Lists matching files in a folder the person grants through the app's own picker;
+// subfolders open in place, with a path line and Up.
 function Browse({ ctx, pattern, onPick, noun }) {
   const [list, setList] = useState(null);
   const [error, setError] = useState(null);
   if (typeof ctx.files?.requestFolder !== 'function' || typeof ctx.files?.list !== 'function') return null;
+  const show = async (folder, path) => {
+    setError(null);
+    try {
+      const listing = await ctx.files.list(folder.id, path);
+      if (!listing?.ok) throw new Error(listing?.message || 'That folder could not be listed');
+      const entries = listing.entries || [];
+      const byName = (x, y) => x.name.localeCompare(y.name, undefined, { numeric: true, sensitivity: 'base' });
+      setList({ folder, path, truncated: Boolean(listing.truncated),
+        folders: entries.filter(entry => entry.isDirectory).sort(byName).slice(0, 200),
+        files: entries.filter(entry => !entry.isDirectory && pattern.test(entry.name)).sort(byName).slice(0, 200) });
+    } catch (failure) { setError(failure); }
+  };
   const open = async () => {
     setError(null);
     try {
       const picked = await ctx.files.requestFolder();
       if (!picked?.ok || !picked.folder) { if (picked?.message) setError(new Error(picked.message)); return; }
-      const listing = await ctx.files.list(picked.folder.id, '');
-      if (!listing?.ok) throw new Error(listing?.message || 'That folder could not be listed');
-      setList({ folder: picked.folder, entries: (listing.entries || []).filter(entry => !entry.isDirectory && pattern.test(entry.name)).slice(0, 200) });
+      await show(picked.folder, '');
     } catch (failure) { setError(failure); }
   };
+  const up = () => show(list.folder, list.path.split('/').slice(0, -1).join('/'));
+  const where = list ? [list.folder.name || 'Folder', ...list.path.split('/').filter(Boolean)].join(' › ') : '';
   return el('div', { style: { ...stack, gap: 6 }, children: [
     jsx(Button, { variant: 'secondary', onClick: open, children: 'Browse…' }),
-    list ? el('div', { role: 'group', 'aria-label': `${noun} in ${list.folder.name || 'the folder'}`, style: { ...stack, gap: 4, maxHeight: 220, overflow: 'auto' }, children: [
-      list.entries.length ? null : el('p', { style: muted, children: `No ${noun.toLowerCase()} in this folder.` }),
-      ...list.entries.map(entry => jsx(Button, { variant: 'ghost', onClick: () => { onPick(joinPath(list.folder.path, entry.path || entry.name)); setList(null); }, children: entry.name }, `file:${entry.path || entry.name}`)),
+    list ? el('div', { role: 'group', 'aria-label': `${noun} in ${where}`, style: { ...stack, gap: 4, maxHeight: 260, overflow: 'auto' }, children: [
+      el('p', { style: { ...muted, fontWeight: 600 }, children: where }, 'where'),
+      list.path ? jsx(Button, { variant: 'ghost', onClick: up, children: '‹ Up' }, 'up') : null,
+      ...list.folders.map(entry => jsx(Button, { variant: 'ghost', onClick: () => show(list.folder, entry.path || entry.name), children: `📁 ${entry.name}` }, `dir:${entry.path || entry.name}`)),
+      list.folders.length || list.files.length ? null : el('p', { style: muted, children: `No ${noun.toLowerCase()} or folders here.` }, 'empty'),
+      ...list.files.map(entry => jsx(Button, { variant: 'ghost', onClick: () => { onPick(joinPath(list.folder.path, entry.path || entry.name)); setList(null); }, children: entry.name }, `file:${entry.path || entry.name}`)),
+      list.truncated ? el('p', { style: muted, children: 'This folder has more entries than can be shown.' }, 'more') : null,
       jsx(Button, { variant: 'ghost', onClick: () => setList(null), children: 'Close list' }, 'close'),
     ] }) : null,
     jsx(Notice, { error }),
