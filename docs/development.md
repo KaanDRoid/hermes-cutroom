@@ -2,10 +2,10 @@
 
 ## Prerequisites
 
-- Git and access to the private repository.
+- Git.
 - Python 3.12 for the tested native-model runtime; the dependency-free core also runs on Python 3.14.
 - `uv`, Node.js 20+ and maintained `ffmpeg` / `ffprobe` executables in PATH.
-- FFmpeg with H.264/AAC, libass and drawtext support. FFmpeg 9.0.2 is the local reference build; CI checks its own installed build.
+- FFmpeg with H.264/AAC, libass and drawtext support. FFmpeg 9.0.2 is the reference build; the suite also passes on FFmpeg 7.1.1.
 - An output filesystem with hard-link support, such as NTFS or ext4. FAT/exFAT output is not currently supported.
 
 ## Clone and install

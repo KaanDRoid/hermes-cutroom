@@ -1,5 +1,29 @@
 # Implementation status
 
+## November 14–15 — Cloud copy, OBS, speech and performance (`feat/ui-redesign`)
+
+- **Send to the cloud:** Export copies an approved final and its files to a new
+  folder on an rclone remote (Google Drive tested live), with progress, cancel
+  and a size/hash check of the copy. Person only (`confirmed: true`).
+- **Record with OBS:** a built-in obs-websocket v5 client (no extra package)
+  starts and stops OBS recording on this computer and imports the file. Live
+  check with OBS Studio on Windows: a 1920×1080 recording with sound imported
+  as a project. The password stays in Desktop settings.
+- **Speech:** music and noise give an empty transcript; segments Whisper is
+  unsure of are dropped; a fixed seed makes transcripts repeatable. Real speech
+  kept every word on four recordings.
+- **Editor:** J, K and L playback keys, subfolders in Browse, a readable video
+  loading bar, the new logo.
+- **Performance:** every cut read the whole recording, so 557 cuts of a
+  17-minute talk did not finish the loudness pass in 15 minutes. Cuts now read
+  only their part (sample- and frame-identical output); the same edit renders
+  in 6 min 17 s at 1080p and 16 min 31 s at 2160p with no lost or repeated
+  frames. Details: [performance](performance.md).
+- Gates: 643 Python tests OK (14 skipped) on FFmpeg 9.0.2 and 7.1.1, 84/84
+  Desktop tests, Ruff clean, `hermes plugins validate` 16/16.
+- Open: native Desktop acceptance per platform (A28) by a person, and live
+  media download (A08).
+
 ## November 13 — Timing fixes from the pre-release review (branch `feat/review-timeline`)
 
 - FFmpeg 7.1: crossfade and dip transitions failed (`xfade` refused an unset frame rate), and a WebM whose sound starts before the picture lost 7 ms of sync. Both are fixed; the full suite passes on 7.1.1 and 9.0.2 (539 tests, 14 skipped).

@@ -62,7 +62,7 @@ The original plan-file workflow remains available for simple silence edits.
 - A local video file. The core needs no API keys or Python runtime dependencies; advanced modules use the optional environments described in [development setup](docs/development.md).
 - An output filesystem with hard-link support (for example NTFS or ext4), used for atomic no-overwrite publication. FAT/exFAT outputs are not currently supported.
 
-Verified on native Windows with FFmpeg 9.0.2; CI runs the test suite on Windows and Ubuntu.
+Verified on native Windows with FFmpeg 9.0.2 and 7.1.1.
 
 ## Quick start
 

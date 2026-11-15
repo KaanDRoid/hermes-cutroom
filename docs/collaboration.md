@@ -2,7 +2,7 @@
 
 ## Getting started
 
-1. Accept the private repository invitation.
+1. Clone the public repository (https://github.com/KaanDRoid/hermes-cutroom).
 2. Read [overview](overview.md), [status](status.md) and [architecture](architecture.md).
 3. Set up the environment using [development](development.md).
 4. Pick one work package from [roadmap](roadmap.md) and agree its file ownership before editing.
