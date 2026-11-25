@@ -1572,6 +1572,10 @@ class Studio:
             paths.append(self._validate_publication(project, upstream))
         if action in {"preview", "final"} and project["settings"].get("use_segmented"):
             paths.append(self._validate_publication(project, "segmented"))
+        layout = project["settings"].get("layout") or {}
+        if action in {"preview", "final"} and layout.get("layout", "full") != "full":
+            items = [layout.get("panel")] + [entry["item"] for entry in layout.get("pictures", [])]
+            paths.extend(item["path"] for item in items if item and item.get("kind") == "file")
         return {
             str(_local_path(path)): file_digest(_local_path(path))
             for path in paths
@@ -1698,6 +1702,20 @@ class Studio:
             if zooming(settings["pacing"]) and faces:
                 # Punch-ins centre on the face in every framing mode.
                 result["pacing_analysis"] = {"faces": faces}
+        layout = settings.get("layout")
+        if layout and layout.get("layout", "full") != "full" and result["aspect"] == "portrait":
+            from .layouts import face_centre
+
+            result["layout"] = copy.deepcopy(layout)
+            face = face_centre(
+                (project.get("analysis") or {}).get("face_samples"),
+                [(s["start"], s["end"]) for s in project.get("segments") or []],
+            )
+            if face is not None:
+                result["layout_face"] = [float(face[0]), float(face[1])]
+            if layout["layout"] == "split":
+                # The headline takes the title's place at the top of the frame.
+                result["title"] = ""
         return result
 
     def _quality_settings(self, project, preset):
@@ -2774,6 +2792,46 @@ class Studio:
             "at": at,
             "time": moment,
         }
+
+    def layout_still(self, project_id, sha256):
+        """A small JPEG of a picture or video saved in the project's layout.
+
+        Only files the layout already holds (matched by their digest) are read.
+        """
+        if not isinstance(sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", sha256):
+            raise ValueError("Unknown layout file")
+        project = self.get(project_id)
+        layout = project["settings"].get("layout") or {}
+        items = [layout.get("panel")] + [entry.get("item") for entry in layout.get("pictures", [])]
+        item = next((i for i in items if i and i.get("kind") == "file" and i.get("sha256") == sha256), None)
+        if item is None:
+            raise ValueError("Unknown layout file")
+        path = _local_path(item["path"], must_exist=False)
+        if not path.is_file():
+            raise MissingAssetError(f"{item['name']} is missing; choose it again in Style")
+        directory = self._directory(project_id) / "posters"
+        cached = directory / f"layout-{sha256[:24]}.jpg"
+        if not cached.is_file():
+            if file_digest(path) != sha256:
+                raise ValueError(f"{item['name']} changed since it was chosen; choose it again in Style")
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f".{uuid.uuid4().hex}.jpg"
+            try:
+                try:
+                    poster_frame(path, 0.0 if item.get("media") == "image" else min(1.0, (item.get("duration") or 0) / 2), temporary)
+                except (subprocess.SubprocessError, OSError) as error:
+                    raise RuntimeError("The picture could not be shown") from error
+                size = temporary.stat().st_size if temporary.is_file() else 0
+                if not 0 < size <= POSTER_MAX_BYTES:
+                    raise RuntimeError("The picture could not be shown")
+                _replace_file(temporary, cached)
+            finally:
+                temporary.unlink(missing_ok=True)
+        data = cached.read_bytes()
+        if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
+            cached.unlink(missing_ok=True)
+            raise RuntimeError("The cached picture was unreadable; try again")
+        return {"mime": "image/jpeg", "data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")}
 
     def list(self):
         """Projects plus ``modified_at``, the last save time for display only."""

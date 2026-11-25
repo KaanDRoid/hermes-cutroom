@@ -405,6 +405,16 @@ def project_poster(
     return invoke(studio.poster, project_id, at)
 
 
+@router.get("/projects/{project_id}/layout-still")
+def layout_still(
+    project_id: ProjectId,
+    sha256: Annotated[str, Query(pattern=r"^[a-f0-9]{64}$")],
+    studio=Depends(get_studio),
+):
+    """A small JPEG (data URL) of a picture or video already saved in the layout."""
+    return invoke(studio.layout_still, project_id, sha256)
+
+
 @router.post("/projects/{project_id}/chapters/suggest")
 def suggest_chapters(project_id: ProjectId, studio=Depends(get_studio)):
     """Chapter suggestions from the transcript, in program time; nothing is saved."""

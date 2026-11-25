@@ -1087,25 +1087,28 @@ function SafeZoneOverlay({ zone }) {
   ];
 }
 
-// Where the original sits in a crop framing: Face track follows the larger face
-// (averaged over half a second each side, like the render's smoothing), others stay centred.
-// Averaged face centre (source fractions) around a time, or null.
-function faceAt(view, time) {
+// Median centre of the largest face over the kept parts (source fractions), or null.
+// The render (cutroom/layouts.py face_centre) frames the speaker card with the same point.
+function faceCentre(view) {
   const samples = view?.analysis?.face_samples;
-  if (!Array.isArray(samples) || !samples.length || !Number.isFinite(time)) return null;
-  let x = 0, y = 0, count = 0;
+  if (!Array.isArray(samples) || !samples.length) return null;
+  const kept = Array.isArray(view.segments) && view.segments.length ? view.segments : null;
+  const xs = [], ys = [];
   for (const [at, faces] of samples) {
-    if (at < time - 0.75 || at > time + 0.75) continue;
+    if (kept && !kept.some(range => range.start <= at && at <= range.end)) continue;
     const face = (faces || []).reduce((best, item) => (!best || item[2] * item[3] > best[2] * best[3] ? item : best), null);
-    if (face) { x += face[0]; y += face[1]; count++; }
+    if (face) { xs.push(face[0]); ys.push(face[1]); }
   }
-  return count ? [x / count, y / count] : null;
+  if (!xs.length) return null;
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+  return [xs[xs.length >> 1], ys[ys.length >> 1]];
 }
 
-// Place the speaker inside a layout card: zoomed in, face a little above the middle, no empty edges.
-function speakerStyle(view, info, card, time, zoom = 1.7) {
+// Place the speaker inside a layout card as the render does (layouts.speaker_crop): zoomed in,
+// face a little above the middle, no empty edges.
+function speakerStyle(view, info, card, zoom = 1.7) {
   const ratio = info?.width > 0 && info?.height > 0 ? info.width / info.height : 16 / 9;
-  const face = faceAt(view, time) || [0.5, 0.4];
+  const face = faceCentre(view) || [0.5, 0.4];
   const width = Math.max(card.w, card.h * ratio) * zoom, height = width / ratio;
   const left = Math.min(0, Math.max(card.w - width, card.w * 0.5 - face[0] * width));
   const top = Math.min(0, Math.max(card.h - height, card.h * 0.47 - face[1] * height));
@@ -1263,7 +1266,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const active = media?.kind || loading.current || offer?.kind || null;
   const seekTo = value => { const video = videoRef?.current; if (video && Number.isFinite(value)) { try { video.currentTime = value; } catch { /* Before metadata. */ } setTime(value); } };
   const player = media ? jsx('video', { ref: videoRef, src: media.url, preload: 'metadata', playsInline: true, 'aria-label': `${media.kind === 'source' ? 'Original' : media.kind === 'preview' ? 'Preview' : 'Final video'} player`,
-    style: composite ? speakerStyle(view, project.source_info, geo.speaker, time ?? 0, draft.layout === 'over' ? 1 : 1.7) : { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, objectPosition: original && fill === 'cover' ? cropPosition(view, project.source_info, [w, h], time ?? 0) : '50% 50%', display: 'block' },
+    style: composite ? speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7) : { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fill, objectPosition: original && fill === 'cover' ? cropPosition(view, project.source_info, [w, h], time ?? 0) : '50% 50%', display: 'block' },
     onTimeUpdate: event => {
       const target = event.currentTarget;
       let at = target.currentTime;
@@ -1282,9 +1285,9 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     onPlay: () => setPlaying(true), onPause: () => { setPlaying(false); beep(false); }, onEnded: () => { setPlaying(false); beep(false); },
     onLoadedMetadata: event => { setReady(true); const length = event?.currentTarget?.duration; if (Number.isFinite(length)) setDuration(length); if (media.kind === 'source') startClip(event?.currentTarget); },
     onError: () => { chosen.current = true; release(); setError(new Error('This host cannot play this file. Download it in Export or make a compatible MP4 preview.')); } }, 'player:video') : null;
-  const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', ...(composite ? speakerStyle(view, project.source_info, geo.speaker, poster.time ?? 0, draft.layout === 'over' ? 1 : 1.7) : {}), objectFit: composite ? 'fill' : fill, objectPosition: composite ? undefined : fill === 'cover' ? cropPosition(view, project.source_info, [w, h], poster.time ?? 0) : '50% 50%', display: 'block' } }, 'player:poster') : null;
+  const still = !media && poster ? jsx('img', { src: poster.data_url, alt: '', style: { position: 'absolute', inset: 0, width: '100%', height: '100%', ...(composite ? speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7) : {}), objectFit: composite ? 'fill' : fill, objectPosition: composite ? undefined : fill === 'cover' ? cropPosition(view, project.source_info, [w, h], poster.time ?? 0) : '50% 50%', display: 'block' } }, 'player:poster') : null;
   const inCard = (node, key) => (composite && node ? el('div', { 'data-cutroom-speaker': true, style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` }, children: node }, key) : node);
-  const captionZone = composite ? { top: 0, left: 0.08, right: 0.08, bottom: 1 - geo.captionY / 1920 } : zone;
+  const captionZone = composite ? { top: 0, left: Math.max(geo.panel.x / 1080, zone?.left || 0), right: Math.max(1 - (geo.panel.x + geo.panel.w) / 1080, zone?.right || 0), bottom: 1 - geo.captionY / 1920 } : zone;
   const center = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, padding: 12 };
   const marks = original ? removedRanges(view, total) : [];
   // End-screen room: the last N seconds of a YouTube render, or of the edit while the original plays.
@@ -1310,9 +1313,9 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         backgroundImage: composite && draft.layout === 'split' && draft.background === 'grid' ? `linear-gradient(${LP.grid_line} 1px, transparent 1px), linear-gradient(90deg, ${LP.grid_line} 1px, transparent 1px)` : undefined, backgroundSize: '3.4cqh 3.4cqh',
         '--draft-ink': composite && draft.layout === 'split' ? paper[2] : LP.paper_ink, '--draft-card': draft.background === 'dark' && draft.layout === 'split' ? LP.dark_card : LP.card }, children: [
         inCard(player, 'speaker:video'), inCard(still, 'speaker:poster'),
-        ...(composite ? LayoutChrome({ draft, view, time: now, programStart }) : []),
+        ...(composite ? LayoutChrome({ draft, view, time: now, programStart, ctx, scope }) : []),
         composite && draft.hidden.length ? el('div', { style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, pointerEvents: 'none', borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` },
-          children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, now, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
+          children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
         ...(original && !composite && fill === 'contain' && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info) : []),
         original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info }, 'hide') : null,
         showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
@@ -1817,7 +1820,6 @@ function ReviewStep({ kit }) {
   const layoutChecks = draftList.length ? el('section', { 'aria-label': 'Layout checks', style: { ...stack, gap: 6 }, children: [
     el('div', { style: { ...row, justifyContent: 'space-between' }, children: [el('h3', { style: h3s, children: 'Layout checks' }), jsx(Badge, { children: 'New · draft' })] }),
     jsx(CheckRows, { label: 'Layout checks', items: draftList }),
-    el('p', { style: muted, children: 'These join the preview checks once the preview can render the new layout.' }),
   ] }, 'layout-checks') : null;
   if (!previewCurrent) return el('div', { style: stack, children: [intro, edited, layoutChecks, el('div', { style: { ...panel, alignItems: 'flex-start' }, children: [
     el('p', { style: { margin: 0 }, children: previewJob ? `Making preview… ${pct(previewJob.progress)}%` : project.artifacts?.preview ? 'You changed the video since the last preview. Make a new preview to review it.' : 'There is no preview of this version yet.' }),
@@ -2554,13 +2556,24 @@ function headlineSuggestions(view) {
   return out;
 }
 
-function CardView({ item }) {
+// A still of a picture or video saved in the layout (served only for files the project holds).
+function useLayoutStill(ctx, scope, projectId, sha) {
+  const valid = typeof sha === 'string' && /^[a-f0-9]{64}$/.test(sha);
+  const query = useQuery({ queryKey: [...posterKey(scope, projectId), 'layout-still', sha || 'none'], queryFn: () => ctx.rest(`/projects/${enc(projectId)}/layout-still?sha256=${sha}`),
+    enabled: Boolean(ctx && projectId && valid), staleTime: Infinity, retry: false, refetchOnWindowFocus: false });
+  const value = query?.data;
+  return value && typeof value.data_url === 'string' && value.data_url.length < 4000000 && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value.data_url) ? value : null;
+}
+
+function CardView({ item, ctx = null, scope = [], projectId = null }) {
+  const still = useLayoutStill(ctx, scope, projectId, item.kind === 'file' ? item.sha256 : null);
   const ink = 'var(--draft-ink)';
   const centre = { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1.2cqh', padding: '2cqh 3cqh', textAlign: 'center', color: ink };
+  if (item.kind === 'file' && still) return jsx('img', { src: still.data_url, alt: item.name, style: { position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain' } });
   if (item.kind === 'file') return el('div', { style: { ...centre, background: 'color-mix(in srgb, var(--draft-ink) 8%, transparent)', borderRadius: 'inherit' }, children: [
     el('span', { style: { fontSize: '4cqh' }, children: VIDEO_FILE.test(item.name) ? '▶' : '▣' }, 'icon'),
     el('strong', { style: { fontSize: '1.9cqh', overflowWrap: 'anywhere' }, children: item.name }, 'name'),
-    el('span', { style: { fontSize: '1.4cqh', opacity: 0.7 }, children: 'File preview is not connected in this draft' }, 'note'),
+    el('span', { style: { fontSize: '1.4cqh', opacity: 0.7 }, children: item.sha256 ? 'Loading…' : 'Saving…' }, 'note'),
   ] });
   if (item.type === 'number') return el('div', { style: centre, children: [el('strong', { style: { fontSize: '9cqh', lineHeight: 1.05, color: LP.on_box, background: BOX_YELLOW, padding: '0.4cqh 2cqh', borderRadius: '1cqh' }, children: item.text }, 'n'), el('span', { style: { fontSize: '2.2cqh', fontWeight: 600 }, children: item.detail }, 'd')] });
   if (item.type === 'quote') return el('div', { style: { ...centre, background: 'var(--draft-card)', borderRadius: 'inherit' }, children: el('strong', { style: { fontSize: '3cqh', lineHeight: 1.25 }, children: `“${item.text}”` }) });
@@ -2569,7 +2582,7 @@ function CardView({ item }) {
     el('span', { style: { width: '11cqh', height: '11cqh', borderRadius: '2.4cqh', background: 'var(--draft-card)', boxShadow: `0 0.4cqh 1.2cqh ${LP.shadow}`, display: 'grid', placeItems: 'center', fontSize: '5cqh' }, children: name.slice(0, 1).toLocaleUpperCase() }, 'tile'), name] }, name)) });
   if (item.type === 'terminal') return el('div', { style: { position: 'absolute', inset: '1.5cqh', background: LP.terminal, borderRadius: '1.2cqh', padding: '2cqh 2.4cqh', fontFamily: 'ui-monospace, Consolas, monospace', fontSize: '1.7cqh', lineHeight: 1.7, color: LP.terminal_text, textAlign: 'left' }, children: [
     el('div', { style: { display: 'flex', gap: '0.7cqh', marginBottom: '1.2cqh' }, children: [LP.terminal_red, LP.terminal_yellow, LP.terminal_green].map(colour => el('i', { style: { width: '1.1cqh', height: '1.1cqh', borderRadius: '50%', background: colour } }, colour)) }, 'dots'),
-    ...item.text.split(',').map(line => line.trim()).filter(Boolean).slice(0, 6).map((line, index) => el('div', { style: { color: index ? LP.terminal_ok : LP.terminal_command }, children: `${index ? '✓ ' : '$ '}${line}` }, `l${index}`)),
+    ...item.text.split(',').map(line => line.trim()).filter(Boolean).slice(0, 6).map((line, index) => el('div', { style: { color: index ? LP.terminal_ok : LP.terminal_command }, children: `${index ? '› ' : '$ '}${line}` }, `l${index}`)),
   ] });
   const bars = item.text.split(',').map(pair => pair.split(':').map(part => part.trim())).filter(pair => pair.length === 2 && Number.isFinite(Number(pair[1]))).slice(0, 6);
   const most = Math.max(1, ...bars.map(pair => Number(pair[1])));
@@ -2581,14 +2594,14 @@ function CardView({ item }) {
 }
 
 // What the frame shows around the speaker for a panel layout.
-function LayoutChrome({ draft, view, time, programStart }) {
+function LayoutChrome({ draft, view, time, programStart, ctx = null, scope = [] }) {
   const geo = layoutBoxes(draft);
   const item = inRange(draft.pictures, time)?.item || draft.panel;
   const lang = view.transcript?.language || 'en';
   const nodes = [];
   if (hasPanel(draft)) nodes.push(el('div', { 'data-cutroom-panel': true, style: { ...box(geo.panel), borderRadius: '1.4cqh', overflow: 'hidden', zIndex: 2, boxShadow: draft.layout === 'over' ? `0 1.2cqh 3cqh ${LP.shadow}` : 'none',
     background: item ? 'transparent' : 'color-mix(in srgb, var(--draft-ink) 5%, transparent)', border: item ? 'none' : '0.25cqh dashed color-mix(in srgb, var(--draft-ink) 35%, transparent)' },
-  children: item ? jsx(CardView, { item }) : el('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', textAlign: 'center', color: 'var(--draft-ink)', fontSize: '2.2cqh', padding: '2cqh' }, children: el('span', { children: ['Top panel', el('br', {}, 'br'), el('strong', { children: 'Add a screen recording or picture' }, 's')] }) }) }, 'panel'));
+  children: item ? jsx(CardView, { item, ctx, scope, projectId: view.id }) : el('div', { style: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', textAlign: 'center', color: 'var(--draft-ink)', fontSize: '2.2cqh', padding: '2cqh' }, children: el('span', { children: ['Top panel', el('br', {}, 'br'), el('strong', { children: 'Add a screen recording or picture' }, 's')] }) }) }, 'panel'));
   const headline = draft.headline;
   const showHeadline = draft.layout === 'split' && headline && (draft.hold === 'whole' || time < programStart + 3);
   if (showHeadline) {
@@ -2596,7 +2609,7 @@ function LayoutChrome({ draft, view, time, programStart }) {
     // Long lines shrink so each line stays on one row (about 18 capitals fit at full size).
     const longest = Math.max(String(headline.l1 || '').length, String(headline.l2 || '').length, 1);
     const size = Math.min(geo.head.size, 900 / (longest * 0.66));
-    nodes.push(el('div', { 'data-cutroom-headline': true, style: { position: 'absolute', left: '5%', right: '5%', top: percent(geo.head.y / 1920), textAlign: 'center', color: 'var(--draft-ink)', fontWeight: 800, fontSize: `${(size / 1920 * 100).toFixed(2)}cqh`, lineHeight: 1.22, whiteSpace: 'nowrap', zIndex: 3 }, children: [
+    nodes.push(el('div', { 'data-cutroom-headline': true, style: { position: 'absolute', left: '5%', right: '5%', top: percent(geo.head.y / 1920), textAlign: 'center', color: 'var(--draft-ink)', fontWeight: 800, fontSize: `${(size / 1920 * 100).toFixed(2)}cqh`, lineHeight: 1.4, whiteSpace: 'nowrap', zIndex: 3 }, children: [
       upper(headline.l1 || '', lang), el('br', {}, 'br'),
       ...words.map((word, index) => el('span', { style: (headline.boxed || []).includes(index) ? { background: BOX_YELLOW, color: LP.on_box, padding: '0 0.8cqh', borderRadius: '0.4cqh' } : {}, children: word }, `w${index}`)).flatMap((node, index) => (index ? [' ', node] : [node])),
     ] }, 'headline'));
@@ -2731,7 +2744,7 @@ function LayoutSection({ kit }) {
         el('p', { style: muted, children: 'You are framed with Face track inside the card when a face analysis exists.' }, 'face'),
       ] }, 'more'),
     ] }, 'panel') : null,
-    el('p', { style: muted, children: 'Draft: the layout shows live on the Original player. The preview render does not include it yet.' }, 'draft'),
+    hasPanel(draft) ? el('p', { style: muted, children: 'The player shows the layout on the Original; Preview and Final draw it the same way.' }, 'draft') : null,
   ] });
 }
 

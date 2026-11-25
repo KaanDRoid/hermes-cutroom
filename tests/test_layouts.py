@@ -169,6 +169,34 @@ class StudioLayoutTests(unittest.TestCase):
         self.assertEqual(moved["settings"]["layout"]["layout"], "full")
         self.assertEqual(moved["settings"]["layout"]["headline"]["l1"], "ONE")
 
+    def test_preview_and_final_renders_receive_the_layout_and_the_face_centre(self):
+        saved = self.save({"layout": "split", "headline": {"l1": "ONE", "l2": "TWO"}})
+        saved = self.studio.update(saved["id"], {"settings": {"title": "Old title"}}, saved["revision"])
+        project = self.studio.get(saved["id"])
+        project["analysis"] = {"face_samples": [[1.0, [[0.6, 0.3, 0.1, 0.2]]], [2.0, [[0.62, 0.32, 0.1, 0.2]]]]}
+        for preset in ("preview", "final"):
+            render = self.studio._render_settings(project, preset)
+            self.assertEqual(render["layout"]["layout"], "split")
+            self.assertEqual(render["layout_face"], [0.62, 0.32])
+            self.assertEqual(render["title"], "", "The headline replaces the burned title")
+        project["settings"]["layout"]["layout"] = "full"
+        render = self.studio._render_settings(project, "preview")
+        self.assertNotIn("layout", render)
+        self.assertEqual(render["title"], "Old title")
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_a_still_is_served_only_for_files_saved_in_the_layout(self):
+        picture = Path(self.temporary.name) / "diagram.png"
+        _ffmpeg("-f", "lavfi", "-i", "color=c=red:s=320x180", "-frames:v", "1", str(picture))
+        saved = self.save({"layout": "split", "panel": {"kind": "file", "path": str(picture)}})
+        digest = saved["settings"]["layout"]["panel"]["sha256"]
+        still = self.studio.layout_still(saved["id"], digest)
+        self.assertTrue(still["data_url"].startswith("data:image/jpeg;base64,/9j/"))
+        with self.assertRaises(ValueError):
+            self.studio.layout_still(saved["id"], "0" * 64)
+        with self.assertRaises(ValueError):
+            self.studio.layout_still(saved["id"], "../studio.json")
+
 
 if __name__ == "__main__":
     unittest.main()

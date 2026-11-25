@@ -46,6 +46,15 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      `max_pause` shortens silences between kept words, so the video gets
      shorter. `transition` can be `cut`, `crossfade` or `dip`; `push_in: true`
      adds a slow zoom on ranges of 4 s or more.
+   - Split explainer (`settings.layout`, 9:16 only) puts a headline at the
+     top, a panel in the middle and the speaker in a card below. Offer it for
+     explainers and tutorials and ask before turning it on. The panel holds a
+     drawn card (`title`, `number`, `quote`, `bars`, `apps`, `terminal`) or a
+     local picture/video the person named by absolute path; never search the
+     web for pictures. `pictures` change the panel while the person says
+     chosen words (source seconds of those words). Write the headline from the
+     person's own words, two short lines in capitals. Punch-ins and
+     transitions are not available with this layout yet.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
    `media.path` from the completed job exactly as returned. When the job has

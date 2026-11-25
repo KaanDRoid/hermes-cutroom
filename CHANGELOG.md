@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+Explainer layouts for vertical videos.
+
+### Split explainer
+- New Layout section in Style: Full frame, Split explainer and Picture over you
+  (9:16 platforms). A headline at the top, a panel in the middle and the
+  speaker in a rounded card below, on paper, grid, kraft or dark backgrounds.
+- The panel shows a drawn card (title, number, quote, bar chart, app row,
+  terminal) or a local picture or screen recording. Select words in Edit and
+  choose Picture to change the panel while you say them.
+- Preview and Final draw the layout; captions move between the panel and the
+  speaker and stay inside the platform's safe zone. The player shows the same
+  layout before rendering.
+- Layouts are saved on the project, can be undone and can be set from chat.
+- Headline capitals follow the video's language (Turkish i becomes İ).
+
 ## 0.2.0 — unreleased
 
 Creator formats, a redesigned Studio and faster renders.

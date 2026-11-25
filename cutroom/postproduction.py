@@ -45,8 +45,25 @@ _FONT_PATHS = {
 }
 
 
-def _font_path(family):
-    return next((Path(p) for p in _FONT_PATHS[family] if Path(p).is_file()), None)
+# Bold faces for the layout headline and cards; libass does not embolden a
+# font loaded from fontsdir, so the real bold file is needed.
+_BOLD_FONT_PATHS = {
+    "Arial": (
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+    ),
+    "DejaVu Sans": ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",),
+    "Liberation Sans": (
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+}
+
+
+def _font_path(family, bold=False):
+    paths = (_BOLD_FONT_PATHS if bold else _FONT_PATHS)[family]
+    return next((Path(p) for p in paths if Path(p).is_file()), None)
 
 
 def default_brand():
@@ -308,6 +325,8 @@ def _settings(settings):
         "pacing_analysis",
         "pacing_report",
         "pacing_words",
+        "layout",
+        "layout_face",
     }
     if settings is None:
         settings = {}
@@ -398,6 +417,22 @@ def _settings(settings):
         reframe.validate_analysis({"faces": analysis["faces"], "scene_cuts": []})
     if result.get("pacing_report") is not None:
         pacing.validate_report(result["pacing_report"])
+    layout = result.get("layout")
+    if layout is not None:
+        from . import layouts
+
+        if not isinstance(layout, dict) or set(layout) != set(layouts.normalize_layout({}, duration=0)):
+            raise ValueError("layout must be normalized by cutroom.layouts")
+        if layout["layout"] == "full":
+            result["layout"] = None
+        elif result["aspect"] != "portrait" and _platform_entry(result) is None:
+            raise ValueError("Split explainer and Picture over you need a 9:16 frame")
+    face = result.get("layout_face")
+    if face is not None:
+        if not isinstance(face, list) or len(face) != 2:
+            raise ValueError("layout_face is [x, y] in source fractions")
+        for value in face:
+            _number(value, 0, 1)
     words = result.get("pacing_words")
     if words is not None:
         if not isinstance(words, list) or len(words) > pacing.MAX_WORDS:
@@ -577,6 +612,16 @@ def platform_layout(settings, width, height, *, title=None, captions=False):
     )
 
 
+def _drawn_layout(settings, width, height, *, captions=False):
+    """platform_layout with the caption band a split layout really uses."""
+    layout = platform_layout(settings, width, height, captions=captions)
+    if settings.get("layout") is not None and layout is not None:
+        from . import layouts
+
+        layout = layouts.caption_layout(layout, settings["layout"], width / layouts.FRAME[0])
+    return layout
+
+
 def platform_caption_cues(captions, layout, *, measure=None):
     """Split cues so every burned event fits the two-line caption band.
 
@@ -687,6 +732,9 @@ def _font(directory, family):
     if path is None:
         raise ValueError("Requested local font is unavailable: " + family)
     shutil.copyfile(path, directory / "font.ttf")
+    bold = _font_path(family, bold=True)
+    if bold is not None:
+        shutil.copyfile(bold, directory / "font-bold.ttf")
 
 
 def _draw_text(
@@ -1478,6 +1526,15 @@ def export_video(
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
     layout = platform_layout(settings, width, height, captions=bool(captions))
+    layout_settings = settings.get("layout")
+    if layout_settings is not None:
+        from . import layouts
+
+        if abs(width * 16 - height * 9) > 16:
+            raise ValueError("Split explainer and Picture over you need a 9:16 frame")
+        if paced:
+            raise ValueError("Punch-ins, push-ins and transitions do not work with Split explainer yet; turn them off in Pacing")
+        layout = layouts.caption_layout(layout, layout_settings, width / layouts.FRAME[0])
     from cutroom import captions as animated_captions
 
     measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
@@ -1509,6 +1566,8 @@ def export_video(
         # Reframing changes only the picture, never the trim/concat audio timeline.
         framing_report = None
         mode = settings.get("framing", "fit")
+        if layout_settings is not None:
+            mode, filters = "layout", []
         if mode == "blur_fill":
             cw, ch = _content_size(info["display_aspect_ratio"], width, height)
             background_w = (
@@ -1577,8 +1636,24 @@ def export_video(
                 if cropped:
                     framing_report["expression_pieces"] = pieces
         brand = settings["brand"]
-        if settings["title"] or settings["lower_third"] or captions:
+        if settings["title"] or settings["lower_third"] or captions or layout_settings is not None:
             _font(directory, brand["font"])
+        layout_plan = None
+        if layout_settings is not None:
+            layout_plan = layouts.build(
+                layout_settings,
+                width=width,
+                height=height,
+                ranges=ranges,
+                program=program,
+                font=brand["font"],
+                font_path=_font_path(brand["font"], bold=True) or _font_path(brand["font"]),
+                source_size=(_source_video(info)["width"], _source_video(info)["height"]),
+                face=tuple(settings["layout_face"]) if settings.get("layout_face") else None,
+            )
+            (directory / "layout.ass").write_text(layout_plan["script"], encoding="utf-8-sig")
+            filters.append("ass=filename=layout.ass:fontsdir=.")
+            effects.append("layout")
         if settings["title"] and layout is not None:
             filters.append(
                 _platform_title(
@@ -1776,8 +1851,19 @@ def export_video(
             )
             if framing_report is not None:
                 framing_report["output_frames"] = output_frames
+        layout_inputs = []
+        if layout_plan is not None:
+            lines, layout_inputs = layouts.graph(
+                layout_plan,
+                width=width,
+                height=height,
+                rate=(timed_rate if timed is not None and timed_rate else rate) or "30/1",
+                program=program,
+                first_input=2 if mix_path else 1,
+            )
+            graph.extend(lines)
         graph.append(
-            ("[framed]" if mode == "blur_fill" else "[joined]")
+            ("[framed]" if mode == "blur_fill" else "[laid]" if mode == "layout" else "[joined]")
             + ",".join(filters)
             + "[video]"
         )
@@ -1794,6 +1880,7 @@ def export_video(
             "-i",
             str(source),
             *(["-protocol_whitelist", "file", "-i", str(mix_path)] if mix_path else []),
+            *layout_inputs,
             "-filter_complex_threads",
             "2",
             "-/filter_complex",
@@ -1879,7 +1966,13 @@ def export_video(
             }
         )
     source_video = _source_video(info)
-    content, factor = reframe.content_upscale(source_video, width, height, mode)
+    if layout_plan is not None:
+        crop, box = layout_plan["speaker"]["crop"], layout_plan["speaker"]["box"]
+        factor = max(box["w"] / crop["w"], box["h"] / crop["h"])
+        content = [box["w"], box["h"]]
+        extra["layout"] = {**layout_plan["report"], "speaker_crop": crop, "speaker_box": box, "speaker_upscale_factor": factor}
+    else:
+        content, factor = reframe.content_upscale(source_video, width, height, mode)
     if framing_report is not None:
         if factor > 1.0001:
             framing_report["warnings"].append(
@@ -1899,7 +1992,9 @@ def export_video(
         "output": str(output),
         "preset": settings["preset"],
         "aspect": settings["aspect"],
-        "fit": "pad"
+        "fit": "layout"
+        if mode == "layout"
+        else "pad"
         if mode == "fit"
         else "blur_fill"
         if mode == "blur_fill"
@@ -2574,7 +2669,7 @@ def quality_report(
     layout = None
     try:
         if entry is not None:
-            layout = platform_layout(
+            layout = _drawn_layout(
                 settings, info["width"], info["height"], captions=bool(captions)
             )
         # Frame-aligned renders can end up to half a frame before the edited
@@ -2642,7 +2737,7 @@ def quality_report(
     )
     if entry is not None:
         try:
-            layout = platform_layout(
+            layout = _drawn_layout(
                 settings, info["width"], info["height"], captions=bool(captions)
             )
             findings = safe_zone_findings(

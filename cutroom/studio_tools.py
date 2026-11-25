@@ -528,6 +528,21 @@ def _string(description):
 
 def definitions():
     """Return the Hermes tool definitions without touching Studio."""
+    layout_item = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["kind"],
+        "description": "card: drawn by Cutroom (title, number, quote, bars as 'A: 30, B: 55', "
+        "apps as comma-separated names, terminal as comma-separated lines); file: a local "
+        "picture or video at an absolute path",
+        "properties": {
+            "kind": {"type": "string", "enum": ["card", "file"]},
+            "type": {"type": "string", "enum": ["title", "number", "quote", "bars", "apps", "terminal"]},
+            "text": {"type": "string", "maxLength": 400},
+            "detail": {"type": "string", "maxLength": 120},
+            "path": {"type": "string", "maxLength": 4096},
+        },
+    }
     changes = {
         "type": "object",
         "additionalProperties": False,
@@ -659,6 +674,52 @@ def definitions():
                         "description": "One-word vertical position in the safe "
                         "area (0 top, 1 bottom); null restores the default 0.8, below "
                         "a talking head's face",
+                    },
+                    "layout": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "9:16 explainer layout (Shorts, Reels, TikTok). "
+                        "split: headline at the top, a panel with a card or a local "
+                        "picture/video, the speaker in a card below; over: a card on top "
+                        "of the speaker; full: the plain frame. Ask the person before "
+                        "changing it. Panel files are local absolute paths the person "
+                        "named; never search the web or fetch pictures. Times are source "
+                        "seconds of the words the picture belongs to. null removes it.",
+                        "properties": {
+                            "layout": {"type": "string", "enum": ["full", "split", "over"]},
+                            "background": {"type": "string", "enum": ["paper", "grid", "kraft", "dark"]},
+                            "speaker": {"type": "string", "enum": ["small", "wide", "full"]},
+                            "divider": {"type": "integer", "minimum": 1060, "maximum": 1420,
+                                        "description": "Top of the speaker card in 1920-pixel frame units, default 1170"},
+                            "hold": {"type": "string", "enum": ["whole", "opening"],
+                                     "description": "Headline for the whole video or the first 3 s"},
+                            "headline": {
+                                "type": ["object", "null"],
+                                "additionalProperties": False,
+                                "description": "Two short lines in capitals from the person's own words; boxed are word indexes of line 2 drawn in the yellow box",
+                                "properties": {
+                                    "l1": {"type": "string", "maxLength": 60},
+                                    "l2": {"type": "string", "maxLength": 60},
+                                    "boxed": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 0}},
+                                },
+                            },
+                            "panel": {**layout_item, "type": ["object", "null"]},
+                            "pictures": {
+                                "type": "array",
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end", "item"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "item": layout_item,
+                                    },
+                                },
+                            },
+                        },
                     },
                 },
             },
