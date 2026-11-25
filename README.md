@@ -131,6 +131,8 @@ hermes plugins validate /absolute/path/hermes-cutroom --install-deps
 
 For local development, link this directory as `<active-HERMES_HOME>/plugins/cutroom`, then explicitly enable `cutroom` using `hermes plugins enable cutroom`. Installing/enabling modifies the active profile; this checkout does not do that automatically.
 
+Hermes Desktop keeps the Studio pane of a newly found package off until you turn it on. If Cutroom is missing from the sidebar after enabling it from the terminal, open Capabilities → Plugins and switch Cutroom on there (that switch turns on both the chat tools and the Studio pane).
+
 By default chat gets three tools:
 
 | Tool | Behavior |

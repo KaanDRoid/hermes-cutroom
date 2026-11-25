@@ -1116,7 +1116,8 @@ function speakerStyle(view, info, card, zoom = 1.7) {
   const width = Math.max(card.w, card.h * ratio) * zoom, height = width / ratio;
   const left = Math.min(0, Math.max(card.w - width, card.w * 0.5 - face[0] * width));
   const top = Math.min(0, Math.max(card.h - height, card.h * 0.47 - face[1] * height));
-  return { position: 'absolute', left: percent(left / card.w), top: percent(top / card.h), width: percent(width / card.w), height: percent(height / card.h), objectFit: 'fill', display: 'block' };
+  // maxWidth: the host's base CSS caps img and video at 100%, which would squeeze the zoomed speaker.
+  return { position: 'absolute', left: percent(left / card.w), top: percent(top / card.h), width: percent(width / card.w), height: percent(height / card.h), maxWidth: 'none', maxHeight: 'none', objectFit: 'fill', display: 'block' };
 }
 
 function cropPosition(view, info, box, time) {

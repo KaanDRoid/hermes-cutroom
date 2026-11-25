@@ -1487,6 +1487,22 @@ test('a hidden area sits on the same part of the picture with Fit and with Fill 
   assert.equal(fill.height, '20%');
 }));
 
+test('the speaker in a split card is not shrunk by the host max-width rule for images and video', async () => withBlobs(async () => {
+  // Hermes Desktop's base CSS sets img, video { max-width: 100% }; the zoomed speaker is wider than its card.
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
+  jobRows = [];
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: null, pictures: [] } },
+    source_info: { duration: 12, width: 960, height: 540 } });
+  ui.draw(); await tick();
+  const card = nodes(ui.draw()).find(n => n.props?.['data-cutroom-speaker']);
+  assert.ok(card, 'The speaker card is drawn');
+  const picture = nodes(card).find(n => n.type === 'img' || n.type === 'video');
+  assert.ok(parseFloat(picture.props.style.width) > 100, 'Zoomed wider than the card');
+  assert.equal(picture.props.style.maxWidth, 'none');
+  assert.equal(picture.props.style.maxHeight, 'none');
+}));
+
 test('a large video shows its poster frame and one Load button with its size', async () => withBlobs(async () => {
   jobRows = [];
   posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
