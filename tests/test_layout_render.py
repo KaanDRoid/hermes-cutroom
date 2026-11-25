@@ -89,6 +89,8 @@ class SplitRenderTests(unittest.TestCase):
         self.assertTrue(any(near(pixel(x, y), ink, 40) for y in range(300, 420, 3) for x in range(100, 980, 3)), "Headline line 1 is drawn")
         box = hex_rgb(layouts.PALETTE["box"])
         self.assertTrue(any(near(pixel(x, y), box, 30) for y in range(380, 520, 3) for x in range(100, 980, 3)), "A headline word sits in the yellow box")
+        # The boxed word must end above the top panel, not run into it.
+        self.assertFalse(any(near(pixel(x, y), box, 40) for y in range(panel["y"] - 10, panel["y"] + 12, 2) for x in range(100, 980, 3)), "Headline box clears the panel")
         # Source 2.0-2.5 s is program 1.5-2.0 s after the cut: the number card replaces the title.
         later = frame(output, 1.75)
         centre = (540, panel["y"] + panel["h"] // 2 - 40)

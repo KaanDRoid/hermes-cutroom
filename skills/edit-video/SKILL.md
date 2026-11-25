@@ -55,6 +55,13 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      chosen words (source seconds of those words). Write the headline from the
      person's own words, two short lines in capitals. Punch-ins and
      transitions are not available with this layout yet.
+   - Bleeps and hidden areas (`settings.redactions`): when the person names a
+     word to bleep or mute, or something on screen to hide (an email, a key,
+     a name), find the times in the transcript, say them back and ask before
+     saving. Hidden boxes are fractions of the source picture and stay in
+     place; suggest `cover` for anything secret and ask the person to check
+     the preview, because a box does not follow scrolling. Never put a
+     bleeped word in the headline or a card.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
    `media.path` from the completed job exactly as returned. When the job has

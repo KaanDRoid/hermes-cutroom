@@ -110,7 +110,7 @@ class LayoutTests(unittest.TestCase):
 
     def test_split_geometry_matches_the_studio_preview(self):
         geo = layouts.geometry({"layout": "split", "speaker": "wide", "divider": 1170})
-        self.assertEqual(geo["panel"], {"x": 56, "y": 500, "w": 968, "h": 480})
+        self.assertEqual(geo["panel"], {"x": 56, "y": 520, "w": 968, "h": 460})
         self.assertEqual(geo["speaker"], {"x": 24, "y": 1170, "w": 1032, "h": 726})
         self.assertEqual(geo["radius"], 40)
         self.assertEqual(geo["caption_y"], 1150)

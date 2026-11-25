@@ -17,6 +17,15 @@ Explainer layouts for vertical videos.
 - Layouts are saved on the project, can be undone and can be set from chat.
 - Headline capitals follow the video's language (Turkish i becomes İ).
 
+### Bleep and hide
+- Select words in Edit, then Bleep (a 1 kHz tone) or Mute from the ⋯ menu;
+  "everywhere" bleeps every time a word is said. Bleeped words are left out
+  of burned captions and SRT/VTT files.
+- Hide area: draw a box on the Original player for the selected words' time;
+  a solid box, blur or pixelate. Boxes stay where they are drawn.
+- Both apply to Preview and Final, including with cuts, punch-ins, music and
+  the split layout, and can be set from chat.
+
 ## 0.2.0 — unreleased
 
 Creator formats, a redesigned Studio and faster renders.

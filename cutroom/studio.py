@@ -364,6 +364,7 @@ class Studio:
                     "end_screen_s",
                     "post",
                     "layout",
+                    "redactions",
                 }
                 if not isinstance(settings, dict):
                     raise ValueError("Unsupported settings")
@@ -411,6 +412,17 @@ class Studio:
                     "square",
                 }:
                     raise ValueError("Unsupported aspect ratio")
+                if "redactions" in settings:
+                    from .redactions import normalize as normalize_redactions
+
+                    value = normalize_redactions(
+                        settings["redactions"],
+                        duration=float(updated.get("source_info", {}).get("duration") or 0),
+                    )
+                    if value is None:
+                        merged.pop("redactions", None)
+                    else:
+                        merged["redactions"] = value
                 if "layout" in settings:
                     from .layouts import normalize_layout
 
@@ -909,13 +921,17 @@ class Studio:
         subtitles file keeps every kept word.
         """
         from .longform import source_to_program
+        from .redactions import mask_words
 
         words = self._caption_words(project)
         excluded = set(project.get("excluded_word_ids", []))
         segments = project["segments"]
-        for word in (project.get("transcript") or {}).get("words") or []:
-            if word["id"] in excluded or word["end"] > word["start"]:
-                continue
+        zero = [
+            word
+            for word in (project.get("transcript") or {}).get("words") or []
+            if word["id"] not in excluded and word["end"] <= word["start"]
+        ]
+        for word in mask_words(zero, project.get("settings", {}).get("redactions")):
             if any(s["start"] <= word["start"] < s["end"] for s in segments):
                 at = source_to_program(segments, word["start"])
                 words.append({"start": at, "end": at, "text": word["text"]})
@@ -1586,11 +1602,14 @@ class Studio:
         """Output-time caption cues for kept, non-excluded words."""
         from .speech import caption_cues, remap_words
 
+        from .redactions import mask_words
+
         transcript = project.get("transcript") or {}
         excluded = set(project["excluded_word_ids"])
         words = [w for w in transcript.get("words") or [] if w["id"] not in excluded]
         if not words:
             return []
+        words = mask_words(words, project["settings"].get("redactions"))
         total = sum(s["end"] - s["start"] for s in project["segments"])
         cues, previous = [], 0.0
         for cue in caption_cues(remap_words(words, project["segments"])):
@@ -1604,12 +1623,13 @@ class Studio:
         """Map kept word fragments once, merging fragments of the same word."""
         from .speech import remap_words
 
+        from .redactions import mask_words
+
         excluded = set(project.get("excluded_word_ids", []))
-        words = [
-            w
-            for w in (project.get("transcript") or {}).get("words", [])
-            if w["id"] not in excluded
-        ]
+        words = mask_words(
+            [w for w in (project.get("transcript") or {}).get("words", []) if w["id"] not in excluded],
+            project.get("settings", {}).get("redactions"),
+        )
         result, sources = [], []
         for word in remap_words(words, project["segments"]):
             if sources and sources[-1] == word["source_id"]:
@@ -1702,6 +1722,8 @@ class Studio:
             if zooming(settings["pacing"]) and faces:
                 # Punch-ins centre on the face in every framing mode.
                 result["pacing_analysis"] = {"faces": faces}
+        if settings.get("redactions"):
+            result["redactions"] = copy.deepcopy(settings["redactions"])
         layout = settings.get("layout")
         if layout and layout.get("layout", "full") != "full" and result["aspect"] == "portrait":
             from .layouts import face_centre

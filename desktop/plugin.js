@@ -515,7 +515,9 @@ const soundSpec = (group, item) => {
 };
 const TOP_DEFAULTS = { excluded_word_ids: [], gaze_exclusions: [], brief: '', voice: 'neutral' };
 const SETTING_DEFAULTS = { platform: 'custom', caption_style: 'classic', captions: false, framing: 'fit', voice_cleanup: 'off', music: null, cut_sfx: null, caption_highlight_color: null, caption_word_y: null,
-  framing_keyframes: [], pacing: null, aspect: 'source', brand: {}, title: '', normalize_audio: false, use_segmented: false, final_resolution: '1080' };
+  framing_keyframes: [], pacing: null, aspect: 'source', brand: {}, title: '', normalize_audio: false, use_segmented: false, final_resolution: '1080',
+  // null removes them, which is how the first layout or bleep is undone.
+  layout: null, redactions: null };
 
 // The values an undo sends back; null when a change cannot be undone.
 function previousOf(changes, view) {
@@ -638,8 +640,6 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   };
   const canFinal = () => Boolean(approvalRef.current && approvalRef.current.revision === current.current.revision && approvalRef.current.digest === reviewRef.current?.digest);
   const [error, setError] = useState(null);
-  // Bleeps and hidden areas stay on this computer until the render applies them.
-  const [marks, setMarks, marksRef] = useDraft(ctx, project.id);
   const [picker, setPicker] = useState(null);
   const [hiding, setHiding] = useState(null);
 
@@ -900,9 +900,10 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
   const profile = platformOf(platforms, view);
   // The layout is project data: it autosaves, can be undone and is what the render and chat see.
   const layoutNow = () => ({ ...DRAFT_DEFAULT, ...(computeView().settings?.layout || {}) });
-  const draft = { ...DRAFT_DEFAULT, ...(view.settings?.layout || {}), bleeps: marks.bleeps, hidden: marks.hidden };
+  const redactionsNow = () => ({ bleeps: [], hidden: [], ...(computeView().settings?.redactions || {}) });
+  const draft = { ...DRAFT_DEFAULT, ...(view.settings?.layout || {}), bleeps: view.settings?.redactions?.bleeps || [], hidden: view.settings?.redactions?.hidden || [] };
   const setDraft = patch => {
-    const current = { ...layoutNow(), bleeps: marksRef.current.bleeps, hidden: marksRef.current.hidden };
+    const current = { ...layoutNow(), ...redactionsNow() };
     const change = typeof patch === 'function' ? patch(current) : patch;
     const fields = Object.keys(change).filter(key => LAYOUT_FIELDS.includes(key));
     if (fields.length) {
@@ -910,8 +911,12 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
       const layout = Object.fromEntries(LAYOUT_FIELDS.map(key => [key, next[key]]));
       edit({ settings: { layout } }, fields.includes('layout') ? 'Layout' : fields.includes('headline') ? 'Headline' : 'Top panel', fields.length === 1 && fields[0] === 'divider' ? 'layout:divider' : null);
     }
-    const local = Object.fromEntries(['bleeps', 'hidden'].filter(key => key in change).map(key => [key, change[key]]));
-    if (Object.keys(local).length) setMarks(local);
+    // Bleeps and hidden areas are project data too: the render and the subtitle files apply them.
+    const marked = ['bleeps', 'hidden'].filter(key => key in change);
+    if (marked.length) {
+      const next = { ...redactionsNow(), ...Object.fromEntries(marked.map(key => [key, change[key]])) };
+      edit({ settings: { redactions: { bleeps: next.bleeps, hidden: next.hidden } } }, marked.includes('hidden') ? 'Hide area' : 'Bleep');
+    }
   };
   const shape = profile?.orientation || view.settings?.aspect || 'source';
   const kit = { ctx, scope, project, view, jobs, platforms, profile, edit, run, runAction, submit, cancel, seek, playback, setStep, open, correctWord, sound,
@@ -940,7 +945,6 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
       el('div', { style: row, children: [
         jsx(Button, { variant: 'ghost', disabled: !undo.length, onClick: undoLast, title: undo.length ? `Undo ${undo.at(-1).label.toLowerCase()} (Ctrl+Z)` : 'Nothing to undo', 'aria-keyshortcuts': 'Control+Z', children: '↶ Undo' }),
         jsx(Badge, { children: `${profile?.short_label || profile?.label || 'Custom'} · ${ratioOf(shape)}` }),
-        jsx(Badge, { children: '0.3.0 draft' }),
       ] }),
     ] }, 'top'),
     save.state === 'error' ? jsx(Notice, { error: new Error(`Couldn't save: ${errorText(save.error)}. Your change is kept; select Retry.`) }, 'save-error') : null,
@@ -1258,7 +1262,8 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const fill = draftKit?.hiding && original ? 'contain' : rendered || (view.settings?.framing || 'fit') === 'fit' ? 'contain' : 'cover';
   const paper = BACKGROUNDS[draft.background] || BACKGROUNDS.paper;
   const programStart = keptWords(view)[0]?.start ?? 0;
-  const showZone = overlay && zone && (media ? ready : true);
+  // While drawing a hidden area the whole source is shown, so the platform's crop guides would mislead.
+  const showZone = overlay && zone && (media ? ready : true) && !(draftKit?.hiding && original);
   const total = duration ?? (original ? project.source_info?.duration : NaN);
   const now = media ? time ?? 0 : poster?.time ?? 0;
   const style = view.settings?.captions === true ? view.settings?.caption_style || 'classic' : 'off';
@@ -1316,7 +1321,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         ...(composite ? LayoutChrome({ draft, view, time: now, programStart, ctx, scope }) : []),
         composite && draft.hidden.length ? el('div', { style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, pointerEvents: 'none', borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` },
           children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
-        ...(original && !composite && fill === 'contain' && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info) : []),
+        ...(original && !composite && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info, fill, fill === 'cover' ? cropPosition(view, project.source_info, [w, h], now) : '50% 50%') : []),
         original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info }, 'hide') : null,
         showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
         cue ? el('div', { style: { position: 'absolute', inset: 0, zIndex: 4, pointerEvents: 'none' }, children: jsx(CaptionOverlay, { cue, zone: captionZone, portrait: tall, settings: view.settings || {}, time: now }) }, 'caption') : null,
@@ -1513,7 +1518,7 @@ function Transcript({ kit }) {
         jsx(Button, { variant: 'secondary', onClick: toggle, children: allRemoved ? 'Restore' : 'Remove' }, 'toggle'),
         hasPanel(draft) ? jsx(Button, { variant: 'secondary', onClick: () => kit.setPicker({ range }), children: 'Picture', title: 'Show a picture while these words play' }, 'picture') : null,
         jsx(Button, { variant: 'secondary', onClick: () => toggleBleep('bleep'), children: allBleeped ? 'Unbleep' : 'Bleep' }, 'bleep'),
-        jsx(Button, { variant: 'secondary', onClick: () => kit.setHiding(range), children: 'Hide area', title: 'Cover part of the video while these words play' }, 'hide'),
+        jsx(Button, { variant: 'secondary', 'aria-pressed': Boolean(kit.hiding), onClick: () => kit.setHiding(kit.hiding ? null : range), children: 'Hide area', title: kit.hiding ? 'Stop drawing (Esc)' : 'Cover part of the video while these words play' }, 'hide'),
         el('details', { style: { position: 'relative' }, children: [
           el('summary', { 'aria-label': 'More actions', style: { listStyle: 'none', cursor: 'pointer', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--ui-stroke-secondary)', fontWeight: 700 }, children: '⋯' }, 's'),
           el('div', { role: 'menu', onClick: event => event.currentTarget.closest('details')?.removeAttribute('open'), style: { position: 'absolute', right: 0, zIndex: 20, marginTop: 4, minWidth: 230, display: 'flex', flexDirection: 'column', alignItems: 'stretch', padding: 4, borderRadius: 8, border: '1px solid var(--ui-stroke-secondary)', background: 'var(--ui-bg-elevated, var(--ui-bg-editor))', backdropFilter: 'blur(12px)', boxShadow: '0 8px 24px color-mix(in srgb, var(--ui-bg-sidebar) 60%, transparent)' }, children: [
@@ -1818,7 +1823,7 @@ function ReviewStep({ kit }) {
   const makePreview = () => needsFaces ? kit.run('vision', {}, ['preview', 'qa']) : kit.run('preview', {}, ['qa']);
   const draftList = draftChecks(kit);
   const layoutChecks = draftList.length ? el('section', { 'aria-label': 'Layout checks', style: { ...stack, gap: 6 }, children: [
-    el('div', { style: { ...row, justifyContent: 'space-between' }, children: [el('h3', { style: h3s, children: 'Layout checks' }), jsx(Badge, { children: 'New · draft' })] }),
+    el('div', { style: { ...row, justifyContent: 'space-between' }, children: [el('h3', { style: h3s, children: 'Layout checks' }), jsx(Badge, { children: 'New' })] }),
     jsx(CheckRows, { label: 'Layout checks', items: draftList }),
   ] }, 'layout-checks') : null;
   if (!previewCurrent) return el('div', { style: stack, children: [intro, edited, layoutChecks, el('div', { style: { ...panel, alignItems: 'flex-start' }, children: [
@@ -2454,7 +2459,7 @@ function ChatCard(props) {
 
 
 // ---------------------------------------------------------------------------
-// 0.3.0 draft: layouts, top panel, headline, bleeps and hidden areas.
+// Layouts, top panel, headline, bleeps and hidden areas (0.3.0).
 // Draft settings live in Desktop storage per project; the preview render does
 // not use them yet. Everything here is shown live on the Original player.
 // ---------------------------------------------------------------------------
@@ -2471,26 +2476,12 @@ const PICTURE_FILE = /\.(png|jpe?g|webp|mp4|mov|m4v|webm|mkv)$/i;
 const BOX_YELLOW = LP.box;
 const hasPanel = draft => draft.layout === 'split' || draft.layout === 'over';
 
-function useDraft(ctx, id) {
-  const key = `marks030:${id}`;
-  const read = () => { const value = ctx.storage?.get?.(key, null); return value && typeof value === 'object' ? { ...DRAFT_DEFAULT, ...value } : { ...DRAFT_DEFAULT }; };
-  const [draft, setState] = useState(read);
-  const ref = useRef(draft);
-  ref.current = draft;
-  const set = patch => {
-    const next = { ...ref.current, ...(typeof patch === 'function' ? patch(ref.current) : patch) };
-    ref.current = next; setState(next); ctx.storage?.set?.(key, next);
-  };
-  return [draft, set, ref];
-}
-
-// Geometry in 1080 × 1920 frame pixels.
 function layoutBoxes(draft) {
   if (draft.layout === 'over') return { panel: { x: 80, y: 300, w: 920, h: 440 }, speaker: { x: 0, y: 0, w: 1080, h: 1920 }, radius: 0, captionY: 1450 };
   const seam = Math.max(1060, Math.min(1420, Number(draft.divider) || 1170));
   const speaker = draft.speaker === 'small' ? { x: 270, y: seam + 20, w: 540, h: Math.min(440, 1880 - seam - 20) }
     : draft.speaker === 'full' ? { x: 0, y: seam, w: 1080, h: 1920 - seam } : { x: 24, y: seam, w: 1032, h: 1920 - seam - 24 };
-  return { head: { y: 300, size: 84 }, panel: { x: 56, y: 500, w: 968, h: seam - 190 - 500 }, speaker, radius: draft.speaker === 'full' ? 0 : 40, captionY: seam - 20 };
+  return { head: { y: 300, size: 84 }, panel: { x: 56, y: 520, w: 968, h: seam - 190 - 520 }, speaker, radius: draft.speaker === 'full' ? 0 : 40, captionY: seam - 20 };
 }
 const box = rect => ({ position: 'absolute', left: percent(rect.x / 1080), top: percent(rect.y / 1920), width: percent(rect.w / 1080), height: percent(rect.h / 1920) });
 
@@ -2522,10 +2513,22 @@ function beep(on) {
 const HEADLINE_STRONG = /\b(not|never|no|why|how|actually|really|myth|myths|secret|mistake|only|every|değil|asla|neden|nasıl|aslında|sadece|hata|sır)\b/iu;
 const HEADLINE_LEAD = /^(and|so|but|well|okay|ok|now|then|ve|yani|ama|işte|şimdi)\b[ ,]*/iu;
 const HEADLINE_TAIL = /\b(the|a|an|of|to|and|or|that|this|be|is|it|bir|ve|ile|bu|da|de)$/iu;
+// A bleeped word never comes back as a big title: ideas that contain one are left out.
+const plainWord = text => String(text).toLocaleLowerCase().replace(/[^\p{L}\p{N}']+/gu, '');
+function bleepedWords(view) {
+  const bleeps = view.settings?.redactions?.bleeps || [];
+  if (!bleeps.length) return new Set();
+  const ids = new Set(bleeps.flatMap(item => item.ids || []));
+  const hit = word => ids.has(word.id) || bleeps.some(item => (word.start + word.end) / 2 >= item.start && (word.start + word.end) / 2 <= item.end);
+  return new Set((view.transcript?.words || []).filter(hit).map(word => plainWord(word.text)).filter(Boolean));
+}
+
 function headlineSuggestions(view) {
   const lang = view.transcript?.language || 'en';
   const text = keptWords(view).map(word => word.text).join(' ');
-  const pool = [...(view.story?.hooks || []).map(hook => hook?.text).filter(Boolean), ...text.split(/(?<=[.!?])\s+/).flatMap(sentence => [sentence, ...sentence.split(/,\s+/).slice(1)])];
+  const banned = bleepedWords(view);
+  const clean = line => !banned.size || !String(line).split(/\s+/).some(part => banned.has(plainWord(part)));
+  const pool = [...(view.story?.hooks || []).map(hook => hook?.text).filter(Boolean), ...text.split(/(?<=[.!?])\s+/).flatMap(sentence => [sentence, ...sentence.split(/,\s+/).slice(1)])].filter(clean);
   const scored = pool.map((raw, index) => {
     let line = String(raw).replace(/[.!?,;:]+$/, '');
     for (let i = 0; i < 3; i++) line = line.replace(HEADLINE_LEAD, '');
@@ -2609,7 +2612,7 @@ function LayoutChrome({ draft, view, time, programStart, ctx = null, scope = [] 
     // Long lines shrink so each line stays on one row (about 18 capitals fit at full size).
     const longest = Math.max(String(headline.l1 || '').length, String(headline.l2 || '').length, 1);
     const size = Math.min(geo.head.size, 900 / (longest * 0.66));
-    nodes.push(el('div', { 'data-cutroom-headline': true, style: { position: 'absolute', left: '5%', right: '5%', top: percent(geo.head.y / 1920), textAlign: 'center', color: 'var(--draft-ink)', fontWeight: 800, fontSize: `${(size / 1920 * 100).toFixed(2)}cqh`, lineHeight: 1.4, whiteSpace: 'nowrap', zIndex: 3 }, children: [
+    nodes.push(el('div', { 'data-cutroom-headline': true, style: { position: 'absolute', left: '5%', right: '5%', top: percent(geo.head.y / 1920), textAlign: 'center', color: 'var(--draft-ink)', fontWeight: 800, fontSize: `${(size / 1920 * 100).toFixed(2)}cqh`, lineHeight: 1.25, whiteSpace: 'nowrap', zIndex: 3 }, children: [
       upper(headline.l1 || '', lang), el('br', {}, 'br'),
       ...words.map((word, index) => el('span', { style: (headline.boxed || []).includes(index) ? { background: BOX_YELLOW, color: LP.on_box, padding: '0 0.8cqh', borderRadius: '0.4cqh' } : {}, children: word }, `w${index}`)).flatMap((node, index) => (index ? [' ', node] : [node])),
     ] }, 'headline'));
@@ -2662,9 +2665,8 @@ function HideLayer({ kit, frameRatio, source }) {
   const [start, setStart] = useState(null);
   const [rect, setRect] = useState(null);
   if (!hiding) return null;
-  const sourceRatio = source?.width > 0 && source?.height > 0 ? source.width / source.height : 16 / 9;
-  // The whole source picture as shown with Fit, in frame fractions.
-  const area = sourceRatio > frameRatio ? { left: 0, width: 1, height: frameRatio / sourceRatio, top: (1 - frameRatio / sourceRatio) / 2 } : { top: 0, height: 1, width: sourceRatio / frameRatio, left: (1 - sourceRatio / frameRatio) / 2 };
+  // The whole source picture as shown while drawing (always Fit), in frame fractions.
+  const area = sourceArea(frameRatio, source);
   const point = event => { const r = event.currentTarget.getBoundingClientRect(); return [clamp01((event.clientX - r.left) / r.width), clamp01((event.clientY - r.top) / r.height)]; };
   // Snap close to an edge so a few unpainted pixels cannot reveal a clipped name.
   const snap = t => t <= 0.015 ? 0 : t >= 0.985 ? 1 : t;
@@ -2688,19 +2690,30 @@ function HideLayer({ kit, frameRatio, source }) {
     ] });
 }
 
-function hiddenBoxes(draft, time, frameRatio, source) {
+// Where the whole source picture sits in the frame, in frame fractions, for Fit (contain) or Fill (cover at a crop position).
+function sourceArea(frameRatio, source, fill = 'contain', position = '50% 50%') {
   const sourceRatio = source?.width > 0 && source?.height > 0 ? source.width / source.height : 16 / 9;
-  const area = sourceRatio > frameRatio ? { left: 0, width: 1, height: frameRatio / sourceRatio, top: (1 - frameRatio / sourceRatio) / 2 } : { top: 0, height: 1, width: sourceRatio / frameRatio, left: (1 - sourceRatio / frameRatio) / 2 };
+  const [px, py] = String(position).split(' ').map(part => (Number.parseFloat(part) || 0) / 100);
+  if (fill === 'cover') {
+    return sourceRatio > frameRatio
+      ? { top: 0, height: 1, width: sourceRatio / frameRatio, left: (1 - sourceRatio / frameRatio) * px }
+      : { left: 0, width: 1, height: frameRatio / sourceRatio, top: (1 - frameRatio / sourceRatio) * py };
+  }
+  return sourceRatio > frameRatio ? { left: 0, width: 1, height: frameRatio / sourceRatio, top: (1 - frameRatio / sourceRatio) / 2 } : { top: 0, height: 1, width: sourceRatio / frameRatio, left: (1 - sourceRatio / frameRatio) / 2 };
+}
+
+function hiddenBoxes(draft, time, frameRatio, source, fill = 'contain', position = '50% 50%') {
+  const area = sourceArea(frameRatio, source, fill, position);
   return draft.hidden.filter(item => time >= item.start && time < item.end).map((item, index) => el('div', { 'data-cutroom-hidden': true, 'aria-label': 'Hidden area', style: {
     position: 'absolute', zIndex: 5, left: percent(area.left + item.box.x * area.width), top: percent(area.top + item.box.y * area.height), width: percent(item.box.w * area.width), height: percent(item.box.h * area.height),
-    background: item.style === 'cover' ? LP.cover : 'transparent', backdropFilter: item.style === 'blur' ? 'blur(14px)' : undefined, WebkitBackdropFilter: item.style === 'blur' ? 'blur(14px)' : undefined } }, `hide${index}`));
+    background: item.style === 'cover' ? LP.cover : 'transparent', backdropFilter: item.style !== 'cover' ? 'blur(14px)' : undefined, WebkitBackdropFilter: item.style !== 'cover' ? 'blur(14px)' : undefined } }, `hide${index}`));
 }
 
 // Hidden areas drawn in source fractions, placed inside a box that has the source's shape.
 function hiddenInSource(draft, time) {
   return draft.hidden.filter(item => time >= item.start && time < item.end).map((item, index) => el('div', { 'data-cutroom-hidden': true, 'aria-label': 'Hidden area', style: {
     position: 'absolute', left: percent(item.box.x), top: percent(item.box.y), width: percent(item.box.w), height: percent(item.box.h),
-    background: item.style === 'cover' ? LP.cover : 'transparent', backdropFilter: item.style === 'blur' ? 'blur(14px)' : undefined } }, `hide${index}`));
+    background: item.style === 'cover' ? LP.cover : 'transparent', backdropFilter: item.style !== 'cover' ? 'blur(14px)' : undefined } }, `hide${index}`));
 }
 
 function LayoutSection({ kit }) {
@@ -2724,7 +2737,7 @@ function LayoutSection({ kit }) {
     el('p', { style: muted, children: 'Split explainer and Picture over you are for 9:16 videos. Choose Shorts, Reels or TikTok above to use them.' }),
   ] });
   return el('section', { 'aria-labelledby': 'cutroom-layout', style: stack, children: [
-    el('div', { style: { ...row, justifyContent: 'space-between' }, children: [el('h3', { id: 'cutroom-layout', style: h3s, children: 'Layout' }), jsx(Badge, { children: 'New · draft' })] }, 'head'),
+    el('div', { style: { ...row, justifyContent: 'space-between' }, children: [el('h3', { id: 'cutroom-layout', style: h3s, children: 'Layout' }), jsx(Badge, { children: 'New' })] }, 'head'),
     jsx(RadioCards, { label: 'Layout', value: draft.layout, min: 120, onChange: value => setDraft({ layout: value }), options: LAYOUTS.map(([value, title, detail]) => ({ key: `layout:${value}`, value, title, detail, preview: mini(value) })) }, 'cards'),
     hasPanel(draft) ? el('div', { style: { ...stack, gap: 8 }, children: [
       el('strong', { style: { fontSize: 12 }, children: draft.layout === 'split' ? 'Top panel' : 'Picture card' }, 'label'),
@@ -2790,10 +2803,10 @@ function HiddenAndBleeps({ kit }) {
   ] }, `${key}${index}`);
   return el('div', { style: { ...stack, gap: 6 }, children: [
     ...draft.bleeps.map((item, index) => rowFor(`${item.mode === 'mute' ? 'Muted' : 'Bleep'} · ${clock(item.start)} · “${item.said}”`, draft.bleeps, 'bleeps', index)),
-    ...draft.hidden.map((item, index) => rowFor(`Hidden area (${item.style === 'blur' ? 'blur' : 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index)),
+    ...draft.hidden.map((item, index) => rowFor(`Hidden area (${{ cover: 'solid box', blur: 'blur', pixelate: 'pixelate' }[item.style] || 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index)),
     ...draft.pictures.map((item, index) => rowFor(`Picture · ${clock(item.start)}–${clock(item.end)} · “${String(item.said).slice(0, 30)}”`, draft.pictures, 'pictures', index)),
-    draft.hidden.length ? el('div', { style: row, children: [el('span', { style: { fontSize: 12 }, children: 'Hidden areas look' }), jsx(Choice, { label: 'Hidden areas look', value: draft.hidden[0].style, options: [['cover', 'Solid box'], ['blur', 'Blur']], onChange: value => setDraft(old => ({ hidden: old.hidden.map(item => ({ ...item, style: value })) })) })] }, 'look') : null,
-    draft.hidden.length ? el('p', { style: muted, children: 'A solid box is safest for passwords and keys: blur can sometimes be undone. The box stays where you put it; it does not follow scrolling.' }, 'note') : null,
+    draft.hidden.length ? el('div', { style: row, children: [el('span', { style: { fontSize: 12 }, children: 'Hidden areas look' }), jsx(Choice, { label: 'Hidden areas look', value: draft.hidden[0].style, options: [['cover', 'Solid box'], ['blur', 'Blur'], ['pixelate', 'Pixelate']], onChange: value => setDraft(old => ({ hidden: old.hidden.map(item => ({ ...item, style: value })) })) })] }, 'look') : null,
+    draft.hidden.length ? el('p', { style: muted, children: 'A solid box is safest for passwords and keys: blur and pixelate can sometimes be undone. The box stays where you put it; it does not follow scrolling.' }, 'note') : null,
   ] });
 }
 
@@ -2809,15 +2822,23 @@ function draftChecks(kit) {
     out.push({ name: 'draft_panel', status: draft.panel || draft.pictures.length ? 'pass' : 'fail' });
   }
   if (draft.hidden.length) out.push({ name: 'draft_hidden', status: 'warning' });
-  if (draft.bleeps.length) out.push({ name: 'draft_bleeps', status: 'warning' });
+  if (draft.bleeps.length) {
+    // Text drawn on the video (headline, panel and timed cards) can still show a bleeped word.
+    const banned = bleepedWords(view);
+    const shown = [draft.headline?.l1, draft.headline?.l2, ...[draft.panel, ...draft.pictures.map(item => item?.item)].filter(item => item?.kind === 'card').flatMap(cardText)];
+    const leak = shown.some(line => String(line || '').split(/\s+/).some(part => banned.has(plainWord(part))));
+    out.push({ name: leak ? 'draft_bleep_on_screen' : 'draft_bleeps', status: leak ? 'warning' : 'pass' });
+  }
   return out;
 }
+const cardText = card => Object.values(card).flatMap(value => (typeof value === 'string' ? [value] : Array.isArray(value) ? value.flatMap(item => (typeof item === 'string' ? [item] : item && typeof item === 'object' ? cardText(item) : [])) : []));
 Object.assign(CHECK_TEXT, {
   draft_headline: ['The headline is below the app\u2019s top bar', 'The headline starts under the app\u2019s top bar. Move it down.'],
   draft_face: ['Your face is clear of the post\u2019s caption area', 'Your face sits in the lower part of the screen, where the app can show the post\u2019s caption. Most split-screen shorts accept this; move the divider up in Style to clear it.'],
   draft_panel: ['The top panel has a picture', 'The top panel is empty. Add a screen recording, picture or card in Style.'],
   draft_hidden: ['Hidden areas cover what they should', 'Watch each hidden range to the end: a box stays where you put it and does not follow scrolling.'],
-  draft_bleeps: ['Bleep is marked in the live draft', 'The Preview and Final files do not apply draft bleeps, including to exported subtitles.'],
+  draft_bleeps: ['Bleeped words are silenced and left out of captions and subtitle files'],
+  draft_bleep_on_screen: ['Bleeped words are silenced', 'A bleeped word is still on screen in the headline or a card. Change that text in Style, or the word will show while it is bleeped.'],
 });
 
 export default {

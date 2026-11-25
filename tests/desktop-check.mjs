@@ -129,7 +129,10 @@ function timerBox() {
 const patchApplies = (_path, options) => {
   if (options?.method === 'PATCH') {
     const changes = options.body.changes;
-    selectedProject = { ...selectedProject, ...changes, settings: { ...selectedProject.settings, ...(changes.settings || {}) }, revision: selectedProject.revision + 1 };
+    const settings = { ...selectedProject.settings, ...(changes.settings || {}) };
+    // Like the server: null removes a layout or the bleeps and hidden areas.
+    for (const name of ['layout', 'redactions']) if (settings[name] === null) delete settings[name];
+    selectedProject = { ...selectedProject, ...changes, settings, revision: selectedProject.revision + 1 };
   }
   return selectedProject;
 };
@@ -1005,6 +1008,78 @@ test('a split layout and its top panel card are saved on the project and can be 
   assert.equal(selectedProject.settings.layout.layout, 'split');
 });
 
+test('a bleep chosen on selected words is saved on the project', async () => {
+  jobRows = [];
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }, { id: 2, text: 'here', start: 1.1, end: 1.5 }];
+  const ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }] });
+  const tree = ui.draw();
+  const alice = word(tree, '1');
+  alice.props.onClick({});
+  await button(ui.draw(), 'Bleep').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps, [{ ids: [1], start: 0.6, end: 1.0, said: 'Alice', mode: 'bleep' }]);
+  assert.deepEqual(selectedProject.settings.redactions.hidden, []);
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.redactions, undefined, 'The first bleep can be undone');
+});
+
+test('Hide area starts drawing and a second press stops it', async () => {
+  jobRows = [];
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }] });
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  assert.equal(button(ui.draw(), 'Hide area').props['aria-pressed'], true);
+  assert.ok(nodes(ui.draw()).some(n => n.props?.role === 'status' && /Drag a box|Choose Original/.test(String(n.props.children))));
+  button(ui.draw(), 'Hide area').props.onClick();
+  assert.equal(button(ui.draw(), 'Hide area').props['aria-pressed'], false);
+  assert.ok(!nodes(ui.draw()).some(n => n.props?.role === 'status' && /Drag a box|Choose Original/.test(String(n.props.children))));
+});
+
+test('headline ideas never use a bleeped word', async () => {
+  const sentence = 'Climate change is not actually that complicated. Nobody reads the report anyway.';
+  const words = sentence.split(' ').map((text, id) => ({ id, text, start: id * 0.5, end: id * 0.5 + 0.4 }));
+  const shown = async redactions => {
+    jobRows = [];
+    const ui = await studio(patchApplies, { transcript: { words, language: 'en' }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }],
+      settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: null, pictures: [] }, ...(redactions ? { redactions } : {}) } });
+    const tree = await ui.step('Style');
+    return nodes(tree).map(n => n.props?.children).filter(c => typeof c === 'string').join(' | ');
+  };
+  assert.match(await shown(null), /COMPLICATED/, 'Without a bleep the sentence is a headline idea');
+  const text = await shown({ bleeps: [{ start: 3.0, end: 3.4, ids: [6], said: 'complicated.', mode: 'bleep' }], hidden: [] });
+  assert.doesNotMatch(text, /COMPLICATED/);
+  assert.match(text, /NOBODY|REPORT/, 'Other sentences are still offered');
+});
+
+test('Review warns when a headline or card shows a word that is bleeped', async () => {
+  const words = 'This is really not that complicated.'.split(' ').map((text, id) => ({ id, text, start: id * 0.5, end: id * 0.5 + 0.4 }));
+  const layout = headline => ({ layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline, panel: { kind: 'card', type: 'title', text: 'Hello' }, pictures: [] });
+  const review = async headline => {
+    jobRows = [];
+    const ui = await studio(patchApplies, { transcript: { words, language: 'en' }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }],
+      settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: layout(headline), redactions: { bleeps: [{ start: 2.5, end: 2.9, ids: [5], said: 'complicated.', mode: 'bleep' }], hidden: [] } } });
+    return text(await ui.step('Review'));
+  };
+  assert.match(await review({ l1: 'REALLY NOT THAT', l2: 'COMPLICATED', boxed: [0] }), /A bleeped word is still on screen/);
+  const clean = await review({ l1: 'REALLY NOT', l2: 'THAT HARD', boxed: [1] });
+  assert.doesNotMatch(clean, /A bleeped word is still on screen/);
+  assert.match(clean, /Bleeped words are silenced/);
+});
+
+test('the first layout chosen on a project can be undone', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} } });
+  radio(await ui.step('Style'), 'Layout', 'split').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.layout, 'split');
+  assert.equal(button(ui.draw(), '↶ Undo').props.disabled, false);
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout, undefined);
+});
+
 test('step tabs follow the tab pattern with arrow, Home and End keys and a Next button', async () => {
   jobRows = [];
   const ui = await studio(async () => selectedProject);
@@ -1386,6 +1461,30 @@ test('opens with the video loaded: the current preview, else the original, when 
   assert.ok(ui.calls.some(c => c.path === '/projects/p1/artifact-info/source'));
   assert.ok(!ui.calls.some(c => c.path.includes('/media/preview')), 'A stale preview is not loaded');
   assert.equal(choice(tree, 'Original').props['aria-pressed'], true);
+}));
+
+test('a hidden area sits on the same part of the picture with Fit and with Fill framing', async () => withBlobs(async () => {
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
+  const hidden = [{ start: 3, end: 4, said: 'key', box: { x: 0.5, y: 0.5, w: 0.1, h: 0.2 }, style: 'cover' }];
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const boxOf = async framing => {
+    jobRows = [];
+    const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', framing, redactions: { bleeps: [], hidden } }, source_info: { duration: 12, width: 1920, height: 1080 } });
+    ui.draw(); await tick();
+    const found = nodes(ui.draw()).filter(n => n.props?.['data-cutroom-hidden']);
+    assert.equal(found.length, 1, `One hidden box on the player with ${framing}`);
+    return found[0].props.style;
+  };
+  // Fit: the 16:9 source is a strip across the 9:16 frame.
+  const fit = await boxOf('fit');
+  assert.equal(fit.left, '50%');
+  assert.equal(fit.width, '10%');
+  // Fill: the source is 3.16 frame widths wide and centred, so 10% of it is 31.6% of the frame.
+  const fill = await boxOf('fill');
+  assert.equal(fill.left, '50%');
+  assert.equal(fill.width, '31.6%');
+  assert.equal(fill.top, '50%');
+  assert.equal(fill.height, '20%');
 }));
 
 test('a large video shows its poster frame and one Load button with its size', async () => withBlobs(async () => {

@@ -675,6 +675,59 @@ def definitions():
                         "area (0 top, 1 bottom); null restores the default 0.8, below "
                         "a talking head's face",
                     },
+                    "redactions": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "Bleep or mute words and hide parts of the picture, in "
+                        "source seconds. Bleeped words are left out of burned captions "
+                        "and subtitle files. Offer this when the person names something "
+                        "to remove (a name, a swear word, an email or key on screen) and "
+                        "confirm the ranges first. A hidden box is fixed in place: it "
+                        "does not follow movement or scrolling. cover is the safe choice "
+                        "for secrets; blur and pixelate can sometimes be undone. null "
+                        "removes all of them.",
+                        "properties": {
+                            "bleeps": {
+                                "type": "array",
+                                "maxItems": 200,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "mode": {"type": "string", "enum": ["bleep", "mute"]},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "ids": {"type": "array", "maxItems": 50, "items": {"type": "integer", "minimum": 0},
+                                                "description": "Transcript word ids covered by this bleep"},
+                                    },
+                                },
+                            },
+                            "hidden": {
+                                "type": "array",
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end", "box"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "style": {"type": "string", "enum": ["cover", "blur", "pixelate"]},
+                                        "box": {
+                                            "type": "object",
+                                            "additionalProperties": False,
+                                            "required": ["x", "y", "w", "h"],
+                                            "description": "Fractions of the source picture, 0 to 1, from the top-left corner",
+                                            "properties": {key: {"type": "number", "minimum": 0, "maximum": 1} for key in ("x", "y", "w", "h")},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
                     "layout": {
                         "type": ["object", "null"],
                         "additionalProperties": False,

@@ -327,6 +327,7 @@ def _settings(settings):
         "pacing_words",
         "layout",
         "layout_face",
+        "redactions",
     }
     if settings is None:
         settings = {}
@@ -427,6 +428,11 @@ def _settings(settings):
             result["layout"] = None
         elif result["aspect"] != "portrait" and _platform_entry(result) is None:
             raise ValueError("Split explainer and Picture over you need a 9:16 frame")
+    if result.get("redactions") is not None:
+        from . import redactions
+
+        # Times are checked against the real source in export_video.
+        result["redactions"] = redactions.normalize(result["redactions"], duration=math.inf)
     face = result.get("layout_face")
     if face is not None:
         if not isinstance(face, list) or len(face) != 2:
@@ -1523,6 +1529,16 @@ def export_video(
         audio_graph.append(
             "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
         )
+    redaction = None
+    if settings.get("redactions") is not None:
+        from . import redactions
+
+        redaction = redactions.normalize(settings["redactions"], duration=info["duration"] + 1)
+    bleep = redactions.audio_filter(redaction, int(audio_stream.get("channels") or 2)) if redaction else None
+    if bleep and info["has_audio"]:
+        # Every read of the source sound gets the bleeped copy (render, mix and loudness).
+        graph[:] = redactions.redirect(graph, "[0:a:0]", bleep, "abl")
+        audio_graph[:] = redactions.redirect(audio_graph, "[0:a:0]", bleep, "abl")
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
     layout = platform_layout(settings, width, height, captions=bool(captions))
@@ -1920,6 +1936,13 @@ def export_video(
             args += ["-fps_mode", "cfr", "-r", rate]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
+        chain = (
+            redactions.video_chain(redaction, int(video_stream["width"]), int(video_stream["height"]), float(Fraction(rate)) if rate and rate != "0/0" else 30.0)
+            if redaction
+            else None
+        )
+        if chain:
+            graph[:] = redactions.redirect(graph, "[0:v:0]", chain, "vhd")
         delivered_peak, ceiling = None, None
         normalized = has_audio and (settings["normalize_audio"] or bool(mix_path))
         for attempt in range(DELIVERY_PEAK_ATTEMPTS):
@@ -1966,6 +1989,12 @@ def export_video(
             }
         )
     source_video = _source_video(info)
+    if redaction:
+        extra["redactions"] = {
+            "bleeps": sum(b["mode"] == "bleep" for b in redaction["bleeps"]),
+            "mutes": sum(b["mode"] == "mute" for b in redaction["bleeps"]),
+            "hidden": len(redaction["hidden"]),
+        }
     if layout_plan is not None:
         crop, box = layout_plan["speaker"]["crop"], layout_plan["speaker"]["box"]
         factor = max(box["w"] / crop["w"], box["h"] / crop["h"])

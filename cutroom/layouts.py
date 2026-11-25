@@ -219,7 +219,8 @@ def geometry(layout):
     else:
         box = {"x": 24, "y": seam, "w": 1032, "h": 1920 - seam - 24}
     return {
-        "panel": {"x": 56, "y": 500, "w": 968, "h": seam - 190 - 500},
+        # The panel starts below the two headline lines (see HEADLINE_LINE).
+        "panel": {"x": 56, "y": 520, "w": 968, "h": seam - 190 - 520},
         "speaker": box,
         "radius": 0 if speaker == "full" else 40,
         "caption_y": seam - 20,
@@ -452,6 +453,10 @@ def _card(script, spans, item, panel, colours):
             script.text(spans, tx + 2.4 * CQH, ty + 4.6 * CQH + index * 2.9 * CQH, ("$ " if index == 0 else "› ") + line, 1.7 * CQH, colour, align=4)
 
 
+# Line spacing of the two headline lines, in font sizes; the Studio preview uses the same.
+HEADLINE_LINE = 1.25
+
+
 def _draw_headline(script, spans, headline, measure):
     size = min(84.0, 900 / (max(len(headline["l1"]), len(headline["l2"]), 1) * 0.66))
     top = 300
@@ -466,7 +471,7 @@ def _draw_headline(script, spans, headline, measure):
     gaps = [space + (pad if i in headline["boxed"] or i + 1 in headline["boxed"] else 0) for i in range(len(words) - 1)]
     total = sum(widths) + sum(gaps)
     x = 540 - total / 2
-    y = top + size * 1.4 + size * 0.61
+    y = top + size * HEADLINE_LINE + size * 0.61
     for index, word in enumerate(words):
         boxed = index in headline["boxed"]
         script.text(spans, x + widths[index] / 2, y, word, size, PALETTE["on_box"] if boxed else script.ink, style="Box" if boxed else "Text")
