@@ -984,6 +984,27 @@ test('chooses a platform card and final size, with keyboard arrows in the radio 
   assert.equal(radio(ui.draw(), 'Platform', 'youtube').props.tabIndex, -1);
 });
 
+test('a split layout and its top panel card are saved on the project and can be undone', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} } });
+  let tree = await ui.step('Style');
+  radio(tree, 'Layout', 'split').props.onClick();
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.layout.layout, 'split');
+  assert.equal(selectedProject.settings.layout.divider, 1170);
+  tree = ui.draw();
+  await button(tree, 'Add card').props.onClick();
+  tree = ui.draw();
+  await button(tree, 'Number').props.onClick();
+  await button(ui.draw(), 'Use this card').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel, { kind: 'card', type: 'number', text: '3', detail: 'things you need to know' });
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.panel, null, 'Undo takes the card back out');
+  assert.equal(selectedProject.settings.layout.layout, 'split');
+});
+
 test('step tabs follow the tab pattern with arrow, Home and End keys and a Next button', async () => {
   jobRows = [];
   const ui = await studio(async () => selectedProject);
@@ -1676,7 +1697,14 @@ test('uses only public SDK/React imports and no renderer or polling bypasses', a
   assert.ok(captionDefault, 'The caption default is declared once');
   const rendered = (await readFile(new URL('../cutroom/captions.py', import.meta.url), 'utf8')).match(/^DEFAULT_HIGHLIGHT = "(#[0-9A-Fa-f]{6})"/m);
   assert.equal(captionDefault[1], rendered[1], 'Preview and render use the same default highlight');
-  assert.doesNotMatch(source.replace(captionDefault[0], ''), /#[0-9a-fA-F]{3,8}\b|rgb\(/);
+  // Layout colours are burned into the video too: one declaration, equal to the renderer's palette.
+  const paletteLine = source.match(/^const LAYOUT_PALETTE = Object\.freeze\((\{.*\})\);$/m);
+  assert.ok(paletteLine, 'The layout palette is declared once');
+  const renderer = await readFile(new URL('../cutroom/layouts.py', import.meta.url), 'utf8');
+  const block = renderer.match(/^PALETTE = \{([\s\S]*?)^\}/m)[1];
+  const expected = Object.fromEntries([...block.matchAll(/"(\w+)": "(#[0-9A-F]{6,8})"/g)].map(m => [m[1], m[2]]));
+  assert.deepEqual(JSON.parse(paletteLine[1]), expected, 'Preview and render use the same layout palette');
+  assert.doesNotMatch(source.replace(captionDefault[0], '').replace(paletteLine[0], ''), /#[0-9a-fA-F]{3,8}\b|rgb\(/);
   assert.doesNotMatch(source, /'progress'/, 'Themed progress bars only');
   assert.match(source, /prefers-reduced-motion/);
   assert.match(source, /focus-visible/);

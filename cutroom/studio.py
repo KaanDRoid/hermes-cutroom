@@ -363,6 +363,7 @@ class Studio:
                     "subtitles_file",
                     "end_screen_s",
                     "post",
+                    "layout",
                 }
                 if not isinstance(settings, dict):
                     raise ValueError("Unsupported settings")
@@ -410,6 +411,29 @@ class Studio:
                     "square",
                 }:
                     raise ValueError("Unsupported aspect ratio")
+                if "layout" in settings:
+                    from .layouts import normalize_layout
+
+                    value = normalize_layout(
+                        settings["layout"],
+                        duration=float(updated.get("source_info", {}).get("duration") or 0),
+                    )
+                    if value is None:
+                        merged.pop("layout", None)
+                    else:
+                        merged["layout"] = value
+                if (
+                    merged.get("layout", {}).get("layout", "full") != "full"
+                    and merged.get("aspect") != "portrait"
+                ):
+                    if "layout" not in settings:
+                        # A wide platform was chosen: keep the panel and headline for later.
+                        merged["layout"] = {**merged["layout"], "layout": "full"}
+                    else:
+                        raise ValueError(
+                            "Split explainer and Picture over you need a 9:16 frame; "
+                            "choose Shorts, Reels or TikTok first"
+                        )
                 if (
                     not isinstance(merged.get("title", ""), str)
                     or len(merged.get("title", "")) > 500
