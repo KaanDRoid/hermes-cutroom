@@ -53,7 +53,8 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      local picture/video the person named by absolute path; never search the
      web for pictures. `pictures` change the panel while the person says
      chosen words (source seconds of those words). Write the headline from the
-     person's own words, two short lines in capitals. Punch-ins and
+     person's own words, two short lines in capitals (about 18 letters each;
+     longer lines shrink to stay clear of the app's buttons). Punch-ins and
      transitions are not available with this layout yet.
    - Bleeps and hidden areas (`settings.redactions`): when the person names a
      word to bleep or mute, or something on screen to hide (an email, a key,

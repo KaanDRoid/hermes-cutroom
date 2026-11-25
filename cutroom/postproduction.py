@@ -1666,6 +1666,7 @@ def export_video(
                 font_path=_font_path(brand["font"], bold=True) or _font_path(brand["font"]),
                 source_size=(_source_video(info)["width"], _source_video(info)["height"]),
                 face=tuple(settings["layout_face"]) if settings.get("layout_face") else None,
+                zone=platforms.profile(settings.get("platform", "custom"))["safe_zone"],
             )
             (directory / "layout.ass").write_text(layout_plan["script"], encoding="utf-8-sig")
             filters.append("ass=filename=layout.ass:fontsdir=.")

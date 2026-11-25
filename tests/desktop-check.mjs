@@ -1503,6 +1503,26 @@ test('the speaker in a split card is not shrunk by the host max-width rule for i
   assert.equal(picture.props.style.maxHeight, 'none');
 }));
 
+test('the headline preview shrinks to stay clear of the Shorts buttons and Review warns when it gets small', async () => withBlobs(async () => {
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 1 };
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const open = async headline => {
+    jobRows = [];
+    const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline, panel: { kind: 'card', type: 'title', text: 'Hi' }, pictures: [] } },
+      source_info: { duration: 12, width: 1920, height: 1080 } });
+    ui.draw(); await tick();
+    const node = nodes(ui.draw()).find(n => n.props?.['data-cutroom-headline']);
+    return { ui, size: parseFloat(node.props.style.fontSize) / 100 * 1920 };
+  };
+  // Shorts: centred and clear of the right 18 % leaves 2 * (885.6 - 540) - 8 = 683 units.
+  const long = await open({ l1: 'CLIMATE CHANGE IS REALLY NOT', l2: 'THAT HARD', boxed: [1] });
+  assert.ok(Math.abs(long.size - 683 / (28 * 0.66)) < 0.6, `size ${long.size}`);
+  assert.match(text(await long.ui.step('Review')), /Shorten the headline/);
+  const short = await open({ l1: 'NOT THAT', l2: 'HARD', boxed: [0] });
+  assert.equal(Math.round(short.size), 84);
+  assert.doesNotMatch(text(await short.ui.step('Review')), /Shorten the headline/);
+}));
+
 test('a large video shows its poster frame and one Load button with its size', async () => withBlobs(async () => {
   jobRows = [];
   posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };

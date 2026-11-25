@@ -457,8 +457,42 @@ def _card(script, spans, item, panel, colours):
 HEADLINE_LINE = 1.25
 
 
-def _draw_headline(script, spans, headline, measure):
-    size = min(84.0, 900 / (max(len(headline["l1"]), len(headline["l2"]), 1) * 0.66))
+# Headline sizes in 1080 x 1920 units. Below MIN the lines are hard to read on a phone.
+HEADLINE_MAX = 84.0
+HEADLINE_MIN = 52.0
+
+
+def headline_width(zone=None):
+    """Widest the centred headline may be: clear of the app's side columns, at most 900."""
+    if not zone:
+        return 900.0
+    left, right = zone.get("left", 0) * FRAME[0], (1 - zone.get("right", 0)) * FRAME[0]
+    return max(200.0, min(900.0, 2 * min(FRAME[0] / 2 - left, right - FRAME[0] / 2) - 8))
+
+
+def headline_size(headline, zone=None, measure=None):
+    """Font size that keeps both lines inside headline_width; the Studio preview uses the estimate."""
+    limit = headline_width(zone)
+    size = min(HEADLINE_MAX, limit / (max(len(headline["l1"]), len(headline["l2"]), 1) * 0.66))
+    if measure is not None:
+        for _ in range(6):
+            widest = max(_line_width(headline["l1"].split(), [], size, measure), _line_width(headline["l2"].split(), headline["boxed"], size, measure))
+            if widest <= limit:
+                break
+            size *= limit / widest * 0.99
+    return size
+
+
+def _line_width(words, boxed, size, measure):
+    if not words:
+        return 0.0
+    pad = 0.8 * CQH
+    widths = [measure(word, size) + (2 * pad if index in boxed else 0) for index, word in enumerate(words)]
+    return sum(widths) + size * 0.28 * (len(words) - 1)
+
+
+def _draw_headline(script, spans, headline, measure, zone=None):
+    size = headline_size(headline, zone, measure)
     top = 300
     if headline["l1"]:
         script.text(spans, 540, top + size * 0.61, headline["l1"], size, script.ink)
@@ -478,7 +512,7 @@ def _draw_headline(script, spans, headline, measure):
         x += widths[index] + (gaps[index] if index < len(gaps) else 0)
 
 
-def build(layout, *, width, height, ranges, program, font, font_path, source_size, face=None):
+def build(layout, *, width, height, ranges, program, font, font_path, source_size, face=None, zone=None):
     """Everything the renderer needs for a layout.
 
     Returns the ASS script, the speaker crop/box and the local files to overlay
@@ -529,7 +563,7 @@ def build(layout, *, width, height, ranges, program, font, font_path, source_siz
         script.shape(whole, _corners(*script.scaled(speaker["x"], speaker["y"], speaker["w"], speaker["h"], geo["radius"])), colours["paper"], layer=3)
     if layout["layout"] == "split" and layout["headline"]:
         spans = whole if layout["hold"] == "whole" else [(0.0, min(program, OPENING_SECONDS))]
-        _draw_headline(script, spans, layout["headline"], measure)
+        _draw_headline(script, spans, layout["headline"], measure, zone)
     box = {key: round(value * s / 2) * 2 for key, value in speaker.items()}
     crop = speaker_crop(*source_size, box["w"], box["h"], face=face, zoom=1.0 if layout["layout"] == "over" else 1.7)
     return {

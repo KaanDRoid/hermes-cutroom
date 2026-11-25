@@ -97,6 +97,22 @@ class SplitRenderTests(unittest.TestCase):
         self.assertTrue(any(near(later(x, y), box, 30) for y in range(centre[1] - 120, centre[1] + 40, 4) for x in range(300, 780, 4)), "Timed number card shows")
         self.assertFalse(any(near(pixel(x, y), box, 30) for y in range(centre[1] - 120, centre[1] + 40, 4) for x in range(300, 780, 4)), "Not before its words")
 
+    def test_a_long_headline_stays_clear_of_the_shorts_buttons(self):
+        output, _ = self.render(
+            {"layout": "split", "headline": {"l1": "CLIMATE CHANGE IS REALLY NOT", "l2": "THAT COMPLICATED AT ALL", "boxed": [1]}, "panel": {"kind": "card", "type": "title", "text": "Hi"}},
+            [{"start": 0, "end": 1.0}],
+            "long-headline.mp4",
+        )
+        pixel = frame(output, 0.5)
+        ink, box = hex_rgb(layouts.PALETTE["paper_ink"]), hex_rgb(layouts.PALETTE["box"])
+        right = round((1 - 0.18) * 1080)  # YouTube Shorts keeps the right 18 % for its buttons.
+        drawn = [(x, y) for y in range(290, 515, 2) for x in range(60, 1075, 2) if near(pixel(x, y), ink, 40) or near(pixel(x, y), box, 30)]
+        self.assertTrue(drawn, "The headline is drawn")
+        self.assertLess(max(x for x, _ in drawn), right, "No headline pixel inside the button column")
+        self.assertGreater(min(x for x, _ in drawn), 54)
+        # Still centred on the frame, like the panel below it.
+        self.assertLess(abs((max(x for x, _ in drawn) + min(x for x, _ in drawn)) / 2 - 540), 12)
+
     def test_a_local_picture_fills_the_top_panel(self):
         output, _ = self.render({"layout": "split", "background": "dark", "panel": {"kind": "file", "path": str(self.picture)}}, [{"start": 0, "end": 2}], "picture.mp4")
         geo = layouts.geometry({"layout": "split"})["panel"]

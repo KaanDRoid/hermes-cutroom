@@ -1319,7 +1319,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         backgroundImage: composite && draft.layout === 'split' && draft.background === 'grid' ? `linear-gradient(${LP.grid_line} 1px, transparent 1px), linear-gradient(90deg, ${LP.grid_line} 1px, transparent 1px)` : undefined, backgroundSize: '3.4cqh 3.4cqh',
         '--draft-ink': composite && draft.layout === 'split' ? paper[2] : LP.paper_ink, '--draft-card': draft.background === 'dark' && draft.layout === 'split' ? LP.dark_card : LP.card }, children: [
         inCard(player, 'speaker:video'), inCard(still, 'speaker:poster'),
-        ...(composite ? LayoutChrome({ draft, view, time: now, programStart, ctx, scope }) : []),
+        ...(composite ? LayoutChrome({ draft, view, time: now, programStart, ctx, scope, zone }) : []),
         composite && draft.hidden.length ? el('div', { style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, pointerEvents: 'none', borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` },
           children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
         ...(original && !composite && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info, fill, fill === 'cover' ? cropPosition(view, project.source_info, [w, h], now) : '50% 50%') : []),
@@ -2598,7 +2598,12 @@ function CardView({ item, ctx = null, scope = [], projectId = null }) {
 }
 
 // What the frame shows around the speaker for a panel layout.
-function LayoutChrome({ draft, view, time, programStart, ctx = null, scope = [] }) {
+// Same rule as cutroom/layouts.py headline_width/headline_size: centred, clear of the app's side columns.
+const HEADLINE_MIN = 52;
+const headlineWidth = zone => (zone ? Math.max(200, Math.min(900, 2 * Math.min(540 - (zone.left || 0) * 1080, (1 - (zone.right || 0)) * 1080 - 540) - 8)) : 900);
+const headlineSize = (headline, zone) => Math.min(84, headlineWidth(zone) / (Math.max(String(headline?.l1 || '').length, String(headline?.l2 || '').length, 1) * 0.66));
+
+function LayoutChrome({ draft, view, time, programStart, ctx = null, scope = [], zone = null }) {
   const geo = layoutBoxes(draft);
   const item = inRange(draft.pictures, time)?.item || draft.panel;
   const lang = view.transcript?.language || 'en';
@@ -2611,8 +2616,7 @@ function LayoutChrome({ draft, view, time, programStart, ctx = null, scope = [] 
   if (showHeadline) {
     const words = upper(headline.l2 || '', lang).split(/\s+/).filter(Boolean);
     // Long lines shrink so each line stays on one row (about 18 capitals fit at full size).
-    const longest = Math.max(String(headline.l1 || '').length, String(headline.l2 || '').length, 1);
-    const size = Math.min(geo.head.size, 900 / (longest * 0.66));
+    const size = headlineSize(headline, zone);
     nodes.push(el('div', { 'data-cutroom-headline': true, style: { position: 'absolute', left: '5%', right: '5%', top: percent(geo.head.y / 1920), textAlign: 'center', color: 'var(--draft-ink)', fontWeight: 800, fontSize: `${(size / 1920 * 100).toFixed(2)}cqh`, lineHeight: 1.25, whiteSpace: 'nowrap', zIndex: 3 }, children: [
       upper(headline.l1 || '', lang), el('br', {}, 'br'),
       ...words.map((word, index) => el('span', { style: (headline.boxed || []).includes(index) ? { background: BOX_YELLOW, color: LP.on_box, padding: '0 0.8cqh', borderRadius: '0.4cqh' } : {}, children: word }, `w${index}`)).flatMap((node, index) => (index ? [' ', node] : [node])),
@@ -2818,6 +2822,7 @@ function draftChecks(kit) {
   if (draft.layout !== 'full' && zone) {
     const geo = layoutBoxes(draft);
     if (draft.layout === 'split') out.push({ name: 'draft_headline', status: geo.head.y >= zone.top * 1920 ? 'pass' : 'warning' });
+    if (draft.layout === 'split' && draft.headline && headlineSize(draft.headline, zone) < HEADLINE_MIN) out.push({ name: 'draft_headline_small', status: 'warning' });
     const faceY = geo.speaker.y + geo.speaker.h * 0.36;
     out.push({ name: 'draft_face', status: faceY <= (1 - zone.bottom) * 1920 ? 'pass' : 'warning' });
     out.push({ name: 'draft_panel', status: draft.panel || draft.pictures.length ? 'pass' : 'fail' });
@@ -2839,6 +2844,7 @@ Object.assign(CHECK_TEXT, {
   draft_panel: ['The top panel has a picture', 'The top panel is empty. Add a screen recording, picture or card in Style.'],
   draft_hidden: ['Hidden areas cover what they should', 'Watch each hidden range to the end: a box stays where you put it and does not follow scrolling.'],
   draft_bleeps: ['Bleeped words are silenced and left out of captions and subtitle files'],
+  draft_headline_small: ['The headline is large enough to read', 'The headline gets small to stay clear of the app\u2019s buttons. Shorten the headline in Style: about 18 letters per line reads best.'],
   draft_bleep_on_screen: ['Bleeped words are silenced', 'A bleeped word is still on screen in the headline or a card. Change that text in Style, or the word will show while it is bleeped.'],
 });
 

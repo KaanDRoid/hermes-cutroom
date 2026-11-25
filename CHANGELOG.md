@@ -16,6 +16,8 @@ Explainer layouts for vertical videos.
   layout before rendering.
 - Layouts are saved on the project, can be undone and can be set from chat.
 - Headline capitals follow the video's language (Turkish i becomes İ).
+- Headlines shrink to stay clear of the platform's side buttons; Review asks
+  for a shorter headline when that makes it hard to read.
 
 ### Bleep and hide
 - Select words in Edit, then Bleep (a 1 kHz tone) or Mute from the ⋯ menu;
