@@ -220,6 +220,18 @@ class FollowRenderTests(unittest.TestCase):
         self.assertTrue(path["lost"], "Look-alikes are not trusted")
         self.assertAlmostEqual(path["lost"][0][0], 1.0, delta=0.1)
 
+    def test_a_jump_onto_a_far_twin_counts_as_lost(self):
+        from cutroom import tracking
+
+        # A hard cut at 1 s: the square jumps to the left edge and its twin, far away until then, lands where it was.
+        cut = self.make("cut.mp4", "[1]drawbox=x=26:y=0:w=8:h=60:color=gray:t=fill,drawbox=x=0:y=26:w=60:h=8:color=gray:t=fill,split[s1][s2];"
+                        "[0][s1]overlay=x='if(lt(t,1),200,0)':y=140:shortest=1[o];[o][s2]overlay=x='if(lt(t,1),520,200)':y=140[v]")
+        box = {"x": 192 / W, "y": 132 / H, "w": 76 / W, "h": 76 / H}
+        path = tracking.follow_box(cut, box, 0.0, 2.0)
+        self.assertTrue(path["lost"], "A look-alike anywhere in the picture is not trusted")
+        self.assertLessEqual(path["lost"][0][0], 1.0 + 0.05)
+        self.assertGreaterEqual(path["lost"][-1][1], 2.0 - 0.05)
+
     def test_a_cover_passing_over_counts_as_lost(self):
         from cutroom import tracking
 

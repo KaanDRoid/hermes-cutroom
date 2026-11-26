@@ -7,7 +7,9 @@ picture as shown lands on the same pixels the render covers.
 The box keeps its size. It is learned on the frame it was drawn on and followed forwards and
 backwards from there. A frame counts as followed only when the same picture has just moved: it
 matches the last followed frame almost exactly, at the same size (a 10 % smaller or larger copy
-matches clearly worse), and no other place matches about as well. Anything else (it grew,
+matches clearly worse), and no other place in the picture matches about as well. Once a look-alike has been seen, the
+rest of the range is not trusted either: a cut could swap the two without any visible jump.
+Anything else (it grew,
 shrank, changed shape, was covered, cut away, left, or has a look-alike) leaves the box where it
 last was and reports the time as lost. A face that talks and turns a little still counts as moved:
 it is compared with the frame before, not with the drawn one. The render then covers the whole picture
@@ -105,24 +107,27 @@ def _frames(path, start, end):
 
 
 def _match(cv2, np, frame, position, size, latest):
-    """(match to the last followed frame, second place, position) near the last position."""
+    """(match to the last followed frame, best other place anywhere in the picture, position).
+
+    The position is searched for near the last one, but look-alikes are looked for in the whole
+    picture: after a cut the target can be far away while a twin lands where it was.
+    """
     w, h = size
     gh, gw = frame.shape
     reach = round(max(w, h) * SEARCH)
     x0, y0 = max(0, position[0] - reach), max(0, position[1] - reach)
     x1, y1 = min(gw, position[0] + w + reach), min(gh, position[1] + h + reach)
-    area = frame[y0:y1, x0:x1]
-
-    def scores(pattern):
-        result = cv2.matchTemplate(area, pattern, cv2.TM_CCOEFF_NORMED)
-        return np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
-
-    near = scores(latest)
+    near = np.nan_to_num(cv2.matchTemplate(frame[y0:y1, x0:x1], latest, cv2.TM_CCOEFF_NORMED), nan=-1.0, posinf=-1.0, neginf=-1.0)
     _, best, _, (bx, by) = cv2.minMaxLoc(near)
-    others = near.copy()
-    others[max(0, by - h // 2) : by + h // 2 + 1, max(0, bx - w // 2) : bx + w // 2 + 1] = -1.0
+    fx, fy = x0 + bx, y0 + by
+    # Look-alikes half outside the picture count too: the edges are repeated outwards.
+    pw, ph = w // 2, h // 2
+    padded = cv2.copyMakeBorder(frame, ph, ph, pw, pw, cv2.BORDER_REPLICATE)
+    others = np.nan_to_num(cv2.matchTemplate(padded, latest, cv2.TM_CCOEFF_NORMED), nan=-1.0, posinf=-1.0, neginf=-1.0)
+    px, py = fx + pw, fy + ph
+    others[max(0, py - h // 2) : py + h // 2 + 1, max(0, px - w // 2) : px + w // 2 + 1] = -1.0
     second = float(others.max()) if others.size else -1.0
-    return float(best), second, (x0 + bx, y0 + by)
+    return float(best), second, (fx, fy)
 
 
 def _same_size(cv2, np, frame, found, size, latest):
@@ -171,9 +176,12 @@ def follow_box(source, box, start, end, at=None):
         for step in (1, -1):
             position, latest = (x, y), template
             index = seed + step
+            twins = False
             while 0 <= index < len(times):
                 score, second, found = _match(cv2, np, frames[index], position, (w, h), latest)
-                if (score >= CONTINUITY and second < score - AMBIGUOUS
+                # Once a look-alike has been seen, a cut could swap the two unnoticed: trust stops for good.
+                twins = twins or (score >= CONTINUITY and second >= score - AMBIGUOUS)
+                if (not twins and score >= CONTINUITY
                         and _same_size(cv2, np, frames[index], found, (w, h), latest)):
                     position = found
                     latest = frames[index][position[1] : position[1] + h, position[0] : position[0] + w].copy()
