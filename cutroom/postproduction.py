@@ -1668,6 +1668,8 @@ def export_video(
                 face=tuple(settings["layout_face"]) if settings.get("layout_face") else None,
                 zone=platforms.profile(settings.get("platform", "custom"))["safe_zone"],
             )
+            if layout_plan["waves"] and not info["has_audio"]:
+                raise ValueError("A sound wave card needs a video with sound; this one has no sound")
             (directory / "layout.ass").write_text(layout_plan["script"], encoding="utf-8-sig")
             filters.append("ass=filename=layout.ass:fontsdir=.")
             effects.append("layout")
@@ -1869,6 +1871,17 @@ def export_video(
             if framing_report is not None:
                 framing_report["output_frames"] = output_frames
         layout_inputs = []
+        wave = None
+        if layout_plan is not None and layout_plan["waves"]:
+            # The wave shows the voice as it is heard: after cuts and bleeps, before music.
+            wave = {**layouts.wave_strip(layout_plan, program), "path": "wave.png"}
+            (directory / "wave.txt").write_text(";\n".join(audio_graph + [layouts.wave_filter(layout_plan, wave)]), encoding="utf-8")
+            _render_graph(
+                ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-n", "-protocol_whitelist", "file", "-i", str(source),
+                 "-/filter_complex", "wave.txt", "-map", "[pic]", "-frames:v", "1", "wave.png"],
+                cwd=directory,
+                timeout=settings["timeout"],
+            )
         if layout_plan is not None:
             lines, layout_inputs = layouts.graph(
                 layout_plan,
@@ -1877,6 +1890,7 @@ def export_video(
                 rate=(timed_rate if timed is not None and timed_rate else rate) or "30/1",
                 program=program,
                 first_input=2 if mix_path else 1,
+                wave=wave,
             )
             graph.extend(lines)
         graph.append(

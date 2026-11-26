@@ -16,6 +16,11 @@ Explainer layouts for vertical videos.
   layout before rendering.
 - Layouts are saved on the project, can be undone and can be set from chat.
 - Headline capitals follow the video's language (Turkish i becomes İ).
+- Each panel picture can say where it comes from (yours, a stock site or AI,
+  with credit, link and license); the export package lists them in
+  sources.txt and suggests the credits for the post text.
+- Sound wave card for the top panel: the voice after cuts and bleeps, drawn
+  in the render; useful for audio-only talks and podcasts.
 - Headlines shrink to stay clear of the platform's side buttons; Review asks
   for a shorter headline when that makes it hard to read.
 
@@ -27,6 +32,12 @@ Explainer layouts for vertical videos.
   a solid box, blur or pixelate. Boxes stay where they are drawn.
 - Both apply to Preview and Final, including with cuts, punch-ins, music and
   the split layout, and can be set from chat.
+
+### Studio
+- The player stays dark in Hermes's dark theme too, and captions in the
+  Studio player are drawn light on a dark outline in both themes, as they
+  are in the video. The safe-area shading follows.
+- Load video and player messages stay above the layout cards.
 
 ## 0.2.0 — unreleased
 

@@ -1600,9 +1600,8 @@ class Studio:
 
     def _cues(self, project):
         """Output-time caption cues for kept, non-excluded words."""
-        from .speech import caption_cues, remap_words
-
         from .redactions import mask_words
+        from .speech import caption_cues, remap_words
 
         transcript = project.get("transcript") or {}
         excluded = set(project["excluded_word_ids"])
@@ -1621,9 +1620,8 @@ class Studio:
 
     def _caption_words(self, project):
         """Map kept word fragments once, merging fragments of the same word."""
-        from .speech import remap_words
-
         from .redactions import mask_words
+        from .speech import remap_words
 
         excluded = set(project.get("excluded_word_ids", []))
         words = mask_words(
@@ -2711,9 +2709,14 @@ class Studio:
                         cover_line += " TikTok selects a video frame as its cover; select this time when uploading."
                     elif platform == "instagram_reels":
                         cover_line += " Instagram recommends 420x654; crop this 9:16 reference in the upload screen."
+                sources, cards = packages.panel_sources(project["settings"].get("layout"))
+                if sources:
+                    packages._write_text(directory / "sources.txt", packages.sources_file(sources, cards))
+                    roles["sources.txt"] = "where each picture in the video comes from"
+                credits = packages.credit_line(sources)
                 packages._write_text(
                     directory / "post.txt",
-                    packages.post_file(platform, check, cover_line=cover_line),
+                    packages.post_file(platform, check, cover_line=cover_line, extra_lines=[credits] if credits else ()),
                 )
                 packages._write_text(
                     directory / "README.txt",
@@ -2738,6 +2741,7 @@ class Studio:
                     posted_text=check["text"],
                     limits=status["limits"],
                     cover=cover,
+                    sources=sources,
                     files=packages.file_entries(directory, roles),
                 )
                 packages.write_manifest(directory, manifest)

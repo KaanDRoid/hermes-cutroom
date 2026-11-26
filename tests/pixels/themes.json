@@ -1,0 +1,32 @@
+{
+  "checked": "2026-11-26",
+  "note": "Computed values of the host tokens the plugin uses, read from Hermes Desktop 0.23.3 (default skin) in Light and Dark.",
+  "light": {
+    "--ui-accent": "rgb(0, 83, 253)",
+    "--ui-base": "rgb(31, 35, 40)",
+    "--ui-bg-editor": "color(srgb 0.983059 0.984784 0.98651)",
+    "--ui-bg-elevated": "color(srgb 0.991529 0.991529 0.991529)",
+    "--ui-bg-sidebar": "color(srgb 0.964706 0.972549 0.980392)",
+    "--ui-red": "rgb(207, 45, 86)",
+    "--ui-stroke-primary": "color(srgb 0.029238 0.280218 0.791263 / 0.316)",
+    "--ui-stroke-secondary": "color(srgb 0.0326702 0.274904 0.767681 / 0.2188)",
+    "--ui-text-primary": "color(srgb 0.121569 0.137255 0.156863 / 0.94)",
+    "--ui-text-secondary": "color(srgb 0.121569 0.137255 0.156863 / 0.74)",
+    "--ui-text-tertiary": "color(srgb 0.121569 0.137255 0.156863 / 0.54)",
+    "--ui-yellow": "rgb(192, 133, 50)"
+  },
+  "dark": {
+    "--ui-accent": "rgb(74, 132, 254)",
+    "--ui-base": "rgb(230, 237, 243)",
+    "--ui-bg-editor": "color(srgb 0.0549804 0.059451 0.0717647)",
+    "--ui-bg-elevated": "color(srgb 0.0862745 0.0952941 0.112157)",
+    "--ui-bg-sidebar": "color(srgb 0.00392157 0.0156863 0.0352941)",
+    "--ui-red": "rgb(231, 94, 120)",
+    "--ui-stroke-primary": "color(srgb 0.437329 0.616679 0.985704 / 0.316)",
+    "--ui-stroke-secondary": "color(srgb 0.454601 0.628304 0.984486 / 0.2188)",
+    "--ui-text-primary": "color(srgb 0.901961 0.929412 0.952941 / 0.94)",
+    "--ui-text-secondary": "color(srgb 0.901961 0.929412 0.952941 / 0.74)",
+    "--ui-text-tertiary": "color(srgb 0.901961 0.929412 0.952941 / 0.54)",
+    "--ui-yellow": "rgb(192, 133, 50)"
+  }
+}

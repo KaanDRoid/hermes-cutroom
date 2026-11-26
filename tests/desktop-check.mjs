@@ -832,7 +832,7 @@ test('draws a visible outline on every unchecked checkbox, including the approva
   assert.ok(boxes.some(n => n.props['aria-label'] === 'I watched this preview and want to export exactly this version'));
   for (const box of boxes) {
     if (box.props.checked) continue;
-    assert.match(String(box.props.style?.borderColor || ''), /^var\(--ui-/, `${box.props['aria-label'] || 'checkbox'} needs a themed visible border`);
+    assert.match(String(box.props.style?.borderColor || ''), /^(var|color-mix\(in srgb, var)\(--ui-/, `${box.props['aria-label'] || 'checkbox'} needs a themed visible border`);
   }
 });
 
@@ -1008,6 +1008,44 @@ test('a split layout and its top panel card are saved on the project and can be 
   assert.equal(selectedProject.settings.layout.layout, 'split');
 });
 
+test('a sound wave card goes in the top panel, and Review stops it on a video without sound', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} }, source_info: { duration: 12, width: 1920, height: 1080, has_audio: true } });
+  let tree = await ui.step('Style');
+  radio(tree, 'Layout', 'split').props.onClick();
+  await ui.flush();
+  await button(ui.draw(), 'Add card').props.onClick();
+  await button(ui.draw(), 'Sound wave').props.onClick();
+  assert.match(text(ui.draw()), /moves with your voice/);
+  await button(ui.draw(), 'Use this card').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel, { kind: 'card', type: 'wave', text: '', detail: '' });
+  assert.ok(nodes(ui.draw()).some(n => n.props?.['data-cutroom-wave']), 'The player shows the wave card');
+  assert.doesNotMatch(text(await ui.step('Review')), /needs sound/);
+
+  const silent = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { ...selectedProject.settings.layout } }, source_info: { duration: 12, width: 1920, height: 1080, has_audio: false } });
+  assert.match(text(await silent.step('Review')), /A sound wave card needs sound/);
+});
+
+test('a panel picture says where it comes from, and Review asks when it does not', async () => {
+  jobRows = [];
+  const panelFile = { kind: 'file', path: 'C:/v/shot.png', name: 'shot.png', sha256: 'a'.repeat(64), media: 'image', width: 1280, height: 720, duration: null };
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: panelFile, pictures: [] } },
+    source_info: { duration: 12, width: 1920, height: 1080, has_audio: true } });
+  assert.match(text(await ui.step('Review')), /Say where each picture/);
+  await ui.step('Style');
+  button(ui.draw(), 'Stock site').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel.origin, { kind: 'stock', credit: '', url: '', license: '' });
+  const credit = nodes(ui.draw()).find(n => n.props?.name === 'origin.credit');
+  credit.props.onChange({ target: { value: 'Photo by Ana Lima on Pexels' } });
+  assert.equal(selectedProject.settings.layout.panel.origin.credit, '', 'Typing alone does not save');
+  nodes(ui.draw()).find(n => n.props?.name === 'origin.credit').props.onBlur({ target: { value: 'Photo by Ana Lima on Pexels' } });
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.panel.origin.credit, 'Photo by Ana Lima on Pexels');
+  assert.doesNotMatch(text(await ui.step('Review')), /Say where each picture/);
+});
+
 test('a bleep chosen on selected words is saved on the project', async () => {
   jobRows = [];
   const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }, { id: 2, text: 'here', start: 1.1, end: 1.5 }];
@@ -1147,7 +1185,7 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
     assert.equal(top.props.style.height, '14%', 'Reels zone of the render, not the TikTok setting');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'bottom').props.style.height, '35%');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'left').props.style.width, '6%');
-    assert.match(String(top.props.style.background), /^var\(--ui-/);
+    assert.match(String(top.props.style.background), /^color-mix\(in srgb, var\(--ui-/, 'Shade derived from the theme');
     assert.match(text(tree), /Instagram Reels safe zone/);
     assert.ok(nodes(tree).find(n => n.type === 'video'), 'The player stays visible under the overlay');
     // A render without a recorded platform was made by the custom profile.

@@ -36,6 +36,24 @@ class PanelFileTests(unittest.TestCase):
         self.assertEqual(item["media"], "video")
         self.assertAlmostEqual(item["duration"], 2.0, delta=0.2)
 
+    def test_where_a_picture_comes_from_is_kept_and_checked(self):
+        picture = self.folder / "stock.png"
+        _ffmpeg("-f", "lavfi", "-i", "color=c=blue:s=320x180", "-frames:v", "1", str(picture))
+        origin = {"kind": "stock", "credit": "Photo by Ana Lima on Pexels", "url": "https://www.pexels.com/photo/123/", "license": "Pexels License"}
+        item = layouts.normalize_item({"kind": "file", "path": str(picture), "origin": origin})
+        self.assertEqual(item["origin"], origin)
+        self.assertEqual(layouts.normalize_item({"kind": "file", "path": str(picture), "origin": {"kind": "own"}})["origin"],
+                         {"kind": "own", "credit": "", "url": "", "license": ""})
+        self.assertNotIn("origin", layouts.normalize_item({"kind": "file", "path": str(picture)}))
+        # Saving a stored item again keeps what it says.
+        self.assertEqual(layouts.normalize_item(item)["origin"], origin)
+        for bad in ({"kind": "found"}, {"kind": "stock", "url": "ftp://x"}, {"kind": "stock", "url": "javascript:alert(1)"},
+                    {"kind": "ai", "credit": "x" * 300}, {"kind": "stock", "extra": 1}, "stock"):
+            with self.subTest(origin=bad), self.assertRaises(ValueError):
+                layouts.normalize_item({"kind": "file", "path": str(picture), "origin": bad})
+        with self.assertRaises(ValueError):
+            layouts.normalize_item({"kind": "card", "type": "title", "text": "Hi", "origin": {"kind": "own"}})
+
     def test_relative_missing_and_non_media_files_are_refused(self):
         text = self.folder / "notes.txt"
         text.write_text("not a picture", encoding="utf-8")

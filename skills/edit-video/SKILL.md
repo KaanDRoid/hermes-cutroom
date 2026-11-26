@@ -63,6 +63,8 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      place; suggest `cover` for anything secret and ask the person to check
      the preview, because a box does not follow scrolling. Never put a
      bleeped word in the headline or a card.
+   - Pictures: ask where a picture comes from (their own, a stock site or AI)
+     and save it as `origin`; never guess a credit or a license.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
    `media.path` from the completed job exactly as returned. When the job has

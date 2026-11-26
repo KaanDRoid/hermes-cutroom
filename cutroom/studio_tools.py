@@ -533,14 +533,29 @@ def definitions():
         "additionalProperties": False,
         "required": ["kind"],
         "description": "card: drawn by Cutroom (title, number, quote, bars as 'A: 30, B: 55', "
-        "apps as comma-separated names, terminal as comma-separated lines); file: a local "
+        "apps as comma-separated names, terminal as comma-separated lines, wave as a moving "
+        "picture of the voice with an optional title, for audio-only talks); file: a local "
         "picture or video at an absolute path",
         "properties": {
             "kind": {"type": "string", "enum": ["card", "file"]},
-            "type": {"type": "string", "enum": ["title", "number", "quote", "bars", "apps", "terminal"]},
+            "type": {"type": "string", "enum": ["title", "number", "quote", "bars", "apps", "terminal", "wave"]},
             "text": {"type": "string", "maxLength": 400},
             "detail": {"type": "string", "maxLength": 120},
             "path": {"type": "string", "maxLength": 4096},
+            "origin": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["kind"],
+                "description": "Files only: where the picture comes from, as the person says "
+                "(never guess). own, stock (with credit, link and license) or ai (credit: the tool). "
+                "It is listed in the export package's sources.txt.",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["own", "stock", "ai"]},
+                    "credit": {"type": "string", "maxLength": 200},
+                    "url": {"type": "string", "maxLength": 500},
+                    "license": {"type": "string", "maxLength": 100},
+                },
+            },
         },
     }
     changes = {

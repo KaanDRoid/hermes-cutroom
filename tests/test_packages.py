@@ -368,6 +368,29 @@ class PackageTests(_Workspace):
             self.studio.review(project["id"])["digest"], project["approval"]["digest"]
         )
 
+    def test_the_package_says_where_each_panel_picture_comes_from(self):
+        stock = str(self.media / "thumbnail.jpg")
+        layout = {"layout": "split", "panel": {"kind": "file", "path": stock, "origin": {"kind": "stock", "credit": "Photo by Ana Lima on Pexels",
+                                                                                            "url": "https://www.pexels.com/photo/123/", "license": "Pexels License"}},
+                  "pictures": [{"start": 0.5, "end": 1.5, "item": {"kind": "file", "path": stock}},
+                               {"start": 1.5, "end": 1.9, "item": {"kind": "card", "type": "title", "text": "Hi"}}]}
+        project, _ = self.ready("instagram_reels", changes={"settings": {"aspect": "portrait", "layout": layout}})
+        result = self.studio.package(project["id"], post={"caption": "Waves all day.", "hashtags": []})
+        directory = Path(result["directory"])
+        sources = (directory / "sources.txt").read_text(encoding="utf-8")
+        self.assertIn("thumbnail.jpg", sources)
+        self.assertIn("Stock picture · Photo by Ana Lima on Pexels · Pexels License · https://www.pexels.com/photo/123/", sources)
+        self.assertIn("Not said where it comes from", sources)
+        self.assertIn("0:00.5–0:01.5", sources)
+        self.assertIn("Cards are drawn by Cutroom", sources)
+        manifest = json.loads((directory / "manifest.json").read_text("utf-8"))
+        self.assertIn("sources.txt", manifest["files"])
+        self.assertEqual([entry["origin"]["kind"] for entry in manifest["sources"]], ["stock", "unknown"])
+        self.assertEqual(manifest["sources"][0]["sha256"], file_digest(Path(stock)))
+        post = (directory / "post.txt").read_text(encoding="utf-8")
+        self.assertIn("Credits you may add: Photo by Ana Lima on Pexels", post)
+        self.assertTrue(packages.verify(directory)["ok"])
+
     def test_vertical_covers_are_nine_by_sixteen_and_tiktok_names_the_frame(self):
         for platform in ("youtube_shorts", "tiktok"):
             project, _ = self.ready(platform)

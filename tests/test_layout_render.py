@@ -113,6 +113,75 @@ class SplitRenderTests(unittest.TestCase):
         # Still centred on the frame, like the panel below it.
         self.assertLess(abs((max(x for x, _ in drawn) + min(x for x, _ in drawn)) / 2 - 540), 12)
 
+    def test_a_sound_wave_card_follows_the_voice_after_cuts(self):
+        # Silent first second, a tone in the second. After the cut, program 0.8 s is source 1.2 s (tone),
+        # while source 0.8 s itself is silent: a wave drawn from the uncut sound would be flat there.
+        source = self.root / "half-silent.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2,volume=enable='lt(t,1)':volume=0",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "wave.mp4"
+        result = pp.export_video(source, [{"start": 0.0, "end": 0.6}, {"start": 1.0, "end": 2.0}], output, settings={
+            "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+            "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": "Episode 12"}}, duration=2)})
+        self.assertEqual(result["layout"]["waves"], 1)
+        panel = layouts.geometry({"layout": "split"})["panel"]
+        ink = hex_rgb(layouts.PALETTE["paper_ink"])
+        top, bottom = panel["y"] + round(panel["h"] * 0.3), panel["y"] + panel["h"] - 40
+
+        def wave_rows(at):
+            pixel = frame(output, at)
+            # Under the playhead in the middle: the moment being heard (the window also shows the seconds around it).
+            return sum(any(near(pixel(x, y), ink, 50) for x in range(500, 535, 3)) for y in range(top, bottom, 2))
+
+        loud, quiet = wave_rows(0.8), wave_rows(0.3)
+        self.assertGreater(loud, 25, "The wave is tall while the voice plays")
+        self.assertLess(quiet, 6, "Flat during silence")
+        pixel = frame(output, 0.8)
+        self.assertTrue(near(pixel(panel["x"] + 30, panel["y"] + panel["h"] // 2), hex_rgb(layouts.PALETTE["card"])), "The card background shows")
+
+    def test_a_sound_wave_card_shows_the_voice_not_the_music(self):
+        from cutroom import audio
+
+        source = self.root / "half-silent-music.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2,volume=enable='lt(t,1)':volume=0",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        music = self.root / "loud-bed.wav"
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=3000:sample_rate=48000:duration=3", str(music))
+        output = self.root / "wave-music.mp4"
+        pp.export_video(source, [{"start": 0.0, "end": 2.0}], output, settings={
+            "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+            "audio": {"music": audio.normalize_music({"path": str(music), "volume_db": 0, "duck": False})},
+            "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": ""}}, duration=2)})
+        panel = layouts.geometry({"layout": "split"})["panel"]
+        ink = hex_rgb(layouts.PALETTE["paper_ink"])
+        top, bottom = panel["y"] + round(panel["h"] * 0.3), panel["y"] + panel["h"] - 40
+
+        def wave_rows(at):
+            pixel = frame(output, at)
+            # Under the playhead in the middle: the moment being heard (the window also shows the seconds around it).
+            return sum(any(near(pixel(x, y), ink, 50) for x in range(500, 535, 3)) for y in range(top, bottom, 2))
+
+        self.assertLess(wave_rows(0.4), 6, "Music alone does not move the wave")
+        self.assertGreater(wave_rows(1.5), 25)
+        mixed = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-ss", "0.2", "-t", "0.5", "-i", str(output), "-af", "volumedetect", "-f", "null", "-"],
+                               capture_output=True, text=True, timeout=60).stderr
+        mean = float(mixed.split("mean_volume:")[1].split("dB")[0])
+        self.assertGreater(mean, -40, "The music is still in the sound while the voice is silent")
+
+    def test_a_sound_wave_card_needs_sound(self):
+        silent = self.root / "no-audio.mp4"
+        ffmpeg("-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(silent))
+        with self.assertRaisesRegex(ValueError, "no sound"):
+            pp.export_video(silent, [{"start": 0, "end": 1}], self.root / "nope.mp4", settings={
+                "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 120,
+                "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": ""}}, duration=1)})
+
     def test_a_local_picture_fills_the_top_panel(self):
         output, _ = self.render({"layout": "split", "background": "dark", "panel": {"kind": "file", "path": str(self.picture)}}, [{"start": 0, "end": 2}], "picture.mp4")
         geo = layouts.geometry({"layout": "split"})["panel"]

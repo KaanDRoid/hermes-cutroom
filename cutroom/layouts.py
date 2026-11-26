@@ -17,7 +17,7 @@ LAYOUTS = ("full", "split", "over")
 BACKGROUNDS = ("paper", "grid", "kraft", "dark")
 SPEAKERS = ("small", "wide", "full")
 HOLDS = ("whole", "opening")
-CARD_TYPES = ("title", "number", "quote", "bars", "apps", "terminal")
+CARD_TYPES = ("title", "number", "quote", "bars", "apps", "terminal", "wave")
 DIVIDER = (1060, 1420)
 DEFAULT_DIVIDER = 1170
 OPENING_SECONDS = 3.0
@@ -53,7 +53,7 @@ PALETTE = {
 _KEYS = {"layout", "background", "speaker", "divider", "hold", "headline", "panel", "pictures"}
 _IMAGE_FORMATS = {"image2", "png_pipe", "jpeg_pipe", "webp_pipe"}
 _VIDEO_FORMATS = {"mov", "mp4", "m4a", "3gp", "3g2", "mj2", "matroska", "webm"}
-_TEXT_LIMITS = {"title": 120, "number": 24, "quote": 200, "bars": 200, "apps": 200, "terminal": 400}
+_TEXT_LIMITS = {"title": 120, "number": 24, "quote": 200, "bars": 200, "apps": 200, "terminal": 400, "wave": 80}
 
 
 def upper(text, language="en"):
@@ -96,6 +96,23 @@ def _probe(path):
     return formats, video, data["format"]
 
 
+# Where a panel picture comes from, as the person says; written into the export package.
+ORIGIN_KINDS = ("own", "stock", "ai")
+
+
+def _origin(spec):
+    if spec is None:
+        return None
+    if not isinstance(spec, dict) or set(spec) - {"kind", "credit", "url", "license"}:
+        raise ValueError("Where a picture comes from has a kind, a credit, a link and a license")
+    if spec.get("kind") not in ORIGIN_KINDS:
+        raise ValueError("A picture is your own, from a stock site or made with AI")
+    url = _text(spec.get("url"), 500, "Picture link")
+    if url and (not url.lower().startswith(("https://", "http://")) or any(c.isspace() for c in url)):
+        raise ValueError("A picture link must be a web address starting with https://")
+    return {"kind": spec["kind"], "credit": _text(spec.get("credit"), 200, "Picture credit"), "url": url, "license": _text(spec.get("license"), 100, "Picture license")}
+
+
 def normalize_item(spec):
     """A card drawn by Cutroom or a local picture/screen recording."""
     if not isinstance(spec, dict):
@@ -108,7 +125,8 @@ def normalize_item(spec):
         return {
             "kind": "card",
             "type": spec["type"],
-            "text": _text(spec.get("text"), _TEXT_LIMITS[spec["type"]], "Card text", required=True),
+            # A sound wave card shows the voice itself; its title is optional.
+            "text": _text(spec.get("text"), _TEXT_LIMITS[spec["type"]], "Card text", required=spec["type"] != "wave"),
             "detail": _text(spec.get("detail"), 120, "Card caption"),
         }
     if spec.get("kind") != "file":
@@ -145,7 +163,11 @@ def normalize_item(spec):
         raise ValueError("Panel pictures can be at most 8192 pixels on a side")
     if before != file_digest(path):
         raise PermissionError("The panel file changed while it was checked")
-    return {"kind": "file", "path": str(path), "name": path.name, "sha256": before, "media": media, "width": width, "height": height, "duration": duration}
+    item = {"kind": "file", "path": str(path), "name": path.name, "sha256": before, "media": media, "width": width, "height": height, "duration": duration}
+    origin = _origin(spec.get("origin"))
+    if origin is not None:
+        item["origin"] = origin
+    return item
 
 
 def _headline(spec):
@@ -441,6 +463,12 @@ def _card(script, spans, item, panel, colours):
             script.shape(spans, _rounded(*script.scaled(tx, ty, tile, tile, tile * 0.22)), card)
             script.text(spans, tx + tile / 2, ty + tile / 2, name[0].upper(), tile * 0.45, ink)
             script.text(spans, tx + tile / 2, ty + tile + 2.2 * CQH, name, 2 * CQH, ink)
+    elif kind == "wave":
+        # The card and the moving wave are drawn by the render graph (see graph()); only words here.
+        if text:
+            script.text(spans, cx, y + h * 0.15, text, 3.2 * CQH, ink, width=w - 80)
+        if detail:
+            script.text(spans, cx, y + h - 2.6 * CQH, detail, 2.2 * CQH, ink, width=w - 60)
     elif kind == "terminal":
         inset = 1.5 * CQH
         tx, ty, tw, th = x + inset, y + inset, w - 2 * inset, h - 2 * inset
@@ -546,11 +574,16 @@ def build(layout, *, width, height, ranges, program, font, font_path, source_siz
     if cursor < program:
         free.append((cursor, program))
     shows = ([(free, layout["panel"])] if layout["panel"] else []) + timed
-    files = []
+    files, waves = [], []
     panel = geo["panel"]
     for spans, item in shows:
         if item["kind"] == "card":
             _card(script, spans, item, panel, colours)
+            if item["type"] == "wave":
+                inner = {"x": panel["x"] + 40, "y": panel["y"] + panel["h"] * 0.31, "w": panel["w"] - 80, "h": panel["h"] * 0.46}
+                waves.append({"spans": spans, "panel": {key: round(value * s / 2) * 2 for key, value in panel.items()},
+                              "box": {key: round(value * s / 2) * 2 for key, value in inner.items()}})
+                script.shape(spans, _corners(*script.scaled(panel["x"], panel["y"], panel["w"], panel["h"], 1.4 * CQH)), colours["paper"], layer=3)
         else:
             if file_digest(item["path"]) != item["sha256"]:
                 raise ValueError(f"{item['name']} changed since it was chosen; choose it again in Style")
@@ -572,13 +605,40 @@ def build(layout, *, width, height, ranges, program, font, font_path, source_siz
         "grid": layout["layout"] == "split" and background == "grid",
         "speaker": {"crop": crop, "box": box},
         "files": files,
-        "report": {"layout": layout["layout"], "background": background, "speaker": layout["speaker"], "divider": layout["divider"],
+        "waves": waves,
+        "card": colours["card"],
+        "ink": colours["ink"],
+        "report": {"waves": len(waves), "layout": layout["layout"], "background": background, "speaker": layout["speaker"], "divider": layout["divider"],
                    "timed_pictures": len(timed), "headline": bool(layout["headline"]), "files": len(files)},
     }
 
 
-def graph(plan, *, width, height, rate, program, first_input):
-    """Filter lines turning [joined] into [laid] and the extra FFmpeg inputs they read."""
+# A sound wave card shows this many seconds around the moment being heard.
+WAVE_WINDOW = 3.0
+# Longest strip drawn; very long videos show a wider window instead.
+WAVE_MAX_PIXELS = 16000
+
+
+def wave_strip(plan, program):
+    """Size of the whole-program wave picture a sound wave card slides across, or None."""
+    if not plan.get("waves"):
+        return None
+    box = plan["waves"][0]["box"]
+    pps = min(box["w"] / WAVE_WINDOW, WAVE_MAX_PIXELS / max(program, 0.1))
+    return {"pps": pps, "width": max(2, math.ceil(program * pps)), "height": box["h"]}
+
+
+def wave_filter(plan, strip):
+    """Filter turning the program voice [audio] into the wave picture [pic]."""
+    return (f"[audio]aformat=channel_layouts=mono,dynaudnorm=f=200:g=11:p=0.9:m=8,"
+            f"showwavespic=s={strip['width']}x{strip['height']}:scale=sqrt:draw=full:filter=peak:colors=0x{plan['ink'].lstrip('#')}[pic]")
+
+
+def graph(plan, *, width, height, rate, program, first_input, wave=None):
+    """Filter lines turning [joined] into [laid] and the extra FFmpeg inputs they read.
+
+    ``wave`` is the strip from wave_strip() drawn to ``wave["path"]``, for sound wave cards.
+    """
     s = width / FRAME[0]
     paper = plan["paper"].lstrip("#")
     lines = [f"color=c=0x{paper}:s={width}x{height}:r={rate}:d={program + 1:.3f}" + (
@@ -601,5 +661,24 @@ def graph(plan, *, width, height, rate, program, first_input):
             f"[l{index}][lf{index}]overlay=x={b['x']}+({b['w']}-w)/2:y={b['y']}+({b['h']}-h)/2:"
             f"eof_action=pass:enable='between(t,{item['start']:.3f},{item['end']:.3f})'[l{index + 1}]"
         )
-    lines.append(f"[l{len(plan['files'])}]null[laid]")
+    last = f"[l{len(plan['files'])}]"
+    if plan.get("waves"):
+        if wave is None:
+            raise ValueError("A sound wave card needs a video with sound; this one has no sound")
+        when = "+".join(f"between(t,{a:.3f},{b:.3f})" for item in plan["waves"] for a, b in item["spans"]) or "0"
+        p, b = plan["waves"][0]["panel"], plan["waves"][0]["box"]
+        card, ink = plan["card"].lstrip("#"), plan["ink"].lstrip("#")
+        stream = first_input + len(plan["files"])
+        inputs += ["-loop", "1", "-framerate", str(rate), "-t", f"{program + 1:.3f}", "-protocol_whitelist", "file", "-i", wave["path"]]
+        half = b["w"] // 2
+        # The strip slides left so the moment being heard is always under the playhead in the middle.
+        lines.append(f"[{stream}:v:0]format=rgba,pad=w={wave['width'] + b['w']}:h={b['h']}:x={half}:y=0:color=0x00000000,"
+                     f"crop=w={b['w']}:h={b['h']}:x='min({wave['width']},t*{wave['pps']:.4f})':y=0[lwv]")
+        lines.append(f"{last}drawbox=x={p['x']}:y={p['y']}:w={p['w']}:h={p['h']}:color=0x{card}:t=fill:enable='{when}'[lwb]")
+        lines.append(f"[lwb][lwv]overlay=x={b['x']}:y={b['y']}:eof_action=pass:enable='{when}',"
+                     # What is still to come is paler; a thin playhead marks now.
+                     f"drawbox=x={b['x'] + half}:y={b['y']}:w={b['w'] - half}:h={b['h']}:color=0x{card}@0.62:t=fill:enable='{when}',"
+                     f"drawbox=x={b['x'] + half - 2}:y={b['y'] - 6}:w=4:h={b['h'] + 12}:color=0x{ink}@0.45:t=fill:enable='{when}'[lwo]")
+        last = "[lwo]"
+    lines.append(f"{last}null[laid]")
     return lines, inputs
