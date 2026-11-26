@@ -955,7 +955,7 @@ function ProjectEditor({ ctx, scope, project, jobs, platforms = [], step, setSte
     jsx(Notice, { error }, 'error'),
     // The stage takes the room; the steps keep a reading width beside it and wrap below on narrow windows.
     el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }, children: [
-      el('section', { 'aria-label': 'Player', style: { ...stack, flex: '999 1 440px', position: 'sticky', top: 0, zIndex: 1 }, children: jsx(MediaPanel, { ctx, scope, project, view, platforms, profile, videoRef, api: player, onPlayback: setPlayback, preferred: previewCurrent ? 'preview' : 'source', draftKit: { draft, setDraft, hiding, setHiding } }) }, 'player'),
+      el('section', { 'aria-label': 'Player', style: { ...stack, flex: '999 1 440px', position: 'sticky', top: 0, zIndex: 1 }, children: jsx(MediaPanel, { ctx, scope, project, view, platforms, profile, videoRef, api: player, onPlayback: setPlayback, preferred: previewCurrent ? 'preview' : 'source', draftKit: { draft, setDraft, hiding, setHiding, seek } }) }, 'player'),
       el('section', { 'aria-label': 'Steps', style: { ...stack, flex: '1 1 380px', minWidth: 0 }, children: [
         jsx(StepTabs, { step, setStep }, 'tabs'),
         el('div', { role: 'tabpanel', id: `cutroom-panel-${step}`, 'aria-labelledby': `cutroom-tab-${step}`, tabIndex: 0, style: { ...stack, minHeight: 200 }, children: [
