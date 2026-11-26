@@ -697,8 +697,9 @@ def definitions():
                         "source seconds. Bleeped words are left out of burned captions "
                         "and subtitle files. Offer this when the person names something "
                         "to remove (a name, a swear word, an email or key on screen) and "
-                        "confirm the ranges first. A hidden box is fixed in place: it "
-                        "does not follow movement or scrolling. cover is the safe choice "
+                        "confirm the ranges first. A hidden box stays fixed unless follow is true. "
+                        "Following needs the vision extra. Watch the rendered preview for misses. "
+                        "cover is the safer choice "
                         "for secrets; blur and pixelate can sometimes be undone. null "
                         "removes all of them.",
                         "properties": {
@@ -731,6 +732,8 @@ def definitions():
                                         "end": {"type": "number", "minimum": 0},
                                         "said": {"type": "string", "maxLength": 300},
                                         "style": {"type": "string", "enum": ["cover", "blur", "pixelate"]},
+                                        "follow": {"type": "boolean", "description": "Follow the contents of the box while rendering (at most 30 seconds, 10 boxes)"},
+                                        "at": {"type": "number", "minimum": 0, "description": "Source second of the frame the box was drawn on; following starts there"},
                                         "box": {
                                             "type": "object",
                                             "additionalProperties": False,

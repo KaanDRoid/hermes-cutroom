@@ -1386,7 +1386,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         composite && draft.hidden.length ? el('div', { style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, pointerEvents: 'none', borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` },
           children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
         ...(original && !composite && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info, fill, fill === 'cover' ? cropPosition(view, project.source_info, [w, h], now) : '50% 50%') : []),
-        original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info }, 'hide') : null,
+        original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info, now }, 'hide') : null,
         showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
         cue ? el('div', { style: { position: 'absolute', inset: 0, zIndex: 4, pointerEvents: 'none' }, children: jsx(CaptionOverlay, { cue, zone: captionZone, portrait: tall, settings: view.settings || {}, time: now }) }, 'caption') : null,
         endScreen ? el('div', { 'data-cutroom-endscreen': true, 'aria-label': 'End screen space', style: { position: 'absolute', top: percent(zone?.top ?? 0.05), bottom: percent(zone?.bottom ?? 0.05), left: percent(zone?.left ?? 0.05), right: percent(zone?.right ?? 0.05),
@@ -1899,10 +1899,13 @@ function ReviewStep({ kit }) {
     jsx(Button, { disabled: Boolean(previewJob || visionJob), onClick: makePreview, children: 'Make preview' }),
     el('p', { style: muted, children: needsFaces ? 'This version follows the speaker, so Cutroom analyses faces first (once per project), then makes and checks the preview.' : 'The preview is checked automatically when it is ready.' }),
   ] })] });
+  const previewId = project.artifact_lineage?.preview?.job_id;
+  const lost = jobs.find(job => job.id === previewId)?.result?.redactions?.lost || [];
   const headline = qa ? qaHeadline(qa.checks) : null;
   const current = review && review.project?.revision === project.revision;
   return el('div', { style: stack, children: [
     intro, edited, layoutChecks,
+    lost.length ? el('p', { role: 'status', style: alertStyle, children: `Tracking lost the target in ${plural(lost.length, 'range')}. The source picture is covered in those ranges (original time: ${lost.slice(0, 4).map(range => `${clock(range.start)}–${clock(range.end)}`).join(', ')}${lost.length > 4 ? ', …' : ''}). Check the preview before approving.` }) : null,
     el('div', { role: 'status', style: { ...stack, gap: 2 }, children: [
       el('strong', { style: { fontSize: 15 }, children: headline ? headline.text : qaJob ? `Checking the preview… ${pct(qaJob.progress)}%` : 'Not checked yet' }),
       el('span', { style: muted, children: headline ? headline.detail : qaJob ? 'You can watch the preview meanwhile.' : 'Run the checks to see whether anything needs a look.' }),
@@ -2764,7 +2767,7 @@ function PicturePicker({ kit }) {
 }
 
 // Drag a box on the paused Original player to hide that area for the chosen words.
-function HideLayer({ kit, frameRatio, source }) {
+function HideLayer({ kit, frameRatio, source, now = 0 }) {
   const { hiding, setHiding, setDraft } = kit;
   const [start, setStart] = useState(null);
   const [rect, setRect] = useState(null);
@@ -2785,7 +2788,7 @@ function HideLayer({ kit, frameRatio, source }) {
       if (!start) return;
       const done = toRect(start, point(event)); setStart(null); setRect(null);
       if (done.w < 0.02 || done.h < 0.02) return;
-      setDraft(old => ({ hidden: [...old.hidden, { start: hiding.start, end: hiding.end, said: hiding.said, box: done, style: 'cover' }] }));
+      setDraft(old => ({ hidden: [...old.hidden, { start: hiding.start, end: hiding.end, said: hiding.said, box: done, style: 'cover', at: Math.min(Math.max(now, hiding.start), hiding.end) }] }));
       setHiding(null);
     },
     children: [
@@ -3057,18 +3060,21 @@ function TimedStrip({ kit }) {
 function HiddenAndBleeps({ kit }) {
   const { draft, setDraft } = kit;
   if (!draft.bleeps.length && !draft.hidden.length && !draft.pictures.length) return el('p', { style: muted, children: 'Nothing yet. Select words in Edit, then Bleep, Hide area or Picture.' });
-  const rowFor = (label, list, key, index) => el('div', { style: { ...row, justifyContent: 'space-between', borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 6 }, children: [
+  const rowFor = (label, list, key, index, action = null) => el('div', { style: { ...row, justifyContent: 'space-between', borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 6 }, children: [
     el('span', { style: { fontSize: 13 }, children: label }, 'l'),
+    action,
     jsx(Button, { variant: 'ghost', 'aria-label': `Remove ${label}`, onClick: () => setDraft(old => ({ [key]: old[key].filter((_, i) => i !== index) })), children: '✕' }, 'x'),
   ] }, `${key}${index}`);
   return el('div', { style: { ...stack, gap: 6 }, children: [
     jsx(TimedStrip, { kit }, 'strip'),
     ...draft.bleeps.map((item, index) => rowFor(`${item.mode === 'mute' ? 'Muted' : 'Bleep'} · ${clock(item.start)} · “${item.said}”`, draft.bleeps, 'bleeps', index)),
-    ...draft.hidden.map((item, index) => rowFor(`Hidden area (${{ cover: 'solid box', blur: 'blur', pixelate: 'pixelate' }[item.style] || 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index)),
+    ...draft.hidden.map((item, index) => rowFor(`Hidden area (${{ cover: 'solid box', blur: 'blur', pixelate: 'pixelate' }[item.style] || 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index,
+      jsx(Button, { variant: item.follow ? 'secondary' : 'ghost', 'aria-label': `Follow movement for hidden area ${index + 1}`, 'aria-pressed': Boolean(item.follow),
+        onClick: () => setDraft(old => ({ hidden: old.hidden.map((entry, i) => i === index ? { ...entry, follow: !entry.follow } : entry) })), children: 'Follow movement' }, 'follow'))),
     ...draft.pictures.flatMap((item, index) => [rowFor(`Picture · ${clock(item.start)}–${clock(item.end)} · “${String(item.said).slice(0, 30)}”`, draft.pictures, 'pictures', index),
       item.item?.kind === 'file' ? jsx(OriginFields, { origin: item.item.origin, onChange: origin => setDraft(old => ({ pictures: old.pictures.map((entry, i) => (i === index ? { ...entry, item: { ...entry.item, origin } } : entry)) })) }, `origin${index}`) : null]),
     draft.hidden.length ? el('div', { style: row, children: [el('span', { style: { fontSize: 12 }, children: 'Hidden areas look' }), jsx(Choice, { label: 'Hidden areas look', value: draft.hidden[0].style, options: [['cover', 'Solid box'], ['blur', 'Blur'], ['pixelate', 'Pixelate']], onChange: value => setDraft(old => ({ hidden: old.hidden.map(item => ({ ...item, style: value })) })) })] }, 'look') : null,
-    draft.hidden.length ? el('p', { style: muted, children: 'A solid box is safest for passwords and keys: blur and pixelate can sometimes be undone. The box stays where you put it; it does not follow scrolling.' }, 'note') : null,
+    draft.hidden.length ? el('p', { style: muted, children: 'A solid box is safest for passwords and keys: blur and pixelate can sometimes be undone. Boxes stay fixed unless you turn on Follow movement. Tracking runs when you render; detected losses cover the source picture. Always check the rendered result.' }, 'note') : null,
   ] });
 }
 
@@ -3106,7 +3112,7 @@ Object.assign(CHECK_TEXT, {
   draft_headline: ['The headline is below the app\u2019s top bar', 'The headline starts under the app\u2019s top bar. Move it down.'],
   draft_face: ['Your face is clear of the post\u2019s caption area', 'Your face sits in the lower part of the screen, where the app can show the post\u2019s caption. Most split-screen shorts accept this; move the divider up in Style to clear it.'],
   draft_panel: ['The top panel has a picture', 'The top panel is empty. Add a screen recording, picture or card in Style.'],
-  draft_hidden: ['Hidden areas cover what they should', 'Watch each hidden range to the end: a box stays where you put it and does not follow scrolling.'],
+  draft_hidden: ['Hidden areas cover what they should', 'Watch each hidden range to the end in the rendered preview. Tracking can miss motion.'],
   draft_bleep_elsewhere: ['Bleeped words are not said elsewhere', 'A bleeped word is still said elsewhere in the video.'],
   draft_bleeps: ['Bleeped words are silenced and left out of captions and subtitle files'],
   draft_sources: ['Each picture says where it comes from', 'Say where each picture comes from in Style (yours, a stock site or AI), with a credit for stock and AI pictures. The export package lists it in sources.txt.'],

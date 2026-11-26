@@ -1966,8 +1966,21 @@ def export_video(
             args += ["-force_key_frames", "expr:gte(t,n_forced*2)"]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
+        follow_paths = {}
+        if redaction:
+            from . import tracking
+
+            for index, item in enumerate(redaction["hidden"]):
+                if item.get("follow"):
+                    follow_paths[index] = tracking.follow_box(source, item["box"], item["start"], item["end"], at=item.get("at"))
         chain = (
-            redactions.video_chain(redaction, int(video_stream["width"]), int(video_stream["height"]), float(Fraction(rate)) if rate and rate != "0/0" else 30.0)
+            # The graph reads [0:v:0] turned upright, as the box was drawn: use that size.
+            redactions.video_chain(
+                redaction,
+                *((int(video_stream["height"]), int(video_stream["width"])) if _quarter_turn(video_stream)
+                  else (int(video_stream["width"]), int(video_stream["height"]))),
+                float(Fraction(rate)) if rate and rate != "0/0" else 30.0, paths=follow_paths,
+            )
             if redaction
             else None
         )
@@ -2025,6 +2038,14 @@ def export_video(
             "mutes": sum(b["mode"] == "mute" for b in redaction["bleeps"]),
             "hidden": len(redaction["hidden"]),
         }
+        if follow_paths:
+            # Source seconds where a followed box could not be trusted; the whole picture is covered there.
+            extra["redactions"]["followed"] = len(follow_paths)
+            extra["redactions"]["lost"] = [
+                {"index": index, "start": start, "end": end}
+                for index, path in sorted(follow_paths.items())
+                for start, end in path["lost"]
+            ]
     if layout_plan is not None:
         crop, box = layout_plan["speaker"]["crop"], layout_plan["speaker"]["box"]
         factor = max(box["w"] / crop["w"], box["h"] / crop["h"])

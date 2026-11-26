@@ -32,7 +32,10 @@ Explainer layouts for vertical videos.
   "everywhere" bleeps every time a word is said. Bleeped words are left out
   of burned captions and SRT/VTT files.
 - Hide area: draw a box on the Original player for the selected words' time;
-  a solid box, blur or pixelate. Boxes stay where they are drawn.
+  a solid box, blur or pixelate. Turn on Follow movement for a box to track
+  its contents when rendering (requires the vision extra). If tracking detects
+  a loss, that part of the source picture is covered and Review lists the time.
+  Always watch the rendered preview; tracking can miss movement.
 - Both apply to Preview and Final, including with cuts, punch-ins, music and
   the split layout, and can be set from chat.
 - A thin strip in More tools shows pictures, hidden areas and bleeps in time.

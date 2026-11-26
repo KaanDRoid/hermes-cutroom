@@ -55,14 +55,15 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      chosen words (source seconds of those words). Write the headline from the
      person's own words, two short lines in capitals (about 18 letters each;
      longer lines shrink to stay clear of the app's buttons). Punch-ins and
-     transitions are not available with this layout yet.
+     transitions affect the speaker, not the panel or headline.
    - Bleeps and hidden areas (`settings.redactions`): when the person names a
      word to bleep or mute, or something on screen to hide (an email, a key,
      a name), find the times in the transcript, say them back and ask before
-     saving. Hidden boxes are fractions of the source picture and stay in
-     place; suggest `cover` for anything secret and ask the person to check
-     the preview, because a box does not follow scrolling. Never put a
-     bleeped word in the headline or a card.
+     saving. Hidden boxes are fractions of the source picture. They stay fixed
+     unless `follow: true` is set; tracking runs at render time and needs the
+     vision extra. Suggest `cover` for anything secret and ask the person to
+     watch the entire rendered range, even if Review reports no lost tracks.
+     Never put a bleeped word in the headline or a card.
    - Pictures: ask where a picture comes from (their own, a stock site or AI)
      and save it as `origin`; never guess a credit or a license.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.

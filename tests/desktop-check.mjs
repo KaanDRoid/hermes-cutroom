@@ -507,6 +507,21 @@ test('suggests long pauses and repeated words; Apply, Keep and Apply all', async
   assert.deepEqual(changes.segments, [{ start: 0, end: 1.65 }, { start: 2.35, end: 12 }]);
 });
 
+test('enables following for just the chosen hidden area', async () => {
+  jobRows = [];
+  const box = { x: 0.2, y: 0.2, w: 0.15, h: 0.15 };
+  const hidden = [{ start: 1, end: 2, box, style: 'cover' }, { start: 3, end: 4, box, style: 'cover' }];
+  const ui = await studio(async () => selectedProject, { settings: { redactions: { bleeps: [], hidden } } });
+  const controls = nodes(disclosure(ui.draw(), 'More tools')).filter(n => n.props?.['aria-label'] === 'Follow movement for hidden area 2');
+  assert.equal(controls.length, 1);
+  assert.equal(controls[0].props['aria-pressed'], false);
+  controls[0].props.onClick();
+  await ui.flush();
+  const saved = ui.patches().at(-1).options.body.changes.settings.redactions.hidden;
+  assert.equal(saved[0].follow, undefined);
+  assert.equal(saved[1].follow, true);
+});
+
 test('empty transcript offers Transcribe; rarely used tools live under More tools', async () => {
   jobRows = [];
   const ui = await studio(async () => ({ id: 'j1' }));
@@ -1242,6 +1257,26 @@ test('Hide area starts drawing and a second press stops it', async () => {
   assert.equal(button(ui.draw(), 'Hide area').props['aria-pressed'], false);
   assert.ok(!nodes(ui.draw()).some(n => n.props?.role === 'status' && /Drag a box|Choose Original/.test(String(n.props.children))));
 });
+
+test('a drawn hidden area remembers the moment it was drawn on, so following starts there', async () => withBlobs(async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 0.8 };
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const large = async (path, options) => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : patchApplies(path, options);
+  const ui = await studio(large, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], source_info: { duration: 12, width: 1920, height: 1080 } });
+  ui.draw(); await tick();
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  const layer = () => nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Draw the area to hide');
+  assert.ok(layer(), 'The drawing layer is on the Original player');
+  const target = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  layer().props.onMouseDown({ currentTarget: target, clientX: 20, clientY: 20 });
+  layer().props.onMouseUp({ currentTarget: target, clientX: 50, clientY: 50 });
+  await ui.flush();
+  const [area] = selectedProject.settings.redactions.hidden;
+  assert.equal(area.at, 0.8);
+  assert.deepEqual([area.start, area.end], [0.6, 1.0]);
+}));
 
 test('headline ideas never use a bleeped word', async () => {
   const sentence = 'Climate change is not actually that complicated. Nobody reads the report anyway.';
@@ -2560,6 +2595,17 @@ test('with Face track the original player keeps the speaker in a tall frame', as
     selectedProject.settings = { platform: 'youtube_shorts', framing: 'center_crop' };
     assert.equal(video().props.style.objectPosition || '50% 50%', '50% 50%', 'Center crop stays centred');
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('Review warns about detected tracking loss only for the current preview', async () => {
+  const preview = currentPreview();
+  preview.jobs[0].result = { redactions: { lost: [{ start: 3, end: 4 }] } };
+  jobRows = preview.jobs;
+  const ui = await studio(async () => selectedProject, preview.project);
+  await ui.step('Review');
+  assert.match(text(ui.draw()), /Tracking lost the target in 1 range.*0:03–0:04/);
+  jobRows = [{ ...preview.jobs[0], revision: 6 }];
+  assert.doesNotMatch(text(ui.draw()), /Tracking lost the target/);
 });
 
 test('a caption problem says what is wrong, where, and how to fix it', async () => {
