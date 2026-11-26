@@ -38,6 +38,8 @@ Explainer layouts for vertical videos.
   Studio player are drawn light on a dark outline in both themes, as they
   are in the video. The safe-area shading follows.
 - Load video and player messages stay above the layout cards.
+- A project whose video file is gone says so on the player at once, instead
+  of a Load video button that never finishes.
 
 ## 0.2.0 — unreleased
 

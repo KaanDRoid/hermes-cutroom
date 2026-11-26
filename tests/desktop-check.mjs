@@ -1027,6 +1027,17 @@ test('a sound wave card goes in the top panel, and Review stops it on a video wi
   assert.match(text(await silent.step('Review')), /A sound wave card needs sound/);
 });
 
+test('a missing source says so on the player at once instead of offering a load that hangs', async () => {
+  jobRows = [];
+  const missing = 'Source file is missing: C:\\v\\talk.mp4; restore it or import a new project';
+  const ui = await studio(async path => { if (path.includes('/artifact-info/') || path.includes('/media/')) throw new Error(`Error invoking remote method 'hermes:api': Error: 422: {"detail": "${missing.replace(/\\/g, '\\\\')}"}`); return selectedProject; }, { artifacts: {} });
+  ui.draw(); await tick();
+  const tree = ui.draw();
+  assert.match(text(tree), /Source file is missing/);
+  assert.ok(nodes(tree).some(n => n.props?.role === 'alert'), 'Shown as an alert');
+  assert.equal(nodes(tree).find(n => n.type === 'button' && /^Load video/.test(text(n))), undefined, 'No load button for a file that is gone');
+});
+
 test('a panel picture says where it comes from, and Review asks when it does not', async () => {
   jobRows = [];
   const panelFile = { kind: 'file', path: 'C:/v/shot.png', name: 'shot.png', sha256: 'a'.repeat(64), media: 'image', width: 1280, height: 720, duration: null };

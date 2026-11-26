@@ -1237,12 +1237,14 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const autoLoad = async kind => {
     if (lock.current) return;
     const token = generation.current;
-    let size = null;
+    let size = null, failure = null;
     try {
       const info = await ctx.rest(`/projects/${enc(project.id)}/artifact-info/${kind}`);
       if (Number.isSafeInteger(info?.size) && info.size > 0) size = info.size;
-    } catch { /* Unknown size: offer the button instead. */ }
+    } catch (error) { failure = error; }
     if (token !== generation.current || lock.current || mediaRef.current || chosen.current) return;
+    // A file that is gone (or refused) is said at once; a load button would only hang on it.
+    if (failure) { setError(failure); return; }
     if (size !== null && size <= AUTO_LOAD_BYTES) await load(kind);
     else setOffer({ kind, size });
   };
