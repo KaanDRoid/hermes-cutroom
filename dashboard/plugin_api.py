@@ -365,13 +365,13 @@ MEDIA_TYPES = {
 }
 
 
-def artifact_path(studio, project_id, kind):
+def artifact_path(studio, project_id, kind, playing=False):
     canonical = {
         "qa": "quality",
         "captions": "captions_srt",
         "subtitles": "captions_vtt",
     }.get(kind, kind)
-    path = Path(invoke(studio.artifact, project_id, canonical))
+    path = Path(invoke(studio.artifact, project_id, canonical, playing=playing))
     if not path.is_file():
         raise HTTPException(404, "Artifact not found")
     mime = MEDIA_TYPES.get(path.suffix.lower())
@@ -484,7 +484,8 @@ def artifact_data(
 def artifact_chunk(
     studio, project_id, kind, offset, length, version, *, media_only=False
 ):
-    path, mime = artifact_path(studio, project_id, kind)
+    # The player's chunks: after the first, the file is re-read only if it visibly changed.
+    path, mime = artifact_path(studio, project_id, kind, playing=media_only and offset > 0)
     if media_only and not mime.startswith(("video/", "image/")):
         raise HTTPException(422, "Artifact is not playable media")
     stat = path.stat()

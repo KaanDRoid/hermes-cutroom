@@ -44,6 +44,9 @@ Explainer layouts for vertical videos.
 - Load video and player messages stay above the layout cards.
 - A project whose video file is gone says so on the player at once, instead
   of a Load video button that never finishes.
+- The player checks a video file in full once when it starts loading, not again
+  for every 1 MiB piece; long originals start much sooner. Renders, exports
+  and downloads still check the whole file every time.
 
 ## 0.2.0 — unreleased
 

@@ -211,9 +211,26 @@ class Studio:
 
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
-    def _check_source(self, project):
+    def _known_digest(self, path):
+        """The file's SHA-256, read again only when its size, modification time or identity change.
+
+        For the player's 1 MiB chunks only: reading the whole file for every chunk made long videos
+        crawl. A file is read in full when playback starts; renders, exports and downloads always
+        read it in full, so a change that keeps the size and modification time is still refused there.
+        """
+        path = Path(path).expanduser()
+        stat = path.stat()
+        key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_ctime_ns)
+        cache = self.__dict__.setdefault("_digests", {})
+        if key not in cache:
+            if len(cache) >= 64:
+                cache.pop(next(iter(cache)))
+            cache[key] = file_digest(path)
+        return cache[key]
+
+    def _check_source(self, project, playing=False):
         try:
-            digest = file_digest(project["source"])
+            digest = (self._known_digest if playing else file_digest)(project["source"])
         except FileNotFoundError as error:
             raise MissingAssetError(
                 f"Source file is missing: {project['source']}; restore it or "
@@ -2421,10 +2438,11 @@ class Studio:
                 self._write_job(job)
             return job
 
-    def artifact(self, project_id, kind):
+    def artifact(self, project_id, kind, playing=False):
+        """A current, verified artifact path. ``playing`` is for the player's repeated chunk reads."""
         project = self.get(project_id)
         if kind == "source":
-            self._check_source(project)
+            self._check_source(project, playing)
             return _local_path(project["source"])
         allowed = {
             "preview",
@@ -2446,9 +2464,9 @@ class Studio:
             raise FileNotFoundError("Artifact is not available")
         if not self._artifact_current(project, kind):
             raise FileNotFoundError("Artifact is stale for the current revision")
-        return self._validate_publication(project, kind)
+        return self._validate_publication(project, kind, playing)
 
-    def _validate_publication(self, project, kind):
+    def _validate_publication(self, project, kind, playing=False):
         """Validate stored publication bytes, not a newly adopted input hash."""
         path = _local_path(project["artifacts"][kind])
         if not path.is_relative_to(self.root):
@@ -2456,7 +2474,7 @@ class Studio:
         lineage = project.get("artifact_lineage", {}).get(kind)
         if lineage:
             stat = path.stat()
-            if (stat.st_size, stat.st_mtime_ns, file_digest(path)) != (
+            if (stat.st_size, stat.st_mtime_ns, (self._known_digest if playing else file_digest)(path)) != (
                 lineage["size"],
                 lineage["mtime_ns"],
                 lineage["sha256"],

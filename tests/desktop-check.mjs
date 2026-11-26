@@ -1095,6 +1095,26 @@ test('timed blocks drag on a strip, snap to words, and a click without moving ch
   assert.deepEqual(selectedProject.settings.redactions.bleeps[0].ids, [6, 7], 'A click without moving changes nothing');
 });
 
+test('a timed picture dragged onto the one before it stops at its end', async () => {
+  jobRows = [];
+  const words = tlWords.map(w => ({ ...w, probability: 0.9 }));
+  const card = text => ({ kind: 'card', type: 'title', text });
+  const layout = { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: card('Intro'),
+    pictures: [{ start: 0, end: 1.1, said: 'w0 w1', item: card('One') }, { start: 2.4, end: 3.5, said: 'w4 w5', item: card('Two') }] };
+  const ui = await studio(patchApplies, { transcript: { words }, source_info: { duration: 6, width: 1920, height: 1080, has_audio: true }, base_segments: [{ start: 0, end: 6 }], segments: [{ start: 0, end: 6 }],
+    settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout } });
+  const lane = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'pictures');
+  const surface = { getBoundingClientRect: () => ({ left: 0, width: 600 }), style: {}, setPointerCapture() {} };
+  const at = x => ({ clientX: x, pointerId: 1, currentTarget: surface, preventDefault() {} });
+  lane().props.onPointerDown(at(295));
+  lane().props.onPointerMove(at(200));
+  lane().props.onPointerMove(at(20));
+  lane().props.onPointerUp(at(20));
+  await ui.flush();
+  const saved = selectedProject.settings.layout.pictures.map(p => [p.start, p.end, p.said]);
+  assert.deepEqual(saved, [[0, 1.1, 'w0 w1'], [1.2, 2.3, 'w2 w3']], 'Moved left as far as the first picture allows, keeping two words');
+});
+
 test('a missing source says so on the player at once instead of offering a load that hangs', async () => {
   jobRows = [];
   const missing = 'Source file is missing: C:\\v\\talk.mp4; restore it or import a new project';

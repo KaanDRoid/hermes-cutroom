@@ -1,5 +1,6 @@
 """Chat hints must agree with Studio's publication and approval guards."""
 
+import os
 import tempfile
 import unittest
 import wave
@@ -77,3 +78,34 @@ class CurrentMediaTests(unittest.TestCase):
         self.assertFalse(result["media"]["current"])
         self.assertFalse(result["media"]["approved"])
         self.assertNotIn("display_hint", result)
+
+    def test_playing_in_chunks_reads_each_file_once_until_it_changes(self):
+        # Every 1 MiB chunk of the player asks for the artifact again; hashing the whole file each
+        # time made a 20 MB preview take most of a minute to load.
+        import cutroom.studio as studio_module
+
+        real, seen = studio_module.file_digest, []
+        self.studio = Studio(self.root / "workspace")  # A fresh server with nothing read yet.
+
+        def counted(path):
+            seen.append(Path(path).name)
+            return real(path)
+
+        with patch("cutroom.studio.file_digest", side_effect=counted):
+            for _ in range(5):
+                self.studio.artifact(self.pid, "final", playing=True)
+                self.studio.artifact(self.pid, "source", playing=True)
+            self.assertEqual(seen.count("final.mp4"), 1)
+            self.assertEqual(seen.count("source.mp4"), 1)
+            # Same size, new bytes and a new modification time: read and refused again.
+            source = self.root / "source.mp4"
+            before = source.stat()
+            source.write_bytes(source.read_bytes()[::-1])
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+            with self.assertRaises(PermissionError):
+                self.studio.artifact(self.pid, "source", playing=True)
+            self.assertEqual(seen.count("source.mp4"), 2)
+            # Everything but playback reads the whole file every time.
+            self.studio.artifact(self.pid, "final")
+            self.studio.artifact(self.pid, "final")
+            self.assertEqual(seen.count("final.mp4"), 3)

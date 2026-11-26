@@ -50,7 +50,8 @@ class FakeStudio:
         self.job_records[job_id]["status"] = "cancelled"
         return self.job_records[job_id]
 
-    def artifact(self, project_id, kind):
+    def artifact(self, project_id, kind, playing=False):
+        self.calls.append(("artifact", kind, playing))
         return Path(self.get(project_id)["artifacts"][kind])
 
     def review(self, project_id):
@@ -256,6 +257,10 @@ class DashboardTests(unittest.TestCase):
                 (data["offset"], data["next_offset"], data["total"]), (2, 6, 10)
             )
             self.assertEqual(data["mime"], "video/mp4")
+            # Only chunks after the first may skip re-reading the whole file.
+            self.client.get("/projects/p1/media/preview?offset=0&length=4")
+            reads = [call for call in self.studio.calls if call[0] == "artifact"]
+            self.assertEqual(reads[-2:], [("artifact", "preview", True), ("artifact", "preview", False)])
             self.assertEqual(
                 self.client.get(
                     "/projects/p1/media/preview?length=2000000"
