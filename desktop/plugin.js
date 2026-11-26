@@ -267,6 +267,10 @@ const CHECK_TEXT = {
 // Notes built from a check's own findings, so a problem says what, where and how to fix it.
 const listTimes = times => times.length > 1 ? `${times.slice(0, -1).join(', ')} and ${times[times.length - 1]}` : times[0];
 const CHECK_DETAIL = {
+  draft_bleep_elsewhere: detail => (Array.isArray(detail) && detail.length ? detail.slice(0, 3).map(entry => {
+    const times = (n, one) => `${n} ${n === 1 ? one : `${one}s`}`;
+    return `“${entry.word}” is bleeped ${entry.bleeped === 1 ? 'once' : times(entry.bleeped, 'time')} but said ${times(entry.more, 'more time')} (${listTimes(entry.at.slice(0, 3).map(clock))}${entry.more > 3 ? ', …' : ''}).`;
+  }).join(' ') + ` Select it in Edit and choose “Bleep “${detail[0].word}” everywhere” if those should go too.` : null),
   captions: detail => {
     const issues = Array.isArray(detail?.issues) ? detail.issues : [];
     if (!issues.length) return null;
@@ -2522,6 +2526,25 @@ const HEADLINE_LEAD = /^(and|so|but|well|okay|ok|now|then|ve|yani|ama|işte|şim
 const HEADLINE_TAIL = /\b(the|a|an|of|to|and|or|that|this|be|is|it|bir|ve|ile|bu|da|de)$/iu;
 // A bleeped word never comes back as a big title: ideas that contain one are left out.
 const plainWord = text => String(text).toLocaleLowerCase().replace(/[^\p{L}\p{N}']+/gu, '');
+// Bleeped words still said, unbleeped, elsewhere in the kept video: [{ word, bleeped, more, at }].
+function bleepedElsewhere(view) {
+  const bleeps = view.settings?.redactions?.bleeps || [];
+  const words = (view.transcript?.words || []).filter(word => !(view.excluded_word_ids || []).includes(word.id));
+  const kept = view.segments || baseSegments(view);
+  const inKept = word => kept.some(range => (word.start + word.end) / 2 >= range.start && (word.start + word.end) / 2 < range.end);
+  const ids = new Set(bleeps.flatMap(item => item.ids || []));
+  const hit = word => ids.has(word.id) || bleeps.some(item => (word.start + word.end) / 2 >= item.start && (word.start + word.end) / 2 <= item.end);
+  const out = new Map();
+  for (const word of words.filter(inKept)) {
+    const key = plainWord(word.text);
+    if (!key) continue;
+    const entry = out.get(key) || { word: word.text.replace(/[^\p{L}\p{N}'’-]/gu, ''), bleeped: 0, more: 0, at: [] };
+    if (hit(word)) entry.bleeped += 1; else { entry.more += 1; entry.at.push(word.start); }
+    out.set(key, entry);
+  }
+  return [...out.values()].filter(entry => entry.bleeped && entry.more);
+}
+
 function bleepedWords(view) {
   const bleeps = view.settings?.redactions?.bleeps || [];
   if (!bleeps.length) return new Set();
@@ -3016,6 +3039,9 @@ function draftChecks(kit) {
     const shown = [draft.headline?.l1, draft.headline?.l2, ...[draft.panel, ...draft.pictures.map(item => item?.item)].filter(item => item?.kind === 'card').flatMap(cardText)];
     const leak = shown.some(line => String(line || '').split(/\s+/).some(part => banned.has(plainWord(part))));
     out.push({ name: leak ? 'draft_bleep_on_screen' : 'draft_bleeps', status: leak ? 'warning' : 'pass' });
+    // A name bleeped once is often said again; say where, so it is a choice and not an oversight.
+    const left = bleepedElsewhere(view);
+    if (left.length) out.push({ name: 'draft_bleep_elsewhere', status: 'warning', detail: left });
   }
   return out;
 }
@@ -3025,6 +3051,7 @@ Object.assign(CHECK_TEXT, {
   draft_face: ['Your face is clear of the post\u2019s caption area', 'Your face sits in the lower part of the screen, where the app can show the post\u2019s caption. Most split-screen shorts accept this; move the divider up in Style to clear it.'],
   draft_panel: ['The top panel has a picture', 'The top panel is empty. Add a screen recording, picture or card in Style.'],
   draft_hidden: ['Hidden areas cover what they should', 'Watch each hidden range to the end: a box stays where you put it and does not follow scrolling.'],
+  draft_bleep_elsewhere: ['Bleeped words are not said elsewhere', 'A bleeped word is still said elsewhere in the video.'],
   draft_bleeps: ['Bleeped words are silenced and left out of captions and subtitle files'],
   draft_sources: ['Each picture says where it comes from', 'Say where each picture comes from in Style (yours, a stock site or AI), with a credit for stock and AI pictures. The export package lists it in sources.txt.'],
   draft_wave: ['The sound wave card has a voice to show', 'A sound wave card needs sound, and this video has none. Choose another card in Style.'],

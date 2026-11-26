@@ -1115,6 +1115,17 @@ test('a timed picture dragged onto the one before it stops at its end', async ()
   assert.deepEqual(saved, [[0, 1.1, 'w0 w1'], [1.2, 2.3, 'w2 w3']], 'Moved left as far as the first picture allows, keeping two words');
 });
 
+test('Review says when a bleeped word is still said elsewhere', async () => {
+  jobRows = [];
+  const words = ['Alice', 'met', 'Alice', 'and', 'Bob'].map((text, id) => ({ id, text, start: id * 0.6, end: id * 0.6 + 0.5, probability: 0.9 }));
+  const once = { bleeps: [{ ids: [0], start: 0, end: 0.5, said: 'Alice', mode: 'bleep' }], hidden: [] };
+  let ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], settings: { brand: {}, redactions: once } });
+  assert.match(text(await ui.step('Review')), /“Alice” is bleeped once but said 1 more time \(0:01\)\. Select it in Edit and choose “Bleep “Alice” everywhere”/);
+  const all = { bleeps: [0, 2].map(id => ({ ids: [id], start: id * 0.6, end: id * 0.6 + 0.5, said: 'Alice', mode: 'bleep' })), hidden: [] };
+  ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], settings: { brand: {}, redactions: all } });
+  assert.doesNotMatch(text(await ui.step('Review')), /more time/);
+});
+
 test('a missing source says so on the player at once instead of offering a load that hangs', async () => {
   jobRows = [];
   const missing = 'Source file is missing: C:\\v\\talk.mp4; restore it or import a new project';

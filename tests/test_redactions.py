@@ -110,6 +110,19 @@ class StudioTests(unittest.TestCase):
         cleared = self.studio.update(saved["id"], {"settings": {"redactions": None}}, saved["revision"])
         self.assertNotIn("redactions", cleared["settings"])
 
+    def test_only_the_bleeped_saying_of_a_repeated_word_is_masked(self):
+        # A word said three times, bleeped once: the other two stay in captions and subtitle files.
+        words = [{"id": i, "start": 1.0 + i * 0.5, "end": 1.4 + i * 0.5, "text": text, "probability": 0.9}
+                 for i, text in enumerate(["Alice", "met", "Alice", "and", "Alice"])]
+        project = self.studio.update(self.project["id"], {"transcript": {"engine": "test", "status": "ok", "language": "en", "text": "Alice met Alice and Alice", "words": words},
+                                                          "settings": {"redactions": {"bleeps": [{"start": 2.0, "end": 2.4, "ids": [2], "said": "Alice"}]}}}, self.project["revision"])
+        project = self.studio.get(project["id"])
+        program = [w["text"] for w in self.studio._program_words(project)]
+        cues = " ".join(cue["text"] for cue in self.studio._cues(project))
+        self.assertEqual(program.count("Alice"), 2)
+        self.assertEqual(cues.count("Alice"), 2)
+        self.assertIn("—", cues)
+
     def test_zero_length_words_in_a_bleep_stay_out_of_the_subtitles_file(self):
         words = [{"id": 0, "start": 1.0, "end": 1.4, "text": "Hello", "probability": 0.9}, {"id": 1, "start": 1.6, "end": 1.6, "text": "Bob", "probability": 0.9},
                  {"id": 2, "start": 2.1, "end": 2.5, "text": "here", "probability": 0.9}]

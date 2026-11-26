@@ -36,6 +36,8 @@ Explainer layouts for vertical videos.
   Drag a block to move it or an edge to change it; it keeps to whole words,
   timed pictures never overlap, and a click jumps the player there. Arrow
   keys move a focused block a word; Shift and arrows change its end.
+- Review says when a bleeped word is still said elsewhere in the video, with
+  the times, so a name bleeped once is not left in by mistake.
 
 ### Studio
 - The player stays dark in Hermes's dark theme too, and captions in the
