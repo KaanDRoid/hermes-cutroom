@@ -3068,15 +3068,18 @@ function HiddenAndBleeps({ kit }) {
   if (!draft.bleeps.length && !draft.hidden.length && !draft.pictures.length) return el('p', { style: muted, children: 'Nothing yet. Select words in Edit, then Bleep, Hide area or Picture.' });
   const rowFor = (label, list, key, index, action = null) => el('div', { style: { ...row, justifyContent: 'space-between', borderTop: '1px solid var(--ui-stroke-secondary)', paddingTop: 6 }, children: [
     el('span', { style: { fontSize: 13 }, children: label }, 'l'),
-    action,
-    jsx(Button, { variant: 'ghost', 'aria-label': `Remove ${label}`, onClick: () => setDraft(old => ({ [key]: old[key].filter((_, i) => i !== index) })), children: '✕' }, 'x'),
+    // The row's own controls stay together on one line.
+    el('span', { style: { ...row, flexWrap: 'nowrap', gap: 4 }, children: [
+      action,
+      jsx(Button, { variant: 'ghost', 'aria-label': `Remove ${label}`, onClick: () => setDraft(old => ({ [key]: old[key].filter((_, i) => i !== index) })), children: '✕' }, 'x'),
+    ] }, 'c'),
   ] }, `${key}${index}`);
   return el('div', { style: { ...stack, gap: 6 }, children: [
     jsx(TimedStrip, { kit }, 'strip'),
     ...draft.bleeps.map((item, index) => rowFor(`${item.mode === 'mute' ? 'Muted' : 'Bleep'} · ${clock(item.start)} · “${item.said}”`, draft.bleeps, 'bleeps', index)),
     ...draft.hidden.map((item, index) => rowFor(`Hidden area (${{ cover: 'solid box', blur: 'blur', pixelate: 'pixelate' }[item.style] || 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index,
       jsx(Button, { variant: item.follow ? 'secondary' : 'ghost', 'aria-label': `Follow movement for hidden area ${index + 1}`, 'aria-pressed': Boolean(item.follow),
-        onClick: () => setDraft(old => ({ hidden: old.hidden.map((entry, i) => i === index ? { ...entry, follow: !entry.follow } : entry) })), children: 'Follow movement' }, 'follow'))),
+        onClick: () => setDraft(old => ({ hidden: old.hidden.map((entry, i) => i === index ? { ...entry, follow: !entry.follow } : entry) })), children: item.follow ? '✓ Following movement' : 'Follow movement' }, 'follow'))),
     ...draft.pictures.flatMap((item, index) => [rowFor(`Picture · ${clock(item.start)}–${clock(item.end)} · “${String(item.said).slice(0, 30)}”`, draft.pictures, 'pictures', index),
       item.item?.kind === 'file' ? jsx(OriginFields, { origin: item.item.origin, onChange: origin => setDraft(old => ({ pictures: old.pictures.map((entry, i) => (i === index ? { ...entry, item: { ...entry.item, origin } } : entry)) })) }, `origin${index}`) : null]),
     draft.hidden.length ? el('div', { style: row, children: [el('span', { style: { fontSize: 12 }, children: 'Hidden areas look' }), jsx(Choice, { label: 'Hidden areas look', value: draft.hidden[0].style, options: [['cover', 'Solid box'], ['blur', 'Blur'], ['pixelate', 'Pixelate']], onChange: value => setDraft(old => ({ hidden: old.hidden.map(item => ({ ...item, style: value })) })) })] }, 'look') : null,

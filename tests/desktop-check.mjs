@@ -511,7 +511,7 @@ test('enables following for just the chosen hidden area', async () => {
   jobRows = [];
   const box = { x: 0.2, y: 0.2, w: 0.15, h: 0.15 };
   const hidden = [{ start: 1, end: 2, box, style: 'cover' }, { start: 3, end: 4, box, style: 'cover' }];
-  const ui = await studio(async () => selectedProject, { settings: { redactions: { bleeps: [], hidden } } });
+  const ui = await studio(patchApplies, { settings: { redactions: { bleeps: [], hidden } } });
   const controls = nodes(disclosure(ui.draw(), 'More tools')).filter(n => n.props?.['aria-label'] === 'Follow movement for hidden area 2');
   assert.equal(controls.length, 1);
   assert.equal(controls[0].props['aria-pressed'], false);
@@ -520,6 +520,8 @@ test('enables following for just the chosen hidden area', async () => {
   const saved = ui.patches().at(-1).options.body.changes.settings.redactions.hidden;
   assert.equal(saved[0].follow, undefined);
   assert.equal(saved[1].follow, true);
+  const shown = nodes(disclosure(ui.draw(), 'More tools')).find(n => n.props?.['aria-label'] === 'Follow movement for hidden area 2');
+  assert.equal(text(shown).trim(), '✓ Following movement', 'On is said in words, not only by colour');
 });
 
 test('empty transcript offers Transcribe; rarely used tools live under More tools', async () => {
