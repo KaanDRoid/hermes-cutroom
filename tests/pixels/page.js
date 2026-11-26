@@ -6,7 +6,9 @@ import plugin from 'PLUGIN';
 
 let root = null;
 
-window.__mount = async ({ project, platforms, theme, posterColour, assetSize = 100 * 1048576 }) => {
+// media: a real file on the test server that the stand-in serves in 1 MiB pieces, each after delayMs.
+window.__served = [];
+window.__mount = async ({ project, platforms, theme, posterColour, assetSize = 100 * 1048576, media = null }) => {
   for (const [name, value] of Object.entries(theme)) document.documentElement.style.setProperty(name, value);
   const canvas = document.createElement('canvas');
   canvas.width = 640; canvas.height = 360;
@@ -18,7 +20,18 @@ window.__mount = async ({ project, platforms, theme, posterColour, assetSize = 1
   backend.rest = async (path, options) => {
     if (path === '/platforms') return platforms;
     if (path === '/projects') return [current];
+    if (path.includes('/artifact-info/preview') && media) return { path: 'x', name: 'preview.mp4', mime: 'video/mp4', size: media.size, stream: media.stream };
     if (path.includes('/artifact-info/')) return { path: 'x', name: 'x.mp4', size: assetSize };
+    if (path.includes('/media/preview') && media) {
+      const offset = Number(new URL(path, 'https://x').searchParams.get('offset') || 0);
+      const end = Math.min(media.size, offset + 1048576);
+      if (offset > 0) await new Promise(resolve => setTimeout(resolve, media.delayMs));
+      const bytes = new Uint8Array(await (await fetch(media.url, { headers: { Range: `bytes=${offset}-${end - 1}` } })).arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 32768) binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+      window.__served.push(end);
+      return { data: btoa(binary), offset, next_offset: end, total: media.size, mime: 'video/mp4', version: 'v1' };
+    }
     if (path.includes('/poster')) return poster;
     if (path.includes('/layout-still')) return null;
     if (path.startsWith('/jobs')) return [];

@@ -282,3 +282,73 @@ def probe(source: str | Path) -> dict:
         "height": int(video["height"]),
         "has_audio": any(s["codec_type"] == "audio" for s in data["streams"]),
     }
+
+
+def stream_info(path: str | Path) -> dict:
+    """Whether an MP4 is fragmented, and its codec string for the player's MediaSource.
+
+    Reads only box headers and the ``moov`` box: fragmented previews start playing from their
+    first pieces, while other files are loaded whole. ``codecs`` is None when it cannot be told.
+    """
+    path = _local_path(path)
+    boxes, moov = [], b""
+    with path.open("rb") as stream:
+        size_total = path.stat().st_size
+        offset = 0
+        while offset + 8 <= size_total and len(boxes) < 100_000:
+            stream.seek(offset)
+            header = stream.read(16)
+            size, name = int.from_bytes(header[:4], "big"), header[4:8]
+            if size == 1:
+                size = int.from_bytes(header[8:16], "big")
+            elif size == 0:
+                size = size_total - offset
+            if size < 8:
+                break
+            boxes.append(name)
+            if name == b"moov" and size <= 16 * 1048576:
+                stream.seek(offset)
+                moov = stream.read(size)
+            if name == b"moof":
+                break
+            offset += size
+    codecs = None
+    at = moov.find(b"avcC")
+    if at >= 0 and len(moov) >= at + 8:
+        profile, compatible, level = moov[at + 5], moov[at + 6], moov[at + 7]
+        codecs = f"avc1.{profile:02x}{compatible:02x}{level:02x}"
+        if b"mp4a" in moov:
+            # AAC-LC: the only audio Cutroom renders.
+            codecs += ",mp4a.40.2"
+    return {"fragmented": b"moof" in boxes, "codecs": codecs}
+
+
+STREAM_CACHE_FILES = 4
+
+
+def streaming_copy(path: str | Path, cache: str | Path, digest: str) -> Path:
+    """A fragmented copy of a verified MP4 for the Studio player, cached by the file's SHA-256.
+
+    Only the container changes (``-c copy``), so every frame is the same. Fragments lose the
+    edit list that trims AAC's 1024-sample start, so the copy's sound runs about 21 ms behind the
+    picture at 48 kHz, far below what people notice; reviews and exports read the render itself.
+    """
+    if not isinstance(digest, str) or len(digest) != 64 or not all(c in "0123456789abcdef" for c in digest):
+        raise ValueError("A streaming copy is named by a SHA-256")
+    cache = Path(cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / f"{digest}.mp4"
+    if target.is_file():
+        os.utime(target)
+        return target
+    temporary = cache / f".{digest}.{os.getpid()}.mp4"
+    try:
+        _run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(_local_path(path)), "-map", "0:v:0", "-map", "0:a?",
+              "-c", "copy", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", str(temporary)])
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    copies = sorted(cache.glob("*.mp4"), key=lambda item: item.stat().st_mtime)
+    for old in copies[:-STREAM_CACHE_FILES]:
+        old.unlink(missing_ok=True)
+    return target

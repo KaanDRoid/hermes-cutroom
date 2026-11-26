@@ -1023,6 +1023,16 @@ function Activity({ jobs, cancel, retry }) {
 const STAGE = 'color-mix(in srgb, var(--ui-base) 15%, color-mix(in srgb, var(--ui-bg-editor) 15%, black))';
 const ON_STAGE = 'color-mix(in srgb, var(--ui-base) 5%, color-mix(in srgb, var(--ui-bg-editor) 5%, white))';
 const AUTO_LOAD_BYTES = 67108864;
+// A fragmented preview plays from its first pieces through MediaSource; the rest keeps arriving.
+// Larger files and other formats load whole, as before.
+const STREAM_MAX_BYTES = 104857600;
+const streamType = info => {
+  const codecs = info?.stream?.fragmented && typeof info.stream.codecs === 'string' ? info.stream.codecs : null;
+  if (!codecs || !/^[\w.,]+$/.test(codecs) || !(info.size <= STREAM_MAX_BYTES)) return null;
+  const type = `video/mp4; codecs="${codecs}"`;
+  const MS = globalThis.MediaSource;
+  try { return MS && MS.isTypeSupported(type) ? type : null; } catch { return null; }
+};
 // Same default as the burned captions (captions.DEFAULT_HIGHLIGHT); a video colour, not a theme colour.
 const CAPTION_DEFAULT_HIGHLIGHT = '#FFCC00';
 const MEDIA_CHOICES = [['source', 'Original'], ['preview', 'Preview'], ['final', 'Final']];
@@ -1209,26 +1219,68 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
     const kind = mediaRef.current?.kind || loading.current;
     if (kind && kind !== 'source') { chosen.current = false; release(); }
   }, [project.revision, project.artifacts?.preview, project.artifacts?.final]);
-  const load = async (kind, explicit = false) => {
+  const load = async (kind, explicit = false, known = undefined) => {
     // A person's choice replaces a load in progress (release() retires it); automatic loads wait.
     if (lock.current && !explicit) return;
     if (explicit) chosen.current = true;
     release(); lock.current = true; loading.current = kind; setError(null);
     const token = generation.current;
     try {
-      const parts = [];
-      let offset = 0, total = null, version = null, mime = null;
-      do {
-        const chunk = await ctx.rest(`/projects/${enc(project.id)}/media/${kind}?offset=${offset}&length=1048576${version ? `&version=${enc(version)}` : ''}`);
-        if (token !== generation.current) return;
+      let offset = 0, total = null, version = null, mime = null, streaming = false;
+      const next = async () => {
+        const chunk = await ctx.rest(`/projects/${enc(project.id)}/media/${kind}?offset=${offset}&length=1048576${version ? `&version=${enc(version)}` : ''}${streaming ? '&stream=true' : ''}`);
+        if (token !== generation.current) return null;
         if (!Number.isSafeInteger(chunk.total) || chunk.total < 1 || chunk.total > 268435456) throw new Error('Native playback is limited to 256 MiB; render a smaller preview or download the file.');
         if (chunk.offset !== offset || !Number.isSafeInteger(chunk.next_offset) || chunk.next_offset <= offset || chunk.next_offset > chunk.total || chunk.next_offset - offset > 1048576 || typeof chunk.data !== 'string' || chunk.data.length > 1398104 || typeof chunk.version !== 'string' || !chunk.version || typeof chunk.mime !== 'string' || !chunk.mime.startsWith('video/')) throw new Error('Invalid or unsupported media chunk');
         if (version && (version !== chunk.version || total !== chunk.total || mime !== chunk.mime)) throw new Error('Media changed while loading; reload the player');
         version = chunk.version; total = chunk.total; mime = chunk.mime;
         const binary = atob(chunk.data);
         if (binary.length !== chunk.next_offset - offset) throw new Error('Incomplete media chunk');
-        parts.push(Uint8Array.from(binary, character => character.charCodeAt(0)));
-        offset = chunk.next_offset; setProgress(offset / total);
+        offset = chunk.next_offset;
+        return Uint8Array.from(binary, character => character.charCodeAt(0));
+      };
+      // Renders say whether they can stream; the original is loaded whole.
+      let info = known;
+      if (info === undefined && kind !== 'source') info = await ctx.rest(`/projects/${enc(project.id)}/artifact-info/${kind}`).catch(() => null);
+      if (token !== generation.current) return;
+      const type = kind === 'source' ? null : streamType(info);
+      if (type) {
+        // The server's fragmented copy of the render; the render itself is never changed.
+        streaming = true;
+        const source = new globalThis.MediaSource();
+        const opened = new Promise(resolve => source.addEventListener('sourceopen', resolve, { once: true }));
+        url.current = URL.createObjectURL(source);
+        setMedia({ url: url.current, kind, streaming: true });
+        onPlayback({ kind, time: null });
+        setProgress(0);
+        await opened;
+        if (token !== generation.current) return;
+        // The pieces do not carry the length; the server measured it, so the seek bar works at once.
+        if (Number.isFinite(info.stream.duration) && info.stream.duration > 0) source.duration = info.stream.duration;
+        const buffer = source.addSourceBuffer(type);
+        const append = bytes => new Promise((resolve, reject) => {
+          const done = () => { buffer.removeEventListener('error', failed); resolve(); };
+          const failed = () => { buffer.removeEventListener('updateend', done); reject(new Error('The player could not read this video; download it instead.')); };
+          buffer.addEventListener('updateend', done, { once: true });
+          buffer.addEventListener('error', failed, { once: true });
+          buffer.appendBuffer(bytes);
+        });
+        do {
+          const bytes = await next();
+          if (!bytes || token !== generation.current) return;
+          await append(bytes);
+          if (token !== generation.current) return;
+          setProgress(offset / total);
+        } while (offset < total);
+        if (source.readyState === 'open') source.endOfStream();
+        return;
+      }
+      const parts = [];
+      do {
+        const bytes = await next();
+        if (!bytes) return;
+        parts.push(bytes);
+        setProgress(offset / total);
       } while (offset < total);
       if (token !== generation.current) return;
       url.current = URL.createObjectURL(new Blob(parts, { type: mime }));
@@ -1241,15 +1293,16 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
   const autoLoad = async kind => {
     if (lock.current) return;
     const token = generation.current;
-    let size = null, failure = null;
+    let size = null, failure = null, info = null;
     try {
-      const info = await ctx.rest(`/projects/${enc(project.id)}/artifact-info/${kind}`);
+      info = await ctx.rest(`/projects/${enc(project.id)}/artifact-info/${kind}`);
       if (Number.isSafeInteger(info?.size) && info.size > 0) size = info.size;
     } catch (error) { failure = error; }
     if (token !== generation.current || lock.current || mediaRef.current || chosen.current) return;
     // A file that is gone (or refused) is said at once; a load button would only hang on it.
     if (failure) { setError(failure); return; }
-    if (size !== null && size <= AUTO_LOAD_BYTES) await load(kind);
+    // A streaming preview starts on its first pieces, so it loads at once whatever its size.
+    if (size !== null && (size <= AUTO_LOAD_BYTES || (kind !== 'source' && streamType(info)))) await load(kind, false, info);
     else setOffer({ kind, size });
   };
   const want = preferred === 'preview' && project.artifacts?.preview ? 'preview' : 'source';
@@ -1340,8 +1393,11 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
           border: `2px dashed color-mix(in srgb, ${ON_STAGE} 80%, transparent)`, borderRadius: 4, display: 'flex', alignItems: 'flex-start', justifyContent: 'flex-start', padding: 6, pointerEvents: 'none' },
         children: el('span', { style: { fontSize: 12, padding: '2px 6px', borderRadius: 4, background: STAGE, color: ON_STAGE }, children: `End screen · last ${endSeconds} s` }) }, 'endscreen') : null,
         !media && offer && progress === null ? el('div', { style: center, children: jsx(Button, { onClick: () => load(offer.kind, true), children: offer.size ? `Load video (${megabytes(offer.size)})` : 'Load video' }) }, 'offer') : null,
-        progress !== null ? el('div', { style: center, children: el('div', { 'data-cutroom-loading': true, role: 'status', style: { ...stack, alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 8, background: STAGE, color: ON_STAGE, fontSize: 13 },
+        progress !== null && !media?.streaming ? el('div', { style: center, children: el('div', { 'data-cutroom-loading': true, role: 'status', style: { ...stack, alignItems: 'center', gap: 8, padding: '10px 14px', borderRadius: 8, background: STAGE, color: ON_STAGE, fontSize: 13 },
           children: [el('span', { children: 'Loading video…' }), jsx(Bar, { value: progress, label: 'Media loading progress', width: 160 })] }) }, 'loading') : null,
+        // Streaming: the video already plays; a thin line shows how much has arrived.
+        progress !== null && media?.streaming ? el('div', { 'data-cutroom-streaming': true, role: 'status', 'aria-label': `Loading the rest of the video: ${Math.round(progress * 100)}%`, style: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, zIndex: 3, background: 'color-mix(in srgb, white 18%, transparent)', pointerEvents: 'none' },
+          children: el('div', { style: { height: '100%', width: `${Math.round(progress * 100)}%`, background: 'var(--ui-accent)' } }) }, 'streaming') : null,
       ] }, 'frame'),
       el('div', { style: { ...row, flexWrap: 'nowrap', gap: 10, width: '100%', fontSize: 12 }, children: [
         jsx(Button, { variant: 'secondary', disabled: !media, 'aria-label': playing ? 'Pause' : 'Play', onClick: () => { const video = videoRef?.current; if (video) { if (video.paused) video.play?.(); else video.pause?.(); } }, children: playing ? '❚❚' : '▶' }),

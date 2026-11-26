@@ -49,6 +49,11 @@ Explainer layouts for vertical videos.
 - The player checks a video file in full once when it starts loading, not again
   for every 1 MiB piece; long originals start much sooner. Renders, exports
   and downloads still check the whole file every time.
+- Previews and finals start playing in the Studio on their first pieces while
+  the rest streams in (a thin line shows how much has arrived), and the seek
+  bar knows the length at once. The player reads a fragmented copy made
+  without re-encoding; the files you review and export are unchanged.
+  Previews get a keyframe every two seconds so the first piece is small.
 
 ## 0.2.0 — unreleased
 

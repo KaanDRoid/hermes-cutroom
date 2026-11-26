@@ -864,11 +864,69 @@ test('loads authenticated versioned media chunks, rejects oversize media and rev
     oversize = true;
     const before = ui.calls.length;
     await choice(ui.draw(), 'Final').props.onClick();
-    assert.equal(ui.calls.length, before + 1);
+    // A render first says whether it can stream, then one chunk shows it is too large.
+    assert.deepEqual(ui.calls.slice(before).map(c => c.path.split('?')[0]), ['/projects/p1/artifact-info/final', '/projects/p1/media/final']);
     assert.match(text(ui.draw()), /256 MiB/);
     assert.equal(created.length, 2);
     assert.deepEqual(revoked, ['blob:test-1', 'blob:test-2']);
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('a fragmented preview plays from its first piece while the rest streams in', async () => {
+  const created = [], revoked = [], appended = [];
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL, before = globalThis.MediaSource;
+  let source = null, release = null;
+  class FakeBuffer {
+    constructor() { this.listeners = {}; }
+    addEventListener(name, fn) { this.listeners[name] = fn; }
+    removeEventListener(name) { delete this.listeners[name]; }
+    appendBuffer(bytes) { appended.push(bytes.length); queueMicrotask(() => this.listeners.updateend?.()); }
+  }
+  globalThis.MediaSource = class {
+    static isTypeSupported(type) { return type === 'video/mp4; codecs="avc1.64001f,mp4a.40.2"'; }
+    constructor() { source = this; this.readyState = 'open'; this.ended = false; this.types = []; }
+    addEventListener(name, fn) { if (name === 'sourceopen') queueMicrotask(fn); }
+    addSourceBuffer(type) { this.types.push(type); return new FakeBuffer(); }
+    endOfStream() { this.ended = true; this.readyState = 'ended'; }
+  };
+  URL.createObjectURL = item => { created.push(item); return `blob:stream-${created.length}`; };
+  URL.revokeObjectURL = url => revoked.push(url);
+  try {
+    jobRows = [];
+    const gate = new Promise(resolve => { release = resolve; });
+    const ui = await studio(async path => {
+      if (path.includes('/artifact-info/')) return { path: 'x', name: 'preview.mp4', mime: 'video/mp4', size: 9, stream: { fragmented: true, codecs: 'avc1.64001f,mp4a.40.2', duration: 12.5 } };
+      if (path.includes('/media/')) {
+        const offset = Number(new URL(path, 'https://test').searchParams.get('offset') || 0);
+        if (offset > 0) await gate;
+        return { data: btoa('abc'), offset, next_offset: offset + 3, total: 9, mime: 'video/mp4', version: 'v1' };
+      }
+      return selectedProject;
+    }, { artifacts: { preview: 'preview.mp4' } });
+    const loading = choice(ui.draw(), 'Preview').props.onClick();
+    for (let i = 0; i < 6; i++) await tick();
+    let tree = ui.draw();
+    assert.equal(nodes(tree).find(n => n.type === 'video')?.props.src, 'blob:stream-1', 'Plays before the rest arrives');
+    assert.ok(created[0] === source, 'The player reads a MediaSource, not a finished file');
+    assert.deepEqual(appended, [3]);
+    assert.equal(source.duration, 12.5, 'The seek bar knows the length before the rest arrives');
+    assert.ok(nodes(tree).some(n => n.props?.['data-cutroom-streaming']), 'A thin line shows the rest loading');
+    assert.ok(!nodes(tree).some(n => n.props?.['data-cutroom-loading']), 'No loading box over the playing video');
+    release();
+    await loading;
+    for (let i = 0; i < 4; i++) await tick();
+    assert.deepEqual(appended, [3, 3, 3]);
+    assert.ok(ui.calls.filter(c => c.path.includes('/media/preview')).every(c => c.path.endsWith('&stream=true')), 'Pieces come from the streaming copy');
+    assert.equal(source.ended, true);
+    assert.deepEqual(source.types, ['video/mp4; codecs="avc1.64001f,mp4a.40.2"']);
+    assert.ok(!nodes(ui.draw()).some(n => n.props?.['data-cutroom-streaming']));
+    // The original is always loaded whole: any format, never asked about streaming.
+    const calls = ui.calls.length;
+    await choice(ui.draw(), 'Original').props.onClick();
+    assert.ok(!ui.calls.slice(calls).some(c => c.path.includes('/artifact-info/')));
+    assert.ok(created.at(-1) instanceof Blob);
+    assert.deepEqual(revoked, ['blob:stream-1']);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; globalThis.MediaSource = before; }
 });
 
 test('space plays and pauses unless focus is in a text field', async () => {

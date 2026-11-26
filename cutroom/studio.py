@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .media import _local_path, poster_frame, probe
+from .media import _local_path, poster_frame, probe, streaming_copy
 from .project import file_digest
 
 _CHILD_PROCESSES = {}
@@ -2465,6 +2465,13 @@ class Studio:
         if not self._artifact_current(project, kind):
             raise FileNotFoundError("Artifact is stale for the current revision")
         return self._validate_publication(project, kind, playing)
+
+    def stream_copy(self, project_id, kind):
+        """A fragmented copy of the verified preview or final for the Studio player to stream."""
+        if kind not in {"preview", "final"}:
+            raise ValueError("Only renders can stream")
+        path = self.artifact(project_id, kind, playing=True)
+        return streaming_copy(path, self.root / "stream-cache", self._known_digest(path))
 
     def _validate_publication(self, project, kind, playing=False):
         """Validate stored publication bytes, not a newly adopted input hash."""

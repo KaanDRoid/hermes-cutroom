@@ -9,7 +9,7 @@
 // Host controls (Button, Input) are drawn by stand-ins, so only whether they show is checked;
 // contrast is measured on what Cutroom draws itself.
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
@@ -142,7 +142,21 @@ test('Studio draws selections, buttons, layout and hidden areas readably in ligh
     .sdk-input { font: inherit; height: 28px; padding: 0 8px; border: 1px solid var(--ui-stroke-secondary); border-radius: 6px; background: transparent; color: var(--ui-text-primary); }
     .sdk-badge { font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--ui-stroke-secondary); }
   </style><div id=app></div><script src="bundle.js"></script>`;
+  // A fragmented MP4 written with the preview's own flags (tests/test_streaming_preview.py checks
+  // Cutroom writes these boxes): 12 s, a keyframe every 2 s, a few MiB.
+  const clip = join(work, 'preview.mp4');
+  const made = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=30:duration=12', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=12',
+    '-shortest', '-c:v', 'libx264', '-preset', 'ultrafast', '-b:v', '3M', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-force_key_frames', 'expr:gte(t,n_forced*2)',
+    '-movflags', '+frag_keyframe+empty_moov+default_base_moof', clip], { timeout: 120000 });
+  const streaming = made.status === 0;
   const server = createServer((request, response) => {
+    if (streaming && request.url.startsWith('/preview.mp4')) {
+      const data = readFileSync(clip);
+      const [from, to] = (request.headers.range || `bytes=0-${data.length - 1}`).replace('bytes=', '').split('-').map(Number);
+      response.writeHead(206, { 'content-type': 'video/mp4', 'content-range': `bytes ${from}-${to}/${data.length}` });
+      response.end(data.subarray(from, to + 1));
+      return;
+    }
     const body = request.url.startsWith('/bundle.js') ? readFileSync(join(work, 'bundle.js')) : html;
     response.writeHead(200, { 'content-type': request.url.startsWith('/bundle.js') ? 'text/javascript' : 'text/html' });
     response.end(body);
@@ -233,6 +247,31 @@ test('Studio draws selections, buttons, layout and hidden areas readably in ligh
       const limit = shorts.x + shorts.w * (1 - 0.18);
       const ink = pixels(image, { x: limit, y: head.y, w: shorts.x + shorts.w - limit, h: head.h }).filter(([, , rgb]) => near(rgb, hex('#1D2128'), 40) || near(rgb, hex('#FFD02E'), 40));
       assert.equal(ink.length, 0, `${name}: no headline pixels beside the Shorts buttons`);
+    }
+    // Streaming playback in a real browser: the preview plays before its last piece arrives.
+    if (streaming) {
+      const data = readFileSync(clip);
+      const at = data.indexOf('avcC');
+      const codecs = `avc1.${[5, 6, 7].map(i => data[at + i].toString(16).padStart(2, '0')).join('')},mp4a.40.2`;
+      const media = { url: '/preview.mp4', size: data.length, delayMs: 400, stream: { fragmented: true, codecs, duration: 12 } };
+      assert.ok(data.length > 3 * 1048576, `Several pieces (${data.length} bytes)`);
+      const previewProject = { ...project(null), artifacts: { preview: 'preview.mp4' }, settings: { ...project(null).settings, redactions: undefined } };
+      await page.evaluate(`window.__served = []; window.__mount(${JSON.stringify({ project: previewProject, platforms, theme: themes.dark, posterColour: POSTER, media })})`);
+      // A press on Preview starts a fresh load; count only the pieces served from then on.
+      await page.evaluate(`(() => { ${byText('button', 'Preview')}.click(); window.__served = []; return 1; })()`);
+      const started = await page.evaluate(`new Promise(resolve => { const t0 = performance.now(); const check = () => { const v = document.querySelector('video'); if (v && v.readyState >= 3) resolve({ ms: Math.round(performance.now() - t0), served: window.__served.length, src: v.src.slice(0, 5) }); else setTimeout(check, 50); }; check(); setTimeout(() => resolve(null), 20000); })`);
+      assert.ok(started, 'The preview became playable');
+      const pieces = Math.ceil(data.length / 1048576);
+      assert.ok(started.served < pieces, `Playable after ${started.served} of ${pieces} pieces (${started.ms} ms)`);
+      const early = await page.evaluate(`document.querySelector('video').duration`);
+      assert.ok(Math.abs(early - 12) < 0.01, `The length is known while streaming (${early})`);
+      await page.shot('dark-streaming');
+      const bar = await rectOf(page, `document.querySelector('[data-cutroom-streaming]')`);
+      assert.ok(bar && bar.w > 100, 'A thin line shows the rest loading');
+      const played = await page.evaluate(`(async () => { const v = document.querySelector('video'); v.muted = true; await v.play(); await new Promise(r => setTimeout(r, 1200)); const t = v.currentTime; v.pause(); return t; })()`);
+      assert.ok(played > 0.5, `It really plays (${played} s)`);
+      const done = await page.evaluate(`new Promise(resolve => { const check = () => { if (!document.querySelector('[data-cutroom-streaming]')) resolve(document.querySelector('video').duration); else setTimeout(check, 100); }; check(); setTimeout(() => resolve(null), 30000); })`);
+      assert.ok(done && Math.abs(done - 12) < 0.3, `All pieces arrived and the whole video is there (${done} s)`);
     }
   } finally {
     page?.close();

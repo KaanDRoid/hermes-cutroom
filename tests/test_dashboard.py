@@ -54,6 +54,10 @@ class FakeStudio:
         self.calls.append(("artifact", kind, playing))
         return Path(self.get(project_id)["artifacts"][kind])
 
+    def stream_copy(self, project_id, kind):
+        self.calls.append(("stream_copy", kind))
+        return Path(self.get(project_id)["artifacts"][kind])
+
     def review(self, project_id):
         return {"digest": "a" * 64, "project": self.get(project_id)}
 
@@ -284,6 +288,8 @@ class DashboardTests(unittest.TestCase):
             )
 
     def test_artifact_info_returns_only_a_facade_resolved_persisted_file(self):
+        import base64
+
         self.studio.create("input.mp4")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "captions.srt"
@@ -297,6 +303,16 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(metadata["mime"], "text/plain")
             self.assertEqual(metadata["size"], path.stat().st_size)
             self.assertIsInstance(metadata["version"], str)
+            self.assertNotIn("stream", metadata, "Only videos say how they can be played")
+            video = Path(temporary) / "preview.mp4"
+            video.write_bytes(bytes.fromhex("0000001066747970") + b"isom" + bytes(4) + bytes.fromhex("000000086d6f6f66"))
+            self.studio.projects["p1"]["artifacts"]["preview"] = str(video)
+            stream = self.client.get("/projects/p1/artifact-info/preview").json()["stream"]
+            self.assertEqual(stream, {"fragmented": True, "codecs": None, "duration": None}, "No length when the file cannot be read")
+            chunk = self.client.get("/projects/p1/media/preview?offset=0&length=8&stream=true").json()
+            self.assertEqual(base64.b64decode(chunk["data"]), video.read_bytes()[:8])
+            self.assertIn(("stream_copy", "preview"), self.studio.calls, "Streaming reads the fragmented copy")
+            self.assertEqual(self.client.get("/projects/p1/media/source?stream=true").status_code, 422)
             self.assertEqual(
                 self.client.get("/projects/p1/artifact-info/secret").status_code, 422
             )

@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -439,13 +440,29 @@ def artifact_info(
     """Persisted, facade-validated paths for the SDK's captured file-save action."""
     path, mime = artifact_path(studio, project_id, kind)
     stat = path.stat()
-    return {
+    info = {
         "path": str(path),
         "name": path.name,
         "mime": mime,
         "size": stat.st_size,
         "version": f"{stat.st_size:x}-{stat.st_mtime_ns:x}",
     }
+    if mime == "video/mp4" and kind in ("preview", "final"):
+        # Renders stream to the player as a fragmented copy, from the first pieces on.
+        media = _module("media")
+        try:
+            copy = Path(invoke(studio.stream_copy, project_id, kind))
+            stream = media.stream_info(copy)
+        except (HTTPException, OSError, ValueError, subprocess.SubprocessError):
+            stream = {"fragmented": False, "codecs": None}
+        if stream["fragmented"]:
+            # Fragments do not carry the length; the seek bar needs it at once.
+            try:
+                stream["duration"] = float(media.probe(path)["duration"])
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                stream["duration"] = None
+        info["stream"] = stream
+    return info
 
 
 @router.get("/projects/{project_id}/media/{kind}")
@@ -455,16 +472,19 @@ def media_chunk(
     offset: Annotated[int, Query(ge=0)] = 0,
     length: Annotated[int, Query(ge=1, le=1_048_576)] = 1_048_576,
     version: Annotated[str | None, Query(max_length=128)] = None,
+    stream: bool = False,
     studio=Depends(get_studio),
 ):
     """JSON transport for ctx.rest, which does not expose binary responses.
+
+    ``stream`` reads the render's fragmented copy (see ``artifact-info``) for MediaSource playback.
 
     Native grants never enter media URLs. The renderer builds and revokes a
     local Blob URL from bounded, authenticated chunks: files up to 64 MiB load
     when a project opens, larger ones after a click (256 MiB at most).
     """
     return artifact_chunk(
-        studio, project_id, kind, offset, length, version, media_only=True
+        studio, project_id, kind, offset, length, version, media_only=True, stream=stream
     )
 
 
@@ -482,10 +502,15 @@ def artifact_data(
 
 
 def artifact_chunk(
-    studio, project_id, kind, offset, length, version, *, media_only=False
+    studio, project_id, kind, offset, length, version, *, media_only=False, stream=False
 ):
-    # The player's chunks: after the first, the file is re-read only if it visibly changed.
-    path, mime = artifact_path(studio, project_id, kind, playing=media_only and offset > 0)
+    if stream:
+        if kind not in ("preview", "final"):
+            raise HTTPException(422, "Only renders can stream")
+        path, mime = Path(invoke(studio.stream_copy, project_id, kind)), "video/mp4"
+    else:
+        # The player's chunks: after the first, the file is re-read only if it visibly changed.
+        path, mime = artifact_path(studio, project_id, kind, playing=media_only and offset > 0)
     if media_only and not mime.startswith(("video/", "image/")):
         raise HTTPException(422, "Artifact is not playable media")
     stat = path.stat()

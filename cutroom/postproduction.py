@@ -1949,6 +1949,10 @@ def export_video(
         if rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0":
             # Constant-rate sources: keep the final frame's duration in the container.
             args += ["-fps_mode", "cfr", "-r", rate]
+        if settings["preset"] == "preview":
+            # A keyframe every two seconds: the player's streaming copy (media.streaming_copy)
+            # can then start on a small first piece. The preview itself stays a plain MP4.
+            args += ["-force_key_frames", "expr:gte(t,n_forced*2)"]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
         chain = (
