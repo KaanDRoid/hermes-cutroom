@@ -181,6 +181,25 @@ class FollowRenderTests(unittest.TestCase):
         )
         return path
 
+    def test_a_square_that_changes_width_never_shows(self):
+        # A fixed-size box cannot cover something that grows; it must give up and cover everything.
+        breathing = self.root / "breathing.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", f"color=c=0x202020:size={W}x{H}:rate=25:duration=2",
+            "-f", "lavfi", "-i", "color=c=white:size=60x60:rate=25:duration=2",
+            "-filter_complex", "[1]drawbox=x=26:y=0:w=8:h=60:color=gray:t=fill,scale=w='trunc((60+40*sin(2*PI*t))/2)*2':h=60:eval=frame[sq];"
+            "[0][sq]overlay=x='300-overlay_w/2':y=140:eval=frame:shortest=1[v]",
+            "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(breathing),
+        )
+        box = {"x": 266 / W, "y": 136 / H, "w": 68 / W, "h": 68 / H}
+        output = self.root / "breathing-cover.mp4"
+        pp.export_video(breathing, [{"start": 0.0, "end": 2.0}], output,
+                        settings={"preset": "preview", "aspect": "source", "timeout": 300, "normalize_audio": False,
+                                  "redactions": {"bleeps": [], "hidden": [{"start": 0.0, "end": 2.0, "box": box, "style": "cover", "follow": True}]}})
+        for index in range(0, 50, 2):
+            t = index / 25 + 0.01
+            self.assertEqual(bright(frame(output, t), 180, 130, 420, 210), 0, f"the square shows at {t:.2f} s")
+
     def test_a_box_drawn_mid_range_follows_back_to_the_start(self):
         from cutroom import tracking
 

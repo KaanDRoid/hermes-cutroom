@@ -5,9 +5,12 @@ container's earliest stream starts at 0) and the same automatic rotation, so a b
 picture as shown lands on the same pixels the render covers.
 
 The box keeps its size. It is learned on the frame it was drawn on and followed forwards and
-backwards from there. A frame counts as followed only when one place clearly matches; when the
-match is weak (covered, cut away, gone) or two places match about as well (look-alikes), the box
-stays where it last was and the time is reported as lost. The render then covers the whole picture
+backwards from there. A frame counts as followed only when the same picture has just moved: it
+matches the last followed frame almost exactly, at the same size (a 10 % smaller or larger copy
+matches clearly worse), and no other place matches about as well. Anything else (it grew,
+shrank, changed shape, was covered, cut away, left, or has a look-alike) leaves the box where it
+last was and reports the time as lost. A face that talks and turns a little still counts as moved:
+it is compared with the frame before, not with the drawn one. The render then covers the whole picture
 for that time, so a tracking miss hides too much rather than too little.
 """
 
@@ -22,7 +25,8 @@ from pathlib import Path
 from . import media
 
 ANALYSIS_WIDTH = 480  # Frames are searched at this width at most; positions are fractions.
-MATCH = 0.6  # Normalised correlation needed to trust a position.
+CONTINUITY = 0.9  # Least match to the last followed frame: only a move, not a change of shape.
+SAME_SIZE = 0.1  # The same-size match must beat 10 % smaller and larger copies by this much.
 AMBIGUOUS = 0.12  # A second place this close to the best means look-alikes: not trusted.
 PLAIN = 4.0  # Below this grey-level spread a box holds nothing to follow.
 SEARCH = 1.0  # Search this many box sizes around the last position.
@@ -100,25 +104,43 @@ def _frames(path, start, end):
     return times, run.stdout, (gw, gh), rate
 
 
-def _match(cv2, np, frame, position, size, patterns):
-    """(best score, second-place score, position) near the last position."""
+def _match(cv2, np, frame, position, size, latest):
+    """(match to the last followed frame, second place, position) near the last position."""
     w, h = size
     gh, gw = frame.shape
     reach = round(max(w, h) * SEARCH)
     x0, y0 = max(0, position[0] - reach), max(0, position[1] - reach)
     x1, y1 = min(gw, position[0] + w + reach), min(gh, position[1] + h + reach)
     area = frame[y0:y1, x0:x1]
-    best = (-1.0, -1.0, position)
-    for pattern in patterns:
-        scores = cv2.matchTemplate(area, pattern, cv2.TM_CCOEFF_NORMED)
-        scores = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
-        _, score, _, (bx, by) = cv2.minMaxLoc(scores)
-        others = scores.copy()
-        others[max(0, by - h // 2) : by + h // 2 + 1, max(0, bx - w // 2) : bx + w // 2 + 1] = -1.0
-        second = float(others.max()) if others.size else -1.0
-        if score > best[0]:
-            best = (float(score), second, (x0 + bx, y0 + by))
-    return best
+
+    def scores(pattern):
+        result = cv2.matchTemplate(area, pattern, cv2.TM_CCOEFF_NORMED)
+        return np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0)
+
+    near = scores(latest)
+    _, best, _, (bx, by) = cv2.minMaxLoc(near)
+    others = near.copy()
+    others[max(0, by - h // 2) : by + h // 2 + 1, max(0, bx - w // 2) : bx + w // 2 + 1] = -1.0
+    second = float(others.max()) if others.size else -1.0
+    return float(best), second, (x0 + bx, y0 + by)
+
+
+def _same_size(cv2, np, frame, found, size, latest):
+    """True when the picture at ``found`` matches ``latest`` best at its own size."""
+    w, h = size
+    gh, gw = frame.shape
+    cx, cy = found[0] + w // 2, found[1] + h // 2
+    results = {}
+    for scale in (0.9, 1.0, 1.1):
+        sw, sh = max(4, round(w * scale)), max(4, round(h * scale))
+        x0, y0 = cx - sw // 2 - 6, cy - sh // 2 - 6
+        x1, y1 = cx + sw // 2 + 7, cy + sh // 2 + 7
+        if x0 < 0 or y0 < 0 or x1 > gw or y1 > gh:
+            return False  # Too close to the edge to tell: not trusted.
+        pattern = cv2.resize(latest, (sw, sh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+        result = cv2.matchTemplate(frame[y0:y1, x0:x1], pattern, cv2.TM_CCOEFF_NORMED)
+        results[scale] = float(np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0).max())
+    return results[1.0] - max(results[0.9], results[1.1]) >= SAME_SIZE
 
 
 def follow_box(source, box, start, end, at=None):
@@ -150,8 +172,9 @@ def follow_box(source, box, start, end, at=None):
             position, latest = (x, y), template
             index = seed + step
             while 0 <= index < len(times):
-                score, second, found = _match(cv2, np, frames[index], position, (w, h), (template, latest))
-                if score >= MATCH and second < score - AMBIGUOUS:
+                score, second, found = _match(cv2, np, frames[index], position, (w, h), latest)
+                if (score >= CONTINUITY and second < score - AMBIGUOUS
+                        and _same_size(cv2, np, frames[index], found, (w, h), latest)):
                     position = found
                     latest = frames[index][position[1] : position[1] + h, position[0] : position[0] + w].copy()
                     trusted[index] = True

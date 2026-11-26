@@ -14,6 +14,7 @@ MAX_BLEEPS = 200
 MAX_HIDDEN = 50
 MAX_FOLLOWED = 10  # Each followed box decodes its own stretch of the source.
 FOLLOW_SECONDS = 30.0
+FOLLOW_MARGIN = 0.08  # A followed box covers this much more on every side (positions are estimates).
 MODES = ("bleep", "mute")
 STYLES = ("cover", "blur", "pixelate")
 TONE_HZ = 1000
@@ -213,9 +214,11 @@ def video_chain(spec, width, height, frame_rate, paths=None):
         h = min(height - y, math.ceil(box["h"] * height / 2) * 2 + 2)
         path = (paths or {}).get(index)
         if path:
-            # Pixel positions over time, kept inside the frame; a 1 px margin covers rounding.
-            xs = [min(width - w, max(0.0, value * width - 1)) for value in path["x"]]
-            ys = [min(height - h, max(0.0, value * height - 1)) for value in path["y"]]
+            # A followed box is a little larger than drawn, and kept inside the frame.
+            mx, my = math.ceil(w * FOLLOW_MARGIN / 2) * 2, math.ceil(h * FOLLOW_MARGIN / 2) * 2
+            w, h = min(width, w + 2 * mx), min(height, h + 2 * my)
+            xs = [min(width - w, max(0.0, value * width - mx - 1)) for value in path["x"]]
+            ys = [min(height - h, max(0.0, value * height - my - 1)) for value in path["y"]]
             x, y = f"'{time_expression(path['times'], xs)}'", f"'{time_expression(path['times'], ys)}'"
         when = f"between(t,{max(0.0, item['start'] - pad):.4f},{item['end'] + pad:.4f})"
         nxt = "[vout]" if index == len(hidden) - 1 else f"[vh{index}]"
