@@ -1286,7 +1286,7 @@ def _pacing_planner(info, ranges, rate, settings, frames=None):
     choice = settings["pacing"]
     faces = (settings.get("pacing_analysis") or {}).get("faces") or []
 
-    def build(mode, width, height, framing_report, cuts_only=False):
+    def build(mode, width, height, framing_report, cuts_only=False, anchor=None):
         common = dict(
             counts=counts,
             firsts=firsts,
@@ -1343,6 +1343,10 @@ def _pacing_planner(info, ranges, rate, settings, frames=None):
                 **common,
             )
             points = pacing.face_points(faces, scaffold["ranges"], float(fps), grid)
+            if not points and anchor is not None:
+                # No face samples: zoom toward the point the caller frames (a layout's speaker card).
+                # `anchor` is in picture fractions; the plan works in the (turned) source grid.
+                points = [[item["start_frame"], anchor[0] * grid[0], anchor[1] * grid[1]] for item in scaffold["ranges"]]
             report = pacing.plan(
                 choice,
                 window=tuple(grid),
@@ -1548,8 +1552,6 @@ def export_video(
 
         if abs(width * 16 - height * 9) > 16:
             raise ValueError("Split explainer and Picture over you need a 9:16 frame")
-        if paced:
-            raise ValueError("Punch-ins, push-ins and transitions do not work with Split explainer yet; turn them off in Pacing")
         layout = layouts.caption_layout(layout, layout_settings, width / layouts.FRAME[0])
     from cutroom import captions as animated_captions
 
@@ -1629,7 +1631,16 @@ def export_video(
                 ]
         pacing_report = None
         if pacing_plan is not None:
-            pacing_report = pacing_plan(mode, width, height, framing_report)
+            # A layout crops its speaker card from the whole source picture, so pacing zooms and
+            # fades that picture: punch-ins and transitions show in the card, the panel stays put.
+            if mode == "layout":
+                source_video = _source_video(info)
+                pacing_report = pacing_plan(
+                    "fit", source_video["width"], source_video["height"], None,
+                    anchor=tuple(settings.get("layout_face") or (0.5, 0.4)),
+                )
+            else:
+                pacing_report = pacing_plan(mode, width, height, framing_report)
             if paced:
                 cropped = framing_report is not None
                 lines, pieces = pacing.build_graph(

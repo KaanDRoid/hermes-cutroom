@@ -255,3 +255,109 @@ class StudioPreviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+class SplitPacingTests(unittest.TestCase):
+    """Punch-ins and transitions work on the speaker card; the top panel stays as it is."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="layout-pacing-")
+        cls.root = Path(cls.temp.name)
+        cls.source = cls.root / "square.mp4"
+        # Black with a white square in the middle: its size on screen shows the zoom.
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=3,drawbox=x=280:y=140:w=80:h=80:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cls.source),
+        )
+        cls.layout = layouts.normalize_layout(
+            {"layout": "split", "speaker": "wide", "background": "paper", "divider": 1170, "hold": "whole",
+             "panel": {"kind": "card", "type": "title", "text": "Basics"}}, duration=3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def render(self, name, pacing):
+        output = self.root / name
+        result = pp.export_video(
+            self.source, [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 3.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+                      "normalize_audio": False, "layout": self.layout, "pacing": pacing},
+        )
+        return output, result
+
+    def white(self, pixel, box):
+        return sum(1 for y in range(box["y"] + 4, box["y"] + box["h"] - 4, 4)
+                   for x in range(box["x"] + 4, box["x"] + box["w"] - 4, 4) if min(pixel(x, y)) > 200)
+
+    def test_punch_in_zooms_the_speaker_card_and_leaves_the_panel(self):
+        output, result = self.render("punch.mp4", {"punch_in": "alternate", "punch_in_zoom": 1.3, "max_upscale": 4.0})
+        self.assertEqual(result["pacing"]["cuts"], [30])
+        geo = layouts.geometry(self.layout)
+        first, second = frame(output, 0.5), frame(output, 1.5)
+        ratio = self.white(second, geo["speaker"]) / self.white(first, geo["speaker"])
+        self.assertAlmostEqual(ratio, 1.3 ** 2, delta=0.25)
+        panel = geo["panel"]
+        for x, y in ((panel["x"] + 30, panel["y"] + 30), (panel["x"] + panel["w"] // 2, panel["y"] + 40)):
+            self.assertTrue(near(first(x, y), second(x, y), 6), "The panel does not zoom")
+
+    def test_crossfade_keeps_length_and_fades_only_the_speaker(self):
+        output, result = self.render("cross.mp4", {"transition": "crossfade", "transition_duration": 0.3})
+        info = pp._probe(output)
+        self.assertAlmostEqual(info["duration"], 2.0, delta=0.05)
+        geo = layouts.geometry(self.layout)
+        panel = geo["panel"]
+        before, during = frame(output, 0.2), frame(output, 1.0)
+        self.assertTrue(near(before(panel["x"] + 30, panel["y"] + 30), during(panel["x"] + 30, panel["y"] + 30), 6))
+
+    def test_punch_in_zooms_toward_the_face_the_card_frames(self):
+        # The square sits right of centre where the card's face point is; zooming on the frame's
+        # centre would slide it sideways, zooming on the face keeps it in place.
+        source = self.root / "right.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=3,drawbox=x=440:y=120:w=60:h=60:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "face-punch.mp4"
+        pp.export_video(
+            source, [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 3.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300, "normalize_audio": False,
+                      "layout": self.layout, "layout_face": [0.73, 0.42], "pacing": {"punch_in": "alternate", "punch_in_zoom": 1.3, "max_upscale": 4.0}},
+        )
+        box = layouts.geometry(self.layout)["speaker"]
+
+        def centre(pixel):
+            points = [(x, y) for y in range(box["y"] + 4, box["y"] + box["h"] - 4, 3)
+                      for x in range(box["x"] + 4, box["x"] + box["w"] - 4, 3) if min(pixel(x, y)) > 200]
+            return sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points), len(points)
+
+        x0, y0, n0 = centre(frame(output, 0.5))
+        x1, y1, n1 = centre(frame(output, 1.5))
+        self.assertAlmostEqual(n1 / n0, 1.3 ** 2, delta=0.3, msg="Zoomed, and the square is not cut off")
+        self.assertLess(abs(x1 - x0), 25, (x0, x1))
+        self.assertLess(abs(y1 - y0), 25, (y0, y1))
+
+    def test_push_in_slowly_grows_the_speaker_card_and_leaves_the_panel(self):
+        # Push-ins only run on stretches of at least four seconds.
+        source = self.root / "long.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=5,drawbox=x=280:y=140:w=80:h=80:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=5",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "push.mp4"
+        pp.export_video(
+            source, [{"start": 0.0, "end": 5.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300, "normalize_audio": False,
+                      "layout": self.layout, "pacing": {"push_in": True, "push_in_zoom": 1.15, "max_upscale": 4.0}},
+        )
+        geo = layouts.geometry(self.layout)
+        early, late = frame(output, 0.05), frame(output, 4.9)
+        ratio = self.white(late, geo["speaker"]) / self.white(early, geo["speaker"])
+        self.assertGreater(ratio, 1.1, "The square grows during the range")
+        panel = geo["panel"]
+        self.assertTrue(near(early(panel["x"] + 30, panel["y"] + 30), late(panel["x"] + 30, panel["y"] + 30), 6))

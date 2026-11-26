@@ -23,6 +23,9 @@ Explainer layouts for vertical videos.
   in the render; useful for audio-only talks and podcasts.
 - Headlines shrink to stay clear of the platform's side buttons; Review asks
   for a shorter headline when that makes it hard to read.
+- Punch-ins, push-ins and transitions work with the split layouts: the
+  speaker card zooms toward the face and fades between cuts while the panel
+  and headline stay still.
 
 ### Bleep and hide
 - Select words in Edit, then Bleep (a 1 kHz tone) or Mute from the ⋯ menu;
