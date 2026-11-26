@@ -2841,6 +2841,140 @@ function OriginFields({ origin, onChange }) {
   ] });
 }
 
+// Timed items on a strip: pick what the pointer is on, then drag or step it a word at a time.
+// Handles are easy to grab (8 px either side of an edge); a block too narrow for that keeps its
+// middle for moving and its handles outside it; overlapping blocks give the nearest edge.
+const HANDLE_PX = 8;
+const timeline = {
+  pick(items, x, { width, duration }) {
+    const perSecond = width / duration;
+    let edge = null, body = null;
+    items.forEach((item, index) => {
+      const left = item.start * perSecond, right = item.end * perSecond, roomy = right - left >= 3 * HANDLE_PX;
+      for (const [part, at] of [['start', left], ['end', right]]) {
+        const distance = Math.abs(x - at);
+        const outside = part === 'start' ? x < left : x > right;
+        if (distance <= HANDLE_PX && (roomy || outside) && (!edge || distance < edge.distance)) edge = { index, part, distance };
+      }
+      if (x >= left && x <= right) {
+        const distance = Math.min(x - left, right - x);
+        if (!body || distance < body.distance) body = { index, distance, grab: x / perSecond - item.start };
+      }
+    });
+    if (edge) return { index: edge.index, part: edge.part, grab: 0 };
+    return body ? { index: body.index, part: 'move', grab: body.grab } : null;
+  },
+  // Words the item may use, and the first and last of them it covers now.
+  span(item, { words, duration, before = 0, after = duration }) {
+    const usable = words.filter(word => word.start >= before - 1e-9 && word.end <= after + 1e-9).sort((a, b) => a.start - b.start);
+    const inside = usable.map((word, index) => [word, index]).filter(([word]) => (word.start + word.end) / 2 >= item.start && (word.start + word.end) / 2 <= item.end).map(([, index]) => index);
+    return { usable, first: inside[0], last: inside.at(-1) };
+  },
+  place(item, usable, first, last) {
+    const chosen = usable.slice(first, last + 1);
+    const out = { ...item, start: chosen[0].start, end: chosen.at(-1).end, said: chosen.map(word => word.text).join(' ') };
+    if ('ids' in item) out.ids = chosen.map(word => word.id);
+    return out;
+  },
+  drag(item, hold, time, lane) {
+    const { usable, first, last } = timeline.span(item, lane);
+    if (first === undefined) return item;
+    const nearest = (indexes, key, target) => indexes.reduce((best, index) => (Math.abs(usable[index][key] - target) < Math.abs(usable[best][key] - target) ? index : best));
+    const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+    if (hold.part === 'start') return timeline.place(item, usable, nearest(range(0, last), 'start', time), last);
+    if (hold.part === 'end') return timeline.place(item, usable, first, nearest(range(first, usable.length - 1), 'end', time));
+    const count = last - first;
+    const to = nearest(range(0, usable.length - 1 - count), 'start', time - hold.grab);
+    return timeline.place(item, usable, to, to + count);
+  },
+  step(item, key, shift, lane) {
+    const { usable, first, last } = timeline.span(item, lane);
+    if (first === undefined) return item;
+    const by = key === 'ArrowRight' ? 1 : key === 'ArrowLeft' ? -1 : 0;
+    if (shift) return timeline.place(item, usable, first, Math.min(usable.length - 1, Math.max(first, last + by)));
+    const to = Math.min(usable.length - 1 - (last - first), Math.max(0, first + by));
+    return timeline.place(item, usable, to, to + (last - first));
+  },
+};
+export { timeline };
+
+// One thin lane per kind of timed item, in source time. Drag a block to move it, drag an edge to change
+// it, click it to jump there; arrow keys move a focused block a word, Shift+arrows change its end.
+const LANES = [['pictures', 'Pictures'], ['hidden', 'Hidden'], ['bleeps', 'Bleeps']];
+function TimedStrip({ kit }) {
+  const { draft, setDraft, view } = kit;
+  const duration = view.source_info?.duration;
+  const words = view.transcript?.words || [];
+  const hold = useRef(null);
+  const [live, setLive] = useState(null);
+  if (!Number.isFinite(duration) || duration <= 0 || !words.length) return null;
+  // Pictures may not overlap (the render refuses it); bleeps and hidden areas may.
+  const laneFor = (key, list, index) => {
+    if (key !== 'pictures') return { words, duration };
+    const others = list.filter((_, i) => i !== index);
+    const item = list[index];
+    return { words, duration, before: Math.max(0, ...others.filter(o => o.end <= item.start + 1e-9).map(o => o.end)), after: Math.min(duration, ...others.filter(o => o.start >= item.end - 1e-9).map(o => o.start)) };
+  };
+  const commit = (key, index, item) => setDraft(old => ({ [key]: old[key].map((entry, i) => (i === index ? item : entry)) }));
+  const items = key => draft[key].map((item, index) => (live && live.key === key && live.index === index ? live.item : item));
+  const lane = ([key, label]) => {
+    if (!draft[key].length) return null;
+    const at = event => { const box = event.currentTarget.getBoundingClientRect(); return { x: event.clientX - box.left, width: box.width }; };
+    const down = event => {
+      const { x, width } = at(event);
+      const found = timeline.pick(draft[key], x, { width, duration });
+      if (!found) return;
+      hold.current = { key, ...found, from: x, moved: false };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      event.preventDefault?.();
+    };
+    const move = event => {
+      const { x, width } = at(event);
+      const held = hold.current;
+      if (!held || held.key !== key) {
+        const found = timeline.pick(draft[key], x, { width, duration });
+        event.currentTarget.style.cursor = !found ? 'default' : found.part === 'move' ? 'grab' : 'ew-resize';
+        return;
+      }
+      if (!held.moved && Math.abs(x - held.from) < 3) return;
+      held.moved = true;
+      const item = timeline.drag(draft[key][held.index], held, (x / width) * duration, laneFor(key, draft[key], held.index));
+      setLive({ key, index: held.index, item });
+    };
+    const up = () => {
+      const held = hold.current;
+      hold.current = null;
+      if (!held || held.key !== key) return;
+      if (held.moved && live) commit(key, held.index, live.item);
+      else kit.seek?.(draft[key][held.index].start);
+      setLive(null);
+    };
+    return el('div', { style: { display: 'grid', gridTemplateColumns: '64px 1fr', alignItems: 'center', gap: 8 }, children: [
+      el('span', { style: { fontSize: 12, color: 'var(--ui-text-secondary)' }, children: label }, 'label'),
+      el('div', { 'data-cutroom-lane': key, onPointerDown: down, onPointerMove: move, onPointerUp: up, onPointerCancel: () => { hold.current = null; setLive(null); },
+        style: { position: 'relative', height: 22, borderRadius: 5, background: 'color-mix(in srgb, var(--ui-text-primary) 6%, transparent)', touchAction: 'none', userSelect: 'none' },
+        children: items(key).map((item, index) => el('div', {
+          role: 'button', tabIndex: 0, 'data-cutroom-block': `${key}${index}`,
+          'aria-label': `${label} ${clock(item.start)}–${clock(item.end)}: “${String(item.said || '').slice(0, 40)}”. Arrow keys move it a word; Shift and arrows change its end.`,
+          onKeyDown: event => {
+            if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+            event.preventDefault?.();
+            commit(key, index, timeline.step(draft[key][index], event.key, event.shiftKey, laneFor(key, draft[key], index)));
+          },
+          style: { position: 'absolute', top: 3, bottom: 3, left: percent(item.start / duration), width: `max(4px, ${+((100 * (item.end - item.start)) / duration).toFixed(3)}%)`, borderRadius: 4,
+            background: key === 'bleeps' ? 'color-mix(in srgb, var(--ui-yellow) 72%, var(--ui-text-primary))' : key === 'hidden' ? 'var(--ui-text-secondary)' : 'var(--ui-accent)', boxSizing: 'border-box',
+            borderLeft: '2px solid color-mix(in srgb, black 35%, transparent)', borderRight: '2px solid color-mix(in srgb, black 35%, transparent)' },
+        }, `${key}${index}`)),
+      }, 'lane'),
+    ] }, key);
+  };
+  return el('div', { style: { ...stack, gap: 4 }, children: [
+    ...LANES.map(lane),
+    el('div', { style: { display: 'grid', gridTemplateColumns: '64px 1fr', gap: 8, fontSize: 11, color: 'var(--ui-text-tertiary)' }, children: [el('span', {}, 's'), el('span', { style: { ...row, justifyContent: 'space-between' }, children: [el('span', { children: clock(0) }, 'a'), el('span', { children: clock(duration) }, 'b')] }, 't')] }, 'ticks'),
+    el('p', { style: { ...muted, margin: 0 }, children: 'Drag a block to move it or its edge to change it; it keeps to whole words. Click a block to jump there.' }, 'help'),
+  ] });
+}
+
 function HiddenAndBleeps({ kit }) {
   const { draft, setDraft } = kit;
   if (!draft.bleeps.length && !draft.hidden.length && !draft.pictures.length) return el('p', { style: muted, children: 'Nothing yet. Select words in Edit, then Bleep, Hide area or Picture.' });
@@ -2849,6 +2983,7 @@ function HiddenAndBleeps({ kit }) {
     jsx(Button, { variant: 'ghost', 'aria-label': `Remove ${label}`, onClick: () => setDraft(old => ({ [key]: old[key].filter((_, i) => i !== index) })), children: '✕' }, 'x'),
   ] }, `${key}${index}`);
   return el('div', { style: { ...stack, gap: 6 }, children: [
+    jsx(TimedStrip, { kit }, 'strip'),
     ...draft.bleeps.map((item, index) => rowFor(`${item.mode === 'mute' ? 'Muted' : 'Bleep'} · ${clock(item.start)} · “${item.said}”`, draft.bleeps, 'bleeps', index)),
     ...draft.hidden.map((item, index) => rowFor(`Hidden area (${{ cover: 'solid box', blur: 'blur', pixelate: 'pixelate' }[item.style] || 'solid box'}) · ${clock(item.start)}–${clock(item.end)}`, draft.hidden, 'hidden', index)),
     ...draft.pictures.flatMap((item, index) => [rowFor(`Picture · ${clock(item.start)}–${clock(item.end)} · “${String(item.said).slice(0, 30)}”`, draft.pictures, 'pictures', index),

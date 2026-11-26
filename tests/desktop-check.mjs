@@ -1027,6 +1027,74 @@ test('a sound wave card goes in the top panel, and Review stops it on a video wi
   assert.match(text(await silent.step('Review')), /A sound wave card needs sound/);
 });
 
+// Ten words, 0.5 s each with 0.1 s gaps: word i runs i*0.6 .. i*0.6+0.5. A 600 px strip over 6 s is 100 px a second.
+const tlWords = Array.from({ length: 10 }, (_, id) => ({ id, text: `w${id}`, start: +(id * 0.6).toFixed(2), end: +(id * 0.6 + 0.5).toFixed(2) }));
+const tlView = { width: 600, duration: 6 };
+
+test('timeline handles are easy to grab, short ranges stay movable and overlaps pick the nearest edge', async () => {
+  const { pick } = (await load()).timeline;
+  const one = [{ start: 1.2, end: 2.9 }];
+  assert.deepEqual(pick(one, 295, tlView), { index: 0, part: 'end', grab: 0 }, 'Within 8 px past the end');
+  assert.deepEqual(pick(one, 115, tlView), { index: 0, part: 'start', grab: 0 }, 'Within 8 px before the start');
+  assert.equal(pick(one, 200, tlView).part, 'move');
+  assert.ok(Math.abs(pick(one, 200, tlView).grab - 0.8) < 1e-9, 'The grab point is kept');
+  assert.equal(pick(one, 400, tlView), null, 'Empty strip');
+  const short = [{ start: 0.6, end: 0.75 }];
+  assert.equal(pick(short, 67, tlView).part, 'move', 'A 15 px block moves from its middle');
+  assert.equal(pick(short, 55, tlView).part, 'start', 'Its handles sit outside it');
+  assert.equal(pick(short, 81, tlView).part, 'end');
+  const overlap = [{ start: 1.2, end: 2.9 }, { start: 2.4, end: 4.1 }];
+  assert.deepEqual(pick(overlap, 292, tlView), { index: 0, part: 'end', grab: 0 });
+  assert.deepEqual(pick(overlap, 243, tlView), { index: 1, part: 'start', grab: 0 });
+  assert.equal(pick(overlap, 260, tlView).index, 1, 'Inside both: the one whose edge is nearer');
+});
+
+test('timeline drags snap to words, never jump under the pointer and stay clear of neighbours', async () => {
+  const { drag, step } = (await load()).timeline;
+  const item = { start: 1.2, end: 2.9, said: 'w2 w3 w4' };
+  const hold = { part: 'move', grab: 0.8 };
+  assert.deepEqual(drag(item, hold, 2.05, { words: tlWords, duration: 6 }), { start: 1.2, end: 2.9, said: 'w2 w3 w4' }, 'A small move does not jump');
+  assert.deepEqual(drag(item, hold, 2.35, { words: tlWords, duration: 6 }), { start: 1.8, end: 3.5, said: 'w3 w4 w5' }, 'Moves a word at a time, keeping its length');
+  assert.deepEqual(drag(item, hold, 9, { words: tlWords, duration: 6 }), { start: 4.2, end: 5.9, said: 'w7 w8 w9' }, 'Stops at the end');
+  assert.deepEqual(drag(item, { part: 'end', grab: 0 }, 0, { words: tlWords, duration: 6 }), { start: 1.2, end: 1.7, said: 'w2' }, 'Keeps at least one word');
+  assert.deepEqual(drag(item, { part: 'start', grab: 0 }, 0.35, { words: tlWords, duration: 6 }), { start: 0.6, end: 2.9, said: 'w1 w2 w3 w4' });
+  const lane = { words: tlWords, duration: 6, before: 1.1, after: 3.6 };
+  assert.deepEqual(drag(item, hold, 0.2, lane), { start: 1.2, end: 2.9, said: 'w2 w3 w4' }, 'Does not cross the previous item');
+  assert.deepEqual(drag(item, { part: 'end', grab: 0 }, 5, lane), { start: 1.2, end: 3.5, said: 'w2 w3 w4 w5' }, 'Nor the next');
+  assert.deepEqual(step(item, 'ArrowRight', false, { words: tlWords, duration: 6 }), { start: 1.8, end: 3.5, said: 'w3 w4 w5' });
+  assert.deepEqual(step(item, 'ArrowLeft', true, { words: tlWords, duration: 6 }), { start: 1.2, end: 2.3, said: 'w2 w3' }, 'Shift changes the end');
+  assert.deepEqual(step({ start: 1.2, end: 1.7, said: 'w2' }, 'ArrowLeft', true, { words: tlWords, duration: 6 }), { start: 1.2, end: 1.7, said: 'w2' });
+});
+
+test('timed blocks drag on a strip, snap to words, and a click without moving changes nothing', async () => {
+  jobRows = [];
+  const words = tlWords.map(w => ({ ...w, probability: 0.9 }));
+  const bleep = { ids: [2], start: 1.2, end: 1.7, said: 'w2', mode: 'bleep' };
+  const ui = await studio(patchApplies, { transcript: { words }, source_info: { duration: 6, width: 1920, height: 1080, has_audio: true }, base_segments: [{ start: 0, end: 6 }], segments: [{ start: 0, end: 6 }],
+    settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, redactions: { bleeps: [bleep], hidden: [] } } });
+  const lane = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'bleeps');
+  assert.ok(lane(), 'A bleep lane is drawn');
+  assert.equal(nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'hidden'), undefined, 'No empty lanes');
+  const surface = { getBoundingClientRect: () => ({ left: 100, width: 600 }), style: {}, setPointerCapture() {} };
+  const at = x => ({ clientX: 100 + x, pointerId: 1, currentTarget: surface, preventDefault() {} });
+  lane().props.onPointerDown(at(145));
+  lane().props.onPointerMove(at(250));
+  lane().props.onPointerMove(at(410));
+  assert.match(nodes(ui.draw()).find(n => n.props?.['data-cutroom-block'] === 'bleeps0').props['aria-label'], /“w6”/, 'The block follows the pointer before it is let go');
+  assert.equal(selectedProject.settings.redactions.bleeps[0].start, 1.2, 'Nothing saved while dragging');
+  lane().props.onPointerUp(at(410));
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps, [{ ids: [6], start: 3.6, end: 4.1, said: 'w6', mode: 'bleep' }]);
+  const block = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-block'] === 'bleeps0');
+  block().props.onKeyDown({ key: 'ArrowRight', shiftKey: true, preventDefault() {} });
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps[0].ids, [6, 7], 'Shift+Right adds the next word');
+  lane().props.onPointerDown(at(420));
+  lane().props.onPointerUp(at(420));
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps[0].ids, [6, 7], 'A click without moving changes nothing');
+});
+
 test('a missing source says so on the player at once instead of offering a load that hangs', async () => {
   jobRows = [];
   const missing = 'Source file is missing: C:\\v\\talk.mp4; restore it or import a new project';

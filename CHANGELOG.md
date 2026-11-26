@@ -32,6 +32,10 @@ Explainer layouts for vertical videos.
   a solid box, blur or pixelate. Boxes stay where they are drawn.
 - Both apply to Preview and Final, including with cuts, punch-ins, music and
   the split layout, and can be set from chat.
+- A thin strip in More tools shows pictures, hidden areas and bleeps in time.
+  Drag a block to move it or an edge to change it; it keeps to whole words,
+  timed pictures never overlap, and a click jumps the player there. Arrow
+  keys move a focused block a word; Shift and arrows change its end.
 
 ### Studio
 - The player stays dark in Hermes's dark theme too, and captions in the

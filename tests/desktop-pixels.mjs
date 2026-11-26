@@ -120,7 +120,7 @@ const project = layout => ({
   transcript: { engine: 'test', status: 'ok', language: 'en', text: sentence, words },
   segments: [{ start: 0, end: 12 }], base_segments: [{ start: 0, end: 12 }], excluded_word_ids: [], artifacts: {},
   settings: { platform: 'youtube_shorts', aspect: 'portrait', framing: 'fill', captions: false, brand: {}, ...(layout ? { layout } : {}),
-    redactions: { bleeps: [], hidden: [{ start: 3, end: 4, said: 'that', box: { x: 0.55, y: 0.55, w: 0.2, h: 0.2 }, style: 'cover' }] } },
+    redactions: { bleeps: [{ ids: [11], start: 6.55, end: 7, said: 'basic', mode: 'bleep' }], hidden: [{ start: 3, end: 4, said: 'that', box: { x: 0.55, y: 0.55, w: 0.2, h: 0.2 }, style: 'cover' }] } },
 });
 const SPLIT = { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: { l1: 'CLIMATE CHANGE IS REALLY NOT', l2: 'THAT COMPLICATED', boxed: [1] },
   panel: { kind: 'card', type: 'title', text: 'Basics' }, pictures: [] };
@@ -193,6 +193,30 @@ test('Studio draws selections, buttons, layout and hidden areas readably in ligh
       // A video stage is dark in both themes, like every player; captions and the frame read the same everywhere.
       const stage = image.at(Math.round(frame.x - 30), Math.round(frame.y + 40));
       assert.ok(luminance(stage) < 0.06, `${name}: the player stage is dark (${stage})`);
+
+      // The timed strip: blocks stand out from their lane (3:1, like any control) and a real mouse drag moves one.
+      await page.evaluate(`(() => { document.querySelectorAll('details').forEach(d => { d.open = true; }); document.querySelector('[data-cutroom-lane="bleeps"]').scrollIntoView({ block: 'center' }); return 1; })()`);
+      await new Promise(r => setTimeout(r, 300));
+      image = await page.shot(`${name}-strip`);
+      for (const key of ['hidden', 'bleeps']) {
+        const laneBox = await rectOf(page, `document.querySelector('[data-cutroom-lane="${key}"]')`);
+        const blockBox = await rectOf(page, `document.querySelector('[data-cutroom-block="${key}0"]')`);
+        const ground = image.at(Math.round(laneBox.x + laneBox.w - 6), Math.round(laneBox.y + laneBox.h / 2));
+        const fill = image.at(Math.round(blockBox.x + blockBox.w / 2), Math.round(blockBox.y + blockBox.h / 2));
+        assert.ok(contrast(ground, fill) >= 3, `${name}: ${key} blocks stand out from their lane (${contrast(ground, fill).toFixed(2)})`);
+      }
+      const block = await rectOf(page, `document.querySelector('[data-cutroom-block="bleeps0"]')`);
+      const laneBox = await rectOf(page, `document.querySelector('[data-cutroom-lane="bleeps"]')`);
+      const mouse = (type, x, buttons) => page.send('Input.dispatchMouseEvent', { type, x, y: Math.round(block.y + block.h / 2), button: 'left', buttons, clickCount: 1 });
+      const from = Math.round(block.x + block.w / 2), to = Math.round(from + (2.2 / 12) * laneBox.w);
+      await mouse('mouseMoved', from, 0);
+      await mouse('mousePressed', from, 1);
+      for (let x = from; x <= to; x += 12) await mouse('mouseMoved', x, 1);
+      await mouse('mouseMoved', to, 1);
+      await mouse('mouseReleased', to, 0);
+      await new Promise(r => setTimeout(r, 300));
+      const moved = await page.evaluate(`document.querySelector('[data-cutroom-block="bleeps0"]').getAttribute('aria-label')`);
+      assert.match(moved, /“problem”/, `${name}: a mouse drag moved the bleep 2.2 s later, onto a whole word (${moved})`);
 
       // Style: split layout with the speaker card, headline and panel.
       await page.evaluate(`window.__mount(${JSON.stringify({ project: { ...project(SPLIT), posterTime: 8 }, platforms, theme, posterColour: POSTER })})`);
