@@ -1278,6 +1278,24 @@ test('a drawn hidden area remembers the moment it was drawn on, so following sta
   assert.deepEqual([area.start, area.end], [0.6, 1.0]);
 }));
 
+test('a hidden area is only drawn on a frame from the selected words', async () => withBlobs(async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 0.2 };
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const large = async (path, options) => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : patchApplies(path, options);
+  const ui = await studio(large, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], source_info: { duration: 12, width: 1920, height: 1080 } });
+  ui.draw(); await tick();
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  const layer = () => nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Draw the area to hide');
+  assert.match(text(layer()), /Going to 0:01.*draw when the picture shows the selected words/);
+  const target = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  layer().props.onMouseDown({ currentTarget: target, clientX: 20, clientY: 20 });
+  layer().props.onMouseUp({ currentTarget: target, clientX: 50, clientY: 50 });
+  await ui.flush();
+  assert.equal(selectedProject.settings?.redactions, undefined, 'Nothing is saved from a frame outside the words');
+}));
+
 test('headline ideas never use a bleeped word', async () => {
   const sentence = 'Climate change is not actually that complicated. Nobody reads the report anyway.';
   const words = sentence.split(' ').map((text, id) => ({ id, text, start: id * 0.5, end: id * 0.5 + 0.4 }));

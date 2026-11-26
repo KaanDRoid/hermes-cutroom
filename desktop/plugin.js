@@ -2771,6 +2771,9 @@ function HideLayer({ kit, frameRatio, source, now = 0 }) {
   const { hiding, setHiding, setDraft } = kit;
   const [start, setStart] = useState(null);
   const [rect, setRect] = useState(null);
+  // The box is drawn on the frame on screen, so that frame must be one the words cover.
+  const inside = Boolean(hiding) && now >= hiding.start - 0.05 && now <= hiding.end + 0.05;
+  useEffect(() => { if (hiding && !inside) kit.seek?.(hiding.start + 0.02); }, [hiding?.start, hiding?.end]);
   if (!hiding) return null;
   // The whole source picture as shown while drawing (always Fit), in frame fractions.
   const area = sourceArea(frameRatio, source);
@@ -2782,7 +2785,10 @@ function HideLayer({ kit, frameRatio, source, now = 0 }) {
     return { x, y, w: snap(Math.max(a[0], b[0])) - x, h: snap(Math.max(a[1], b[1])) - y };
   };
   return el('div', { 'aria-label': 'Draw the area to hide', style: { position: 'absolute', left: percent(area.left), top: percent(area.top), width: percent(area.width), height: percent(area.height), cursor: 'crosshair', zIndex: 6, outline: '2px dashed var(--ui-accent)' },
-    onMouseDown: event => { const p = point(event); setStart(p); setRect({ x: p[0], y: p[1], w: 0, h: 0 }); },
+    onMouseDown: event => {
+      if (!inside) { kit.seek?.(hiding.start + 0.02); return; }
+      const p = point(event); setStart(p); setRect({ x: p[0], y: p[1], w: 0, h: 0 });
+    },
     onMouseMove: event => { if (start) setRect(toRect(start, point(event))); },
     onMouseUp: event => {
       if (!start) return;
@@ -2793,7 +2799,7 @@ function HideLayer({ kit, frameRatio, source, now = 0 }) {
     },
     children: [
       rect ? el('div', { style: { position: 'absolute', left: percent(rect.x), top: percent(rect.y), width: percent(rect.w), height: percent(rect.h), background: `color-mix(in srgb, ${LP.cover} 80%, transparent)`, border: '1px solid var(--ui-accent)' } }, 'r') : null,
-      el('span', { style: { position: 'absolute', left: 6, top: 6, padding: '2px 6px', borderRadius: 4, background: STAGE, color: ON_STAGE, fontSize: 12, pointerEvents: 'none' }, children: `Drag over the part to hide (${clock(hiding.start)}–${clock(hiding.end)}) · Esc to stop` }, 'tip'),
+      el('span', { style: { position: 'absolute', left: 6, top: 6, padding: '2px 6px', borderRadius: 4, background: STAGE, color: ON_STAGE, fontSize: 12, pointerEvents: 'none' }, children: inside ? `Drag over the part to hide (${clock(hiding.start)}–${clock(hiding.end)}) · Esc to stop` : `Going to ${clock(hiding.start)}… draw when the picture shows the selected words` }, 'tip'),
     ] });
 }
 
