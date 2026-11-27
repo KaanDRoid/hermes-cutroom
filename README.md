@@ -133,6 +133,17 @@ For local development, link this directory as `<active-HERMES_HOME>/plugins/cutr
 
 Hermes Desktop keeps the Studio pane of a newly found package off until you turn it on. If Cutroom is missing from the sidebar after enabling it from the terminal, open Capabilities → Plugins and switch Cutroom on there (that switch turns on both the chat tools and the Studio pane).
 
+### Updating the plugin
+
+`hermes plugins install --force` replaces the whole plugin directory, including the `.venv` that holds the optional speech and vision packages. After an update, set it up again from the plugin directory (`<active-HERMES_HOME>/plugins/cutroom`):
+
+```bash
+uv venv --python 3.12
+uv pip install --python .venv/Scripts/python.exe -e ".[speech,vision]"
+```
+
+Use `.venv/bin/python` on Linux/macOS. Without it, transcription, face analysis and Follow movement for hidden areas stop with a message naming the missing package; plain cuts, captions and exports keep working. `cutroom doctor` lists which optional packages the plugin's Python can load.
+
 By default chat gets three tools:
 
 | Tool | Behavior |

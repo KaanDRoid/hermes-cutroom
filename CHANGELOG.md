@@ -36,6 +36,12 @@ Explainer layouts for vertical videos.
   its contents when rendering (requires the vision extra). If tracking detects
   a loss, that part of the source picture is covered and Review lists the time.
   Always watch the rendered preview; tracking can miss movement.
+- Follow movement trusts a frame only when the same picture has just moved at
+  the same size and nothing else in the picture looks alike. After a jump cut
+  or a change of size the source picture is covered until the same picture is
+  found again; once a look-alike appears, the rest of that range stays covered.
+- When the vision extra is missing, the message names the Python that lacks
+  it; the README explains how to set it up again after updating the plugin.
 - Both apply to Preview and Final, including with cuts, punch-ins, music and
   the split layout, and can be set from chat.
 - A thin strip in More tools shows pictures, hidden areas and bleeps in time.

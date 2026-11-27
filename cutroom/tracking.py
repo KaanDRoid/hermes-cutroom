@@ -21,6 +21,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -43,7 +44,12 @@ def _dependencies():
         import cv2
         import numpy as np
     except ImportError as error:  # pragma: no cover - depends on the install
-        raise ValueError("Following a hidden area needs the vision extra (pip install 'hermes-cutroom[vision]')") from error
+        raise ValueError(
+            f"Following a hidden area needs the vision extra, which is not installed for {sys.executable}. "
+            "Install 'hermes-cutroom[vision]' there. If you just updated the plugin: "
+            "'hermes plugins install --force' removes the plugin's .venv; "
+            "see 'Updating the plugin' in the README to set it up again."
+        ) from error
     return cv2, np
 
 

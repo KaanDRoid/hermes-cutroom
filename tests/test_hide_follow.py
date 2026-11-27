@@ -37,6 +37,29 @@ def square_x(t):
     return 100 + 100 * t  # Where the moving square's left edge is at t (see setUpClass).
 
 
+class MissingVisionTests(unittest.TestCase):
+    def test_the_message_says_which_python_lacks_it_and_how_to_set_it_up_again(self):
+        import builtins
+        import sys
+
+        from cutroom import tracking
+
+        real = builtins.__import__
+
+        def no_cv(name, *args, **kwargs):
+            if name == "cv2":
+                raise ImportError("No module named 'cv2'")
+            return real(name, *args, **kwargs)
+
+        with patch("builtins.__import__", no_cv), self.assertRaises(ValueError) as caught:
+            tracking._dependencies()
+        message = str(caught.exception)
+        self.assertIn(sys.executable, message)
+        self.assertIn("hermes-cutroom[vision]", message)
+        self.assertIn("--force", message, "Says that updating the plugin removes it")
+        self.assertIn("README", message, "Points to the steps")
+
+
 class FollowSpecTests(unittest.TestCase):
     def test_follow_is_kept_only_when_asked_for(self):
         box = {"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2}
