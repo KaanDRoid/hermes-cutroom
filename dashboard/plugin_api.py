@@ -514,7 +514,9 @@ def artifact_chunk(
     if media_only and not mime.startswith(("video/", "image/")):
         raise HTTPException(422, "Artifact is not playable media")
     stat = path.stat()
-    current = f"{stat.st_size:x}-{stat.st_mtime_ns:x}"
+    # A streaming copy is named after the render's SHA-256 and its cache refreshes the file's
+    # time on every use, so its name, not its time, says whether it is the same file.
+    current = f"{stat.st_size:x}-{path.stem if stream else format(stat.st_mtime_ns, 'x')}"
     if version is not None and version != current:
         raise HTTPException(409, "Media changed while loading; reload the player")
     if stat.st_size > 268_435_456:
@@ -527,7 +529,7 @@ def artifact_chunk(
         stream.seek(offset)
         chunk = stream.read(length)
     after = path.stat()
-    if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+    if after.st_size != stat.st_size or (not stream and after.st_mtime_ns != stat.st_mtime_ns):
         raise HTTPException(409, "Media changed while loading; reload the player")
     return {
         "filename": path.name,

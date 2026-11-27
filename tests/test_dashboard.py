@@ -1,10 +1,12 @@
 """HTTP contract tests; no model or media runtime is required."""
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from fastapi import FastAPI
@@ -313,6 +315,20 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(base64.b64decode(chunk["data"]), video.read_bytes()[:8])
             self.assertIn(("stream_copy", "preview"), self.studio.calls, "Streaming reads the fragmented copy")
             self.assertEqual(self.client.get("/projects/p1/media/source?stream=true").status_code, 422)
+            # The cache refreshes the copy's time on every use; that must not look like a new file.
+            touched = iter(range(1, 100))
+            plain = self.studio.stream_copy
+
+            def refreshing(project_id, kind):
+                copy = plain(project_id, kind)
+                os.utime(copy, ns=(next(touched) * 10**9, next(touched) * 10**9))
+                return copy
+
+            with patch.object(self.studio, "stream_copy", refreshing):
+                first = self.client.get("/projects/p1/media/preview?offset=0&length=8&stream=true").json()
+                second = self.client.get(f"/projects/p1/media/preview?offset=8&length=8&stream=true&version={first['version']}")
+            self.assertEqual(second.status_code, 200, second.text)
+            self.assertEqual(second.json()["version"], first["version"])
             self.assertEqual(
                 self.client.get("/projects/p1/artifact-info/secret").status_code, 422
             )
