@@ -289,6 +289,31 @@ class DashboardTests(unittest.TestCase):
                 "nosniff",
             )
 
+    def test_download_rejects_a_same_size_rewrite_during_a_chunk_read(self):
+        from contextlib import contextmanager
+
+        self.studio.create("input.mp4")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "captions.srt"
+            path.write_bytes(b"old captions")
+            before = path.stat()
+            self.studio.projects["p1"]["artifacts"]["captions_srt"] = str(path)
+            original_open = Path.open
+
+            @contextmanager
+            def rewriting_open(candidate, *args, **kwargs):
+                with original_open(candidate, *args, **kwargs) as handle:
+                    yield handle
+                if candidate == path and args == ("rb",):
+                    with original_open(path, "wb") as handle:
+                        handle.write(b"new captions")
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+
+            with patch.object(Path, "open", rewriting_open):
+                response = self.client.get("/projects/p1/artifact-data/captions_srt?length=4")
+            self.assertEqual(path.read_bytes(), b"new captions")
+            self.assertEqual(response.status_code, 409, response.text)
+
     def test_artifact_info_returns_only_a_facade_resolved_persisted_file(self):
         import base64
 

@@ -525,9 +525,9 @@ def artifact_chunk(
         )
     if offset >= stat.st_size:
         raise HTTPException(416, "Media offset is outside the file")
-    with path.open("rb") as stream:
-        stream.seek(offset)
-        chunk = stream.read(length)
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read(length)
     after = path.stat()
     if after.st_size != stat.st_size or (not stream and after.st_mtime_ns != stat.st_mtime_ns):
         raise HTTPException(409, "Media changed while loading; reload the player")
