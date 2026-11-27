@@ -1280,6 +1280,24 @@ test('a drawn hidden area remembers the moment it was drawn on, so following sta
   assert.deepEqual([area.start, area.end], [0.6, 1.0]);
 }));
 
+test('hiding waits for the Original to load, then moves the player to the selected words', async () => withBlobs(async () => {
+  {
+    jobRows = [];
+    const ui = await studio(async (path, options) => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : patchApplies(path, options), transcriptProject());
+    await choice(ui.draw(), 'Original').props.onClick();
+    word(ui.draw(), 'w2').props.onClick({ shiftKey: false });
+    button(ui.draw(), 'Hide area').props.onClick();
+    ui.draw(); await tick();
+    // The file arrives only now: the seek asked for above had no player to move.
+    const fake = { currentTime: 0, paused: true, play() { this.paused = false; }, pause() { this.paused = true; } };
+    const video = nodes(ui.draw()).find(n => n.type === 'video');
+    video.props.ref.current = fake;
+    video.props.onLoadedMetadata({ currentTarget: { duration: 10 } });
+    ui.draw(); await tick(); ui.draw();
+    assert.ok(Math.abs(fake.currentTime - 0.32) < 0.011, `the player went to the words (at ${fake.currentTime})`);
+  }
+}));
+
 test('a hidden area is only drawn on a frame from the selected words', async () => withBlobs(async () => {
   jobRows = [];
   posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 0.2 };

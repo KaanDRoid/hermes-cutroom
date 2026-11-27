@@ -1386,7 +1386,7 @@ function MediaPanel({ ctx, scope, project, view = project, profile = null, platf
         composite && draft.hidden.length ? el('div', { style: { ...box(geo.speaker), overflow: 'hidden', zIndex: 1, pointerEvents: 'none', borderRadius: `${(geo.radius / 1920 * 100).toFixed(2)}cqh` },
           children: el('div', { style: speakerStyle(view, project.source_info, geo.speaker, draft.layout === 'over' ? 1 : 1.7), children: hiddenInSource(draft, now) }) }, 'hidden:card') : null,
         ...(original && !composite && draftKit ? hiddenBoxes(draft, now, w / h, project.source_info, fill, fill === 'cover' ? cropPosition(view, project.source_info, [w, h], now) : '50% 50%') : []),
-        original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info, now }, 'hide') : null,
+        original && draftKit ? jsx(HideLayer, { kit: draftKit, frameRatio: w / h, source: project.source_info, now, ready }, 'hide') : null,
         showZone ? el('div', { 'aria-label': 'Safe zone overlay', style: { position: 'absolute', inset: 0, pointerEvents: 'none' }, children: SafeZoneOverlay({ zone }) }, 'zone') : null,
         cue ? el('div', { style: { position: 'absolute', inset: 0, zIndex: 4, pointerEvents: 'none' }, children: jsx(CaptionOverlay, { cue, zone: captionZone, portrait: tall, settings: view.settings || {}, time: now }) }, 'caption') : null,
         endScreen ? el('div', { 'data-cutroom-endscreen': true, 'aria-label': 'End screen space', style: { position: 'absolute', top: percent(zone?.top ?? 0.05), bottom: percent(zone?.bottom ?? 0.05), left: percent(zone?.left ?? 0.05), right: percent(zone?.right ?? 0.05),
@@ -2767,13 +2767,14 @@ function PicturePicker({ kit }) {
 }
 
 // Drag a box on the paused Original player to hide that area for the chosen words.
-function HideLayer({ kit, frameRatio, source, now = 0 }) {
+function HideLayer({ kit, frameRatio, source, now = 0, ready = true }) {
   const { hiding, setHiding, setDraft } = kit;
   const [start, setStart] = useState(null);
   const [rect, setRect] = useState(null);
   // The box is drawn on the frame on screen, so that frame must be one the words cover.
   const inside = Boolean(hiding) && now >= hiding.start - 0.05 && now <= hiding.end + 0.05;
-  useEffect(() => { if (hiding && !inside) kit.seek?.(hiding.start + 0.02); }, [hiding?.start, hiding?.end]);
+  // Asked again once the Original has loaded: before that there is no picture to move.
+  useEffect(() => { if (hiding && !inside) kit.seek?.(hiding.start + 0.02); }, [hiding?.start, hiding?.end, ready]);
   if (!hiding) return null;
   // The whole source picture as shown while drawing (always Fit), in frame fractions.
   const area = sourceArea(frameRatio, source);
