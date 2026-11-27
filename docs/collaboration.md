@@ -40,6 +40,18 @@ python -m unittest discover -s tests -v
 node --test tests/desktop-check.mjs
 ```
 
+`tests/desktop-pixels.mjs` renders the real Studio in a Chromium-family browser with Hermes Desktop's
+light and dark theme values (`tests/pixels/themes.json`) and reads screenshot pixels: word selection and
+text contrast, the hidden area on the player, a dark player stage, controls left uncovered by the layout
+and the headline kept out of the Shorts button area. It needs React, React DOM and esbuild, for example
+from a Hermes Desktop checkout, and a browser:
+
+```bash
+CUTROOM_UI_MODULES=<hermes-agent>/apps/desktop/node_modules CUTROOM_BROWSER="<path to chrome or msedge>" node --test tests/desktop-pixels.mjs
+```
+
+Without them the test is skipped. Re-read `themes.json` from Desktop when its theme tokens change.
+
 Use the intended interpreter and a valid TMPDIR. Run focused tests during implementation, then the complete suite before integration.
 
 ## Privacy and sharing

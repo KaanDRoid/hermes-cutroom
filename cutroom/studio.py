@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .media import _local_path, poster_frame, probe
+from .media import _local_path, poster_frame, probe, streaming_copy
 from .project import file_digest
 
 _CHILD_PROCESSES = {}
@@ -211,9 +211,26 @@ class Studio:
 
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
-    def _check_source(self, project):
+    def _known_digest(self, path):
+        """The file's SHA-256, read again only when its size, modification time or identity change.
+
+        For the player's 1 MiB chunks only: reading the whole file for every chunk made long videos
+        crawl. A file is read in full when playback starts; renders, exports and downloads always
+        read it in full, so a change that keeps the size and modification time is still refused there.
+        """
+        path = Path(path).expanduser()
+        stat = path.stat()
+        key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_ctime_ns)
+        cache = self.__dict__.setdefault("_digests", {})
+        if key not in cache:
+            if len(cache) >= 64:
+                cache.pop(next(iter(cache)))
+            cache[key] = file_digest(path)
+        return cache[key]
+
+    def _check_source(self, project, playing=False):
         try:
-            digest = file_digest(project["source"])
+            digest = (self._known_digest if playing else file_digest)(project["source"])
         except FileNotFoundError as error:
             raise MissingAssetError(
                 f"Source file is missing: {project['source']}; restore it or "
@@ -363,6 +380,8 @@ class Studio:
                     "subtitles_file",
                     "end_screen_s",
                     "post",
+                    "layout",
+                    "redactions",
                 }
                 if not isinstance(settings, dict):
                     raise ValueError("Unsupported settings")
@@ -410,6 +429,40 @@ class Studio:
                     "square",
                 }:
                     raise ValueError("Unsupported aspect ratio")
+                if "redactions" in settings:
+                    from .redactions import normalize as normalize_redactions
+
+                    value = normalize_redactions(
+                        settings["redactions"],
+                        duration=float(updated.get("source_info", {}).get("duration") or 0),
+                    )
+                    if value is None:
+                        merged.pop("redactions", None)
+                    else:
+                        merged["redactions"] = value
+                if "layout" in settings:
+                    from .layouts import normalize_layout
+
+                    value = normalize_layout(
+                        settings["layout"],
+                        duration=float(updated.get("source_info", {}).get("duration") or 0),
+                    )
+                    if value is None:
+                        merged.pop("layout", None)
+                    else:
+                        merged["layout"] = value
+                if (
+                    merged.get("layout", {}).get("layout", "full") != "full"
+                    and merged.get("aspect") != "portrait"
+                ):
+                    if "layout" not in settings:
+                        # A wide platform was chosen: keep the panel and headline for later.
+                        merged["layout"] = {**merged["layout"], "layout": "full"}
+                    else:
+                        raise ValueError(
+                            "Split explainer and Picture over you need a 9:16 frame; "
+                            "choose Shorts, Reels or TikTok first"
+                        )
                 if (
                     not isinstance(merged.get("title", ""), str)
                     or len(merged.get("title", "")) > 500
@@ -885,13 +938,17 @@ class Studio:
         subtitles file keeps every kept word.
         """
         from .longform import source_to_program
+        from .redactions import mask_words
 
         words = self._caption_words(project)
         excluded = set(project.get("excluded_word_ids", []))
         segments = project["segments"]
-        for word in (project.get("transcript") or {}).get("words") or []:
-            if word["id"] in excluded or word["end"] > word["start"]:
-                continue
+        zero = [
+            word
+            for word in (project.get("transcript") or {}).get("words") or []
+            if word["id"] not in excluded and word["end"] <= word["start"]
+        ]
+        for word in mask_words(zero, project.get("settings", {}).get("redactions")):
             if any(s["start"] <= word["start"] < s["end"] for s in segments):
                 at = source_to_program(segments, word["start"])
                 words.append({"start": at, "end": at, "text": word["text"]})
@@ -1548,6 +1605,10 @@ class Studio:
             paths.append(self._validate_publication(project, upstream))
         if action in {"preview", "final"} and project["settings"].get("use_segmented"):
             paths.append(self._validate_publication(project, "segmented"))
+        layout = project["settings"].get("layout") or {}
+        if action in {"preview", "final"} and layout.get("layout", "full") != "full":
+            items = [layout.get("panel")] + [entry["item"] for entry in layout.get("pictures", [])]
+            paths.extend(item["path"] for item in items if item and item.get("kind") == "file")
         return {
             str(_local_path(path)): file_digest(_local_path(path))
             for path in paths
@@ -1556,6 +1617,7 @@ class Studio:
 
     def _cues(self, project):
         """Output-time caption cues for kept, non-excluded words."""
+        from .redactions import mask_words
         from .speech import caption_cues, remap_words
 
         transcript = project.get("transcript") or {}
@@ -1563,6 +1625,7 @@ class Studio:
         words = [w for w in transcript.get("words") or [] if w["id"] not in excluded]
         if not words:
             return []
+        words = mask_words(words, project["settings"].get("redactions"))
         total = sum(s["end"] - s["start"] for s in project["segments"])
         cues, previous = [], 0.0
         for cue in caption_cues(remap_words(words, project["segments"])):
@@ -1574,14 +1637,14 @@ class Studio:
 
     def _caption_words(self, project):
         """Map kept word fragments once, merging fragments of the same word."""
+        from .redactions import mask_words
         from .speech import remap_words
 
         excluded = set(project.get("excluded_word_ids", []))
-        words = [
-            w
-            for w in (project.get("transcript") or {}).get("words", [])
-            if w["id"] not in excluded
-        ]
+        words = mask_words(
+            [w for w in (project.get("transcript") or {}).get("words", []) if w["id"] not in excluded],
+            project.get("settings", {}).get("redactions"),
+        )
         result, sources = [], []
         for word in remap_words(words, project["segments"]):
             if sources and sources[-1] == word["source_id"]:
@@ -1674,6 +1737,22 @@ class Studio:
             if zooming(settings["pacing"]) and faces:
                 # Punch-ins centre on the face in every framing mode.
                 result["pacing_analysis"] = {"faces": faces}
+        if settings.get("redactions"):
+            result["redactions"] = copy.deepcopy(settings["redactions"])
+        layout = settings.get("layout")
+        if layout and layout.get("layout", "full") != "full" and result["aspect"] == "portrait":
+            from .layouts import face_centre
+
+            result["layout"] = copy.deepcopy(layout)
+            face = face_centre(
+                (project.get("analysis") or {}).get("face_samples"),
+                [(s["start"], s["end"]) for s in project.get("segments") or []],
+            )
+            if face is not None:
+                result["layout_face"] = [float(face[0]), float(face[1])]
+            if layout["layout"] == "split":
+                # The headline takes the title's place at the top of the frame.
+                result["title"] = ""
         return result
 
     def _quality_settings(self, project, preset):
@@ -2359,10 +2438,11 @@ class Studio:
                 self._write_job(job)
             return job
 
-    def artifact(self, project_id, kind):
+    def artifact(self, project_id, kind, playing=False):
+        """A current, verified artifact path. ``playing`` is for the player's repeated chunk reads."""
         project = self.get(project_id)
         if kind == "source":
-            self._check_source(project)
+            self._check_source(project, playing)
             return _local_path(project["source"])
         allowed = {
             "preview",
@@ -2384,9 +2464,16 @@ class Studio:
             raise FileNotFoundError("Artifact is not available")
         if not self._artifact_current(project, kind):
             raise FileNotFoundError("Artifact is stale for the current revision")
-        return self._validate_publication(project, kind)
+        return self._validate_publication(project, kind, playing)
 
-    def _validate_publication(self, project, kind):
+    def stream_copy(self, project_id, kind):
+        """A fragmented copy of the verified preview or final for the Studio player to stream."""
+        if kind not in {"preview", "final"}:
+            raise ValueError("Only renders can stream")
+        path = self.artifact(project_id, kind, playing=True)
+        return streaming_copy(path, self.root / "stream-cache", self._known_digest(path))
+
+    def _validate_publication(self, project, kind, playing=False):
         """Validate stored publication bytes, not a newly adopted input hash."""
         path = _local_path(project["artifacts"][kind])
         if not path.is_relative_to(self.root):
@@ -2394,7 +2481,7 @@ class Studio:
         lineage = project.get("artifact_lineage", {}).get(kind)
         if lineage:
             stat = path.stat()
-            if (stat.st_size, stat.st_mtime_ns, file_digest(path)) != (
+            if (stat.st_size, stat.st_mtime_ns, (self._known_digest if playing else file_digest)(path)) != (
                 lineage["size"],
                 lineage["mtime_ns"],
                 lineage["sha256"],
@@ -2647,9 +2734,14 @@ class Studio:
                         cover_line += " TikTok selects a video frame as its cover; select this time when uploading."
                     elif platform == "instagram_reels":
                         cover_line += " Instagram recommends 420x654; crop this 9:16 reference in the upload screen."
+                sources, cards = packages.panel_sources(project["settings"].get("layout"))
+                if sources:
+                    packages._write_text(directory / "sources.txt", packages.sources_file(sources, cards))
+                    roles["sources.txt"] = "where each picture in the video comes from"
+                credits = packages.credit_line(sources)
                 packages._write_text(
                     directory / "post.txt",
-                    packages.post_file(platform, check, cover_line=cover_line),
+                    packages.post_file(platform, check, cover_line=cover_line, extra_lines=[credits] if credits else ()),
                 )
                 packages._write_text(
                     directory / "README.txt",
@@ -2674,6 +2766,7 @@ class Studio:
                     posted_text=check["text"],
                     limits=status["limits"],
                     cover=cover,
+                    sources=sources,
                     files=packages.file_entries(directory, roles),
                 )
                 packages.write_manifest(directory, manifest)
@@ -2750,6 +2843,46 @@ class Studio:
             "at": at,
             "time": moment,
         }
+
+    def layout_still(self, project_id, sha256):
+        """A small JPEG of a picture or video saved in the project's layout.
+
+        Only files the layout already holds (matched by their digest) are read.
+        """
+        if not isinstance(sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", sha256):
+            raise ValueError("Unknown layout file")
+        project = self.get(project_id)
+        layout = project["settings"].get("layout") or {}
+        items = [layout.get("panel")] + [entry.get("item") for entry in layout.get("pictures", [])]
+        item = next((i for i in items if i and i.get("kind") == "file" and i.get("sha256") == sha256), None)
+        if item is None:
+            raise ValueError("Unknown layout file")
+        path = _local_path(item["path"], must_exist=False)
+        if not path.is_file():
+            raise MissingAssetError(f"{item['name']} is missing; choose it again in Style")
+        directory = self._directory(project_id) / "posters"
+        cached = directory / f"layout-{sha256[:24]}.jpg"
+        if not cached.is_file():
+            if file_digest(path) != sha256:
+                raise ValueError(f"{item['name']} changed since it was chosen; choose it again in Style")
+            directory.mkdir(parents=True, exist_ok=True)
+            temporary = directory / f".{uuid.uuid4().hex}.jpg"
+            try:
+                try:
+                    poster_frame(path, 0.0 if item.get("media") == "image" else min(1.0, (item.get("duration") or 0) / 2), temporary)
+                except (subprocess.SubprocessError, OSError) as error:
+                    raise RuntimeError("The picture could not be shown") from error
+                size = temporary.stat().st_size if temporary.is_file() else 0
+                if not 0 < size <= POSTER_MAX_BYTES:
+                    raise RuntimeError("The picture could not be shown")
+                _replace_file(temporary, cached)
+            finally:
+                temporary.unlink(missing_ok=True)
+        data = cached.read_bytes()
+        if not data.startswith(b"\xff\xd8") or len(data) > POSTER_MAX_BYTES:
+            cached.unlink(missing_ok=True)
+            raise RuntimeError("The cached picture was unreadable; try again")
+        return {"mime": "image/jpeg", "data_url": "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")}
 
     def list(self):
         """Projects plus ``modified_at``, the last save time for display only."""

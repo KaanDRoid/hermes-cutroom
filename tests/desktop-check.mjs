@@ -129,7 +129,10 @@ function timerBox() {
 const patchApplies = (_path, options) => {
   if (options?.method === 'PATCH') {
     const changes = options.body.changes;
-    selectedProject = { ...selectedProject, ...changes, settings: { ...selectedProject.settings, ...(changes.settings || {}) }, revision: selectedProject.revision + 1 };
+    const settings = { ...selectedProject.settings, ...(changes.settings || {}) };
+    // Like the server: null removes a layout or the bleeps and hidden areas.
+    for (const name of ['layout', 'redactions']) if (settings[name] === null) delete settings[name];
+    selectedProject = { ...selectedProject, ...changes, settings, revision: selectedProject.revision + 1 };
   }
   return selectedProject;
 };
@@ -504,6 +507,23 @@ test('suggests long pauses and repeated words; Apply, Keep and Apply all', async
   assert.deepEqual(changes.segments, [{ start: 0, end: 1.65 }, { start: 2.35, end: 12 }]);
 });
 
+test('enables following for just the chosen hidden area', async () => {
+  jobRows = [];
+  const box = { x: 0.2, y: 0.2, w: 0.15, h: 0.15 };
+  const hidden = [{ start: 1, end: 2, box, style: 'cover' }, { start: 3, end: 4, box, style: 'cover' }];
+  const ui = await studio(patchApplies, { settings: { redactions: { bleeps: [], hidden } } });
+  const controls = nodes(disclosure(ui.draw(), 'More tools')).filter(n => n.props?.['aria-label'] === 'Follow movement for hidden area 2');
+  assert.equal(controls.length, 1);
+  assert.equal(controls[0].props['aria-pressed'], false);
+  controls[0].props.onClick();
+  await ui.flush();
+  const saved = ui.patches().at(-1).options.body.changes.settings.redactions.hidden;
+  assert.equal(saved[0].follow, undefined);
+  assert.equal(saved[1].follow, true);
+  const shown = nodes(disclosure(ui.draw(), 'More tools')).find(n => n.props?.['aria-label'] === 'Follow movement for hidden area 2');
+  assert.equal(text(shown).trim(), '✓ Following movement', 'On is said in words, not only by colour');
+});
+
 test('empty transcript offers Transcribe; rarely used tools live under More tools', async () => {
   jobRows = [];
   const ui = await studio(async () => ({ id: 'j1' }));
@@ -829,7 +849,7 @@ test('draws a visible outline on every unchecked checkbox, including the approva
   assert.ok(boxes.some(n => n.props['aria-label'] === 'I watched this preview and want to export exactly this version'));
   for (const box of boxes) {
     if (box.props.checked) continue;
-    assert.match(String(box.props.style?.borderColor || ''), /^var\(--ui-/, `${box.props['aria-label'] || 'checkbox'} needs a themed visible border`);
+    assert.match(String(box.props.style?.borderColor || ''), /^(var|color-mix\(in srgb, var)\(--ui-/, `${box.props['aria-label'] || 'checkbox'} needs a themed visible border`);
   }
 });
 
@@ -861,11 +881,69 @@ test('loads authenticated versioned media chunks, rejects oversize media and rev
     oversize = true;
     const before = ui.calls.length;
     await choice(ui.draw(), 'Final').props.onClick();
-    assert.equal(ui.calls.length, before + 1);
+    // A render first says whether it can stream, then one chunk shows it is too large.
+    assert.deepEqual(ui.calls.slice(before).map(c => c.path.split('?')[0]), ['/projects/p1/artifact-info/final', '/projects/p1/media/final']);
     assert.match(text(ui.draw()), /256 MiB/);
     assert.equal(created.length, 2);
     assert.deepEqual(revoked, ['blob:test-1', 'blob:test-2']);
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('a fragmented preview plays from its first piece while the rest streams in', async () => {
+  const created = [], revoked = [], appended = [];
+  const create = URL.createObjectURL, revoke = URL.revokeObjectURL, before = globalThis.MediaSource;
+  let source = null, release = null;
+  class FakeBuffer {
+    constructor() { this.listeners = {}; }
+    addEventListener(name, fn) { this.listeners[name] = fn; }
+    removeEventListener(name) { delete this.listeners[name]; }
+    appendBuffer(bytes) { appended.push(bytes.length); queueMicrotask(() => this.listeners.updateend?.()); }
+  }
+  globalThis.MediaSource = class {
+    static isTypeSupported(type) { return type === 'video/mp4; codecs="avc1.64001f,mp4a.40.2"'; }
+    constructor() { source = this; this.readyState = 'open'; this.ended = false; this.types = []; }
+    addEventListener(name, fn) { if (name === 'sourceopen') queueMicrotask(fn); }
+    addSourceBuffer(type) { this.types.push(type); return new FakeBuffer(); }
+    endOfStream() { this.ended = true; this.readyState = 'ended'; }
+  };
+  URL.createObjectURL = item => { created.push(item); return `blob:stream-${created.length}`; };
+  URL.revokeObjectURL = url => revoked.push(url);
+  try {
+    jobRows = [];
+    const gate = new Promise(resolve => { release = resolve; });
+    const ui = await studio(async path => {
+      if (path.includes('/artifact-info/')) return { path: 'x', name: 'preview.mp4', mime: 'video/mp4', size: 9, stream: { fragmented: true, codecs: 'avc1.64001f,mp4a.40.2', duration: 12.5 } };
+      if (path.includes('/media/')) {
+        const offset = Number(new URL(path, 'https://test').searchParams.get('offset') || 0);
+        if (offset > 0) await gate;
+        return { data: btoa('abc'), offset, next_offset: offset + 3, total: 9, mime: 'video/mp4', version: 'v1' };
+      }
+      return selectedProject;
+    }, { artifacts: { preview: 'preview.mp4' } });
+    const loading = choice(ui.draw(), 'Preview').props.onClick();
+    for (let i = 0; i < 6; i++) await tick();
+    let tree = ui.draw();
+    assert.equal(nodes(tree).find(n => n.type === 'video')?.props.src, 'blob:stream-1', 'Plays before the rest arrives');
+    assert.ok(created[0] === source, 'The player reads a MediaSource, not a finished file');
+    assert.deepEqual(appended, [3]);
+    assert.equal(source.duration, 12.5, 'The seek bar knows the length before the rest arrives');
+    assert.ok(nodes(tree).some(n => n.props?.['data-cutroom-streaming']), 'A thin line shows the rest loading');
+    assert.ok(!nodes(tree).some(n => n.props?.['data-cutroom-loading']), 'No loading box over the playing video');
+    release();
+    await loading;
+    for (let i = 0; i < 4; i++) await tick();
+    assert.deepEqual(appended, [3, 3, 3]);
+    assert.ok(ui.calls.filter(c => c.path.includes('/media/preview')).every(c => c.path.endsWith('&stream=true')), 'Pieces come from the streaming copy');
+    assert.equal(source.ended, true);
+    assert.deepEqual(source.types, ['video/mp4; codecs="avc1.64001f,mp4a.40.2"']);
+    assert.ok(!nodes(ui.draw()).some(n => n.props?.['data-cutroom-streaming']));
+    // The original is always loaded whole: any format, never asked about streaming.
+    const calls = ui.calls.length;
+    await choice(ui.draw(), 'Original').props.onClick();
+    assert.ok(!ui.calls.slice(calls).some(c => c.path.includes('/artifact-info/')));
+    assert.ok(created.at(-1) instanceof Blob);
+    assert.deepEqual(revoked, ['blob:stream-1']);
+  } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; globalThis.MediaSource = before; }
 });
 
 test('space plays and pauses unless focus is in a text field', async () => {
@@ -984,6 +1062,303 @@ test('chooses a platform card and final size, with keyboard arrows in the radio 
   assert.equal(radio(ui.draw(), 'Platform', 'youtube').props.tabIndex, -1);
 });
 
+test('a split layout and its top panel card are saved on the project and can be undone', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} } });
+  let tree = await ui.step('Style');
+  radio(tree, 'Layout', 'split').props.onClick();
+  await ui.flush();
+  assert.equal(ui.patches().at(-1).options.body.changes.settings.layout.layout, 'split');
+  assert.equal(selectedProject.settings.layout.divider, 1170);
+  tree = ui.draw();
+  await button(tree, 'Add card').props.onClick();
+  tree = ui.draw();
+  await button(tree, 'Number').props.onClick();
+  await button(ui.draw(), 'Use this card').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel, { kind: 'card', type: 'number', text: '3', detail: 'things you need to know' });
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.panel, null, 'Undo takes the card back out');
+  assert.equal(selectedProject.settings.layout.layout, 'split');
+});
+
+test('a sound wave card goes in the top panel, and Review stops it on a video without sound', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} }, source_info: { duration: 12, width: 1920, height: 1080, has_audio: true } });
+  let tree = await ui.step('Style');
+  radio(tree, 'Layout', 'split').props.onClick();
+  await ui.flush();
+  await button(ui.draw(), 'Add card').props.onClick();
+  await button(ui.draw(), 'Sound wave').props.onClick();
+  assert.match(text(ui.draw()), /moves with your voice/);
+  await button(ui.draw(), 'Use this card').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel, { kind: 'card', type: 'wave', text: '', detail: '' });
+  assert.ok(nodes(ui.draw()).some(n => n.props?.['data-cutroom-wave']), 'The player shows the wave card');
+  assert.doesNotMatch(text(await ui.step('Review')), /needs sound/);
+
+  const silent = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { ...selectedProject.settings.layout } }, source_info: { duration: 12, width: 1920, height: 1080, has_audio: false } });
+  assert.match(text(await silent.step('Review')), /A sound wave card needs sound/);
+});
+
+// Ten words, 0.5 s each with 0.1 s gaps: word i runs i*0.6 .. i*0.6+0.5. A 600 px strip over 6 s is 100 px a second.
+const tlWords = Array.from({ length: 10 }, (_, id) => ({ id, text: `w${id}`, start: +(id * 0.6).toFixed(2), end: +(id * 0.6 + 0.5).toFixed(2) }));
+const tlView = { width: 600, duration: 6 };
+
+test('timeline handles are easy to grab, short ranges stay movable and overlaps pick the nearest edge', async () => {
+  const { pick } = (await load()).timeline;
+  const one = [{ start: 1.2, end: 2.9 }];
+  assert.deepEqual(pick(one, 295, tlView), { index: 0, part: 'end', grab: 0 }, 'Within 8 px past the end');
+  assert.deepEqual(pick(one, 115, tlView), { index: 0, part: 'start', grab: 0 }, 'Within 8 px before the start');
+  assert.equal(pick(one, 200, tlView).part, 'move');
+  assert.ok(Math.abs(pick(one, 200, tlView).grab - 0.8) < 1e-9, 'The grab point is kept');
+  assert.equal(pick(one, 400, tlView), null, 'Empty strip');
+  const short = [{ start: 0.6, end: 0.75 }];
+  assert.equal(pick(short, 67, tlView).part, 'move', 'A 15 px block moves from its middle');
+  assert.equal(pick(short, 55, tlView).part, 'start', 'Its handles sit outside it');
+  assert.equal(pick(short, 81, tlView).part, 'end');
+  const overlap = [{ start: 1.2, end: 2.9 }, { start: 2.4, end: 4.1 }];
+  assert.deepEqual(pick(overlap, 292, tlView), { index: 0, part: 'end', grab: 0 });
+  assert.deepEqual(pick(overlap, 243, tlView), { index: 1, part: 'start', grab: 0 });
+  assert.equal(pick(overlap, 260, tlView).index, 1, 'Inside both: the one whose edge is nearer');
+});
+
+test('timeline drags snap to words, never jump under the pointer and stay clear of neighbours', async () => {
+  const { drag, step } = (await load()).timeline;
+  const item = { start: 1.2, end: 2.9, said: 'w2 w3 w4' };
+  const hold = { part: 'move', grab: 0.8 };
+  assert.deepEqual(drag(item, hold, 2.05, { words: tlWords, duration: 6 }), { start: 1.2, end: 2.9, said: 'w2 w3 w4' }, 'A small move does not jump');
+  assert.deepEqual(drag(item, hold, 2.35, { words: tlWords, duration: 6 }), { start: 1.8, end: 3.5, said: 'w3 w4 w5' }, 'Moves a word at a time, keeping its length');
+  assert.deepEqual(drag(item, hold, 9, { words: tlWords, duration: 6 }), { start: 4.2, end: 5.9, said: 'w7 w8 w9' }, 'Stops at the end');
+  assert.deepEqual(drag(item, { part: 'end', grab: 0 }, 0, { words: tlWords, duration: 6 }), { start: 1.2, end: 1.7, said: 'w2' }, 'Keeps at least one word');
+  assert.deepEqual(drag(item, { part: 'start', grab: 0 }, 0.35, { words: tlWords, duration: 6 }), { start: 0.6, end: 2.9, said: 'w1 w2 w3 w4' });
+  const lane = { words: tlWords, duration: 6, before: 1.1, after: 3.6 };
+  assert.deepEqual(drag(item, hold, 0.2, lane), { start: 1.2, end: 2.9, said: 'w2 w3 w4' }, 'Does not cross the previous item');
+  assert.deepEqual(drag(item, { part: 'end', grab: 0 }, 5, lane), { start: 1.2, end: 3.5, said: 'w2 w3 w4 w5' }, 'Nor the next');
+  assert.deepEqual(step(item, 'ArrowRight', false, { words: tlWords, duration: 6 }), { start: 1.8, end: 3.5, said: 'w3 w4 w5' });
+  assert.deepEqual(step(item, 'ArrowLeft', true, { words: tlWords, duration: 6 }), { start: 1.2, end: 2.3, said: 'w2 w3' }, 'Shift changes the end');
+  assert.deepEqual(step({ start: 1.2, end: 1.7, said: 'w2' }, 'ArrowLeft', true, { words: tlWords, duration: 6 }), { start: 1.2, end: 1.7, said: 'w2' });
+});
+
+test('timed blocks drag on a strip, snap to words, and a click without moving changes nothing', async () => {
+  jobRows = [];
+  const words = tlWords.map(w => ({ ...w, probability: 0.9 }));
+  const bleep = { ids: [2], start: 1.2, end: 1.7, said: 'w2', mode: 'bleep' };
+  const ui = await studio(patchApplies, { transcript: { words }, source_info: { duration: 6, width: 1920, height: 1080, has_audio: true }, base_segments: [{ start: 0, end: 6 }], segments: [{ start: 0, end: 6 }],
+    settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, redactions: { bleeps: [bleep], hidden: [] } } });
+  const lane = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'bleeps');
+  assert.ok(lane(), 'A bleep lane is drawn');
+  assert.equal(nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'hidden'), undefined, 'No empty lanes');
+  const surface = { getBoundingClientRect: () => ({ left: 100, width: 600 }), style: {}, setPointerCapture() {} };
+  const at = x => ({ clientX: 100 + x, pointerId: 1, currentTarget: surface, preventDefault() {} });
+  lane().props.onPointerDown(at(145));
+  lane().props.onPointerMove(at(250));
+  lane().props.onPointerMove(at(410));
+  assert.match(nodes(ui.draw()).find(n => n.props?.['data-cutroom-block'] === 'bleeps0').props['aria-label'], /“w6”/, 'The block follows the pointer before it is let go');
+  assert.equal(selectedProject.settings.redactions.bleeps[0].start, 1.2, 'Nothing saved while dragging');
+  lane().props.onPointerUp(at(410));
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps, [{ ids: [6], start: 3.6, end: 4.1, said: 'w6', mode: 'bleep' }]);
+  const block = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-block'] === 'bleeps0');
+  block().props.onKeyDown({ key: 'ArrowRight', shiftKey: true, preventDefault() {} });
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps[0].ids, [6, 7], 'Shift+Right adds the next word');
+  lane().props.onPointerDown(at(420));
+  lane().props.onPointerUp(at(420));
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps[0].ids, [6, 7], 'A click without moving changes nothing');
+});
+
+test('a timed picture dragged onto the one before it stops at its end', async () => {
+  jobRows = [];
+  const words = tlWords.map(w => ({ ...w, probability: 0.9 }));
+  const card = text => ({ kind: 'card', type: 'title', text });
+  const layout = { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: card('Intro'),
+    pictures: [{ start: 0, end: 1.1, said: 'w0 w1', item: card('One') }, { start: 2.4, end: 3.5, said: 'w4 w5', item: card('Two') }] };
+  const ui = await studio(patchApplies, { transcript: { words }, source_info: { duration: 6, width: 1920, height: 1080, has_audio: true }, base_segments: [{ start: 0, end: 6 }], segments: [{ start: 0, end: 6 }],
+    settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout } });
+  const lane = () => nodes(ui.draw()).find(n => n.props?.['data-cutroom-lane'] === 'pictures');
+  const surface = { getBoundingClientRect: () => ({ left: 0, width: 600 }), style: {}, setPointerCapture() {} };
+  const at = x => ({ clientX: x, pointerId: 1, currentTarget: surface, preventDefault() {} });
+  lane().props.onPointerDown(at(295));
+  lane().props.onPointerMove(at(200));
+  lane().props.onPointerMove(at(20));
+  lane().props.onPointerUp(at(20));
+  await ui.flush();
+  const saved = selectedProject.settings.layout.pictures.map(p => [p.start, p.end, p.said]);
+  assert.deepEqual(saved, [[0, 1.1, 'w0 w1'], [1.2, 2.3, 'w2 w3']], 'Moved left as far as the first picture allows, keeping two words');
+});
+
+test('Review says when a bleeped word is still said elsewhere', async () => {
+  jobRows = [];
+  const words = ['Alice', 'met', 'Alice', 'and', 'Bob'].map((text, id) => ({ id, text, start: id * 0.6, end: id * 0.6 + 0.5, probability: 0.9 }));
+  const once = { bleeps: [{ ids: [0], start: 0, end: 0.5, said: 'Alice', mode: 'bleep' }], hidden: [] };
+  let ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], settings: { brand: {}, redactions: once } });
+  assert.match(text(await ui.step('Review')), /“Alice” is bleeped once but said 1 more time \(0:01\)\. Select it in Edit and choose “Bleep “Alice” everywhere”/);
+  const all = { bleeps: [0, 2].map(id => ({ ids: [id], start: id * 0.6, end: id * 0.6 + 0.5, said: 'Alice', mode: 'bleep' })), hidden: [] };
+  ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], settings: { brand: {}, redactions: all } });
+  assert.doesNotMatch(text(await ui.step('Review')), /more time/);
+});
+
+test('a missing source says so on the player at once instead of offering a load that hangs', async () => {
+  jobRows = [];
+  const missing = 'Source file is missing: C:\\v\\talk.mp4; restore it or import a new project';
+  const ui = await studio(async path => { if (path.includes('/artifact-info/') || path.includes('/media/')) throw new Error(`Error invoking remote method 'hermes:api': Error: 422: {"detail": "${missing.replace(/\\/g, '\\\\')}"}`); return selectedProject; }, { artifacts: {} });
+  ui.draw(); await tick();
+  const tree = ui.draw();
+  assert.match(text(tree), /Source file is missing/);
+  assert.ok(nodes(tree).some(n => n.props?.role === 'alert'), 'Shown as an alert');
+  assert.equal(nodes(tree).find(n => n.type === 'button' && /^Load video/.test(text(n))), undefined, 'No load button for a file that is gone');
+});
+
+test('a panel picture says where it comes from, and Review asks when it does not', async () => {
+  jobRows = [];
+  const panelFile = { kind: 'file', path: 'C:/v/shot.png', name: 'shot.png', sha256: 'a'.repeat(64), media: 'image', width: 1280, height: 720, duration: null };
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: panelFile, pictures: [] } },
+    source_info: { duration: 12, width: 1920, height: 1080, has_audio: true } });
+  assert.match(text(await ui.step('Review')), /Say where each picture/);
+  await ui.step('Style');
+  button(ui.draw(), 'Stock site').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.layout.panel.origin, { kind: 'stock', credit: '', url: '', license: '' });
+  const credit = nodes(ui.draw()).find(n => n.props?.name === 'origin.credit');
+  credit.props.onChange({ target: { value: 'Photo by Ana Lima on Pexels' } });
+  assert.equal(selectedProject.settings.layout.panel.origin.credit, '', 'Typing alone does not save');
+  nodes(ui.draw()).find(n => n.props?.name === 'origin.credit').props.onBlur({ target: { value: 'Photo by Ana Lima on Pexels' } });
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.panel.origin.credit, 'Photo by Ana Lima on Pexels');
+  assert.doesNotMatch(text(await ui.step('Review')), /Say where each picture/);
+});
+
+test('a bleep chosen on selected words is saved on the project', async () => {
+  jobRows = [];
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }, { id: 2, text: 'here', start: 1.1, end: 1.5 }];
+  const ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }] });
+  const tree = ui.draw();
+  const alice = word(tree, '1');
+  alice.props.onClick({});
+  await button(ui.draw(), 'Bleep').props.onClick();
+  await ui.flush();
+  assert.deepEqual(selectedProject.settings.redactions.bleeps, [{ ids: [1], start: 0.6, end: 1.0, said: 'Alice', mode: 'bleep' }]);
+  assert.deepEqual(selectedProject.settings.redactions.hidden, []);
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.redactions, undefined, 'The first bleep can be undone');
+});
+
+test('Hide area starts drawing and a second press stops it', async () => {
+  jobRows = [];
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const ui = await studio(patchApplies, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }] });
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  assert.equal(button(ui.draw(), 'Hide area').props['aria-pressed'], true);
+  assert.ok(nodes(ui.draw()).some(n => n.props?.role === 'status' && /Drag a box|Choose Original/.test(String(n.props.children))));
+  button(ui.draw(), 'Hide area').props.onClick();
+  assert.equal(button(ui.draw(), 'Hide area').props['aria-pressed'], false);
+  assert.ok(!nodes(ui.draw()).some(n => n.props?.role === 'status' && /Drag a box|Choose Original/.test(String(n.props.children))));
+});
+
+test('a drawn hidden area remembers the moment it was drawn on, so following starts there', async () => withBlobs(async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 0.8 };
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const large = async (path, options) => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : patchApplies(path, options);
+  const ui = await studio(large, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], source_info: { duration: 12, width: 1920, height: 1080 } });
+  ui.draw(); await tick();
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  const layer = () => nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Draw the area to hide');
+  assert.ok(layer(), 'The drawing layer is on the Original player');
+  const target = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  layer().props.onMouseDown({ currentTarget: target, clientX: 20, clientY: 20 });
+  layer().props.onMouseUp({ currentTarget: target, clientX: 50, clientY: 50 });
+  await ui.flush();
+  const [area] = selectedProject.settings.redactions.hidden;
+  assert.equal(area.at, 0.8);
+  assert.deepEqual([area.start, area.end], [0.6, 1.0]);
+}));
+
+test('hiding waits for the Original to load, then moves the player to the selected words', async () => withBlobs(async () => {
+  {
+    jobRows = [];
+    const ui = await studio(async (path, options) => path.includes('/media/') ? { data: btoa('abc'), offset: 0, next_offset: 3, total: 3, mime: 'video/mp4', version: 'v1' } : patchApplies(path, options), transcriptProject());
+    await choice(ui.draw(), 'Original').props.onClick();
+    word(ui.draw(), 'w2').props.onClick({ shiftKey: false });
+    button(ui.draw(), 'Hide area').props.onClick();
+    ui.draw(); await tick();
+    // The file arrives only now: the seek asked for above had no player to move.
+    const fake = { currentTime: 0, paused: true, play() { this.paused = false; }, pause() { this.paused = true; } };
+    const video = nodes(ui.draw()).find(n => n.type === 'video');
+    video.props.ref.current = fake;
+    video.props.onLoadedMetadata({ currentTarget: { duration: 10 } });
+    ui.draw(); await tick(); ui.draw();
+    assert.ok(Math.abs(fake.currentTime - 0.32) < 0.011, `the player went to the words (at ${fake.currentTime})`);
+  }
+}));
+
+test('a hidden area is only drawn on a frame from the selected words', async () => withBlobs(async () => {
+  jobRows = [];
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 0.2 };
+  const words = [{ id: 0, text: 'Hello', start: 0, end: 0.5 }, { id: 1, text: 'Alice', start: 0.6, end: 1.0 }];
+  const large = async (path, options) => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : patchApplies(path, options);
+  const ui = await studio(large, { transcript: { words }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }], source_info: { duration: 12, width: 1920, height: 1080 } });
+  ui.draw(); await tick();
+  word(ui.draw(), '1').props.onClick({});
+  button(ui.draw(), 'Hide area').props.onClick();
+  const layer = () => nodes(ui.draw()).find(n => n.props?.['aria-label'] === 'Draw the area to hide');
+  assert.match(text(layer()), /Going to 0:01.*draw when the picture shows the selected words/);
+  const target = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) };
+  layer().props.onMouseDown({ currentTarget: target, clientX: 20, clientY: 20 });
+  layer().props.onMouseUp({ currentTarget: target, clientX: 50, clientY: 50 });
+  await ui.flush();
+  assert.equal(selectedProject.settings?.redactions, undefined, 'Nothing is saved from a frame outside the words');
+}));
+
+test('headline ideas never use a bleeped word', async () => {
+  const sentence = 'Climate change is not actually that complicated. Nobody reads the report anyway.';
+  const words = sentence.split(' ').map((text, id) => ({ id, text, start: id * 0.5, end: id * 0.5 + 0.4 }));
+  const shown = async redactions => {
+    jobRows = [];
+    const ui = await studio(patchApplies, { transcript: { words, language: 'en' }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }],
+      settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: null, pictures: [] }, ...(redactions ? { redactions } : {}) } });
+    const tree = await ui.step('Style');
+    return nodes(tree).map(n => n.props?.children).filter(c => typeof c === 'string').join(' | ');
+  };
+  assert.match(await shown(null), /COMPLICATED/, 'Without a bleep the sentence is a headline idea');
+  const text = await shown({ bleeps: [{ start: 3.0, end: 3.4, ids: [6], said: 'complicated.', mode: 'bleep' }], hidden: [] });
+  assert.doesNotMatch(text, /COMPLICATED/);
+  assert.match(text, /NOBODY|REPORT/, 'Other sentences are still offered');
+});
+
+test('Review warns when a headline or card shows a word that is bleeped', async () => {
+  const words = 'This is really not that complicated.'.split(' ').map((text, id) => ({ id, text, start: id * 0.5, end: id * 0.5 + 0.4 }));
+  const layout = headline => ({ layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline, panel: { kind: 'card', type: 'title', text: 'Hello' }, pictures: [] });
+  const review = async headline => {
+    jobRows = [];
+    const ui = await studio(patchApplies, { transcript: { words, language: 'en' }, base_segments: [{ start: 0, end: 12 }], segments: [{ start: 0, end: 12 }],
+      settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: layout(headline), redactions: { bleeps: [{ start: 2.5, end: 2.9, ids: [5], said: 'complicated.', mode: 'bleep' }], hidden: [] } } });
+    return text(await ui.step('Review'));
+  };
+  assert.match(await review({ l1: 'REALLY NOT THAT', l2: 'COMPLICATED', boxed: [0] }), /A bleeped word is still on screen/);
+  const clean = await review({ l1: 'REALLY NOT', l2: 'THAT HARD', boxed: [1] });
+  assert.doesNotMatch(clean, /A bleeped word is still on screen/);
+  assert.match(clean, /Bleeped words are silenced/);
+});
+
+test('the first layout chosen on a project can be undone', async () => {
+  jobRows = [];
+  const ui = await studio(patchApplies, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {} } });
+  radio(await ui.step('Style'), 'Layout', 'split').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout.layout, 'split');
+  assert.equal(button(ui.draw(), '↶ Undo').props.disabled, false);
+  await button(ui.draw(), '↶ Undo').props.onClick();
+  await ui.flush();
+  assert.equal(selectedProject.settings.layout, undefined);
+});
+
 test('step tabs follow the tab pattern with arrow, Home and End keys and a Next button', async () => {
   jobRows = [];
   const ui = await studio(async () => selectedProject);
@@ -1051,7 +1426,7 @@ test('overlays the unsafe areas of the platform the loaded render was made with,
     assert.equal(top.props.style.height, '14%', 'Reels zone of the render, not the TikTok setting');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'bottom').props.style.height, '35%');
     assert.equal(boxes.find(n => n.props['data-cutroom-unsafe'] === 'left').props.style.width, '6%');
-    assert.match(String(top.props.style.background), /^var\(--ui-/);
+    assert.match(String(top.props.style.background), /^color-mix\(in srgb, var\(--ui-/, 'Shade derived from the theme');
     assert.match(text(tree), /Instagram Reels safe zone/);
     assert.ok(nodes(tree).find(n => n.type === 'video'), 'The player stays visible under the overlay');
     // A render without a recorded platform was made by the custom profile.
@@ -1367,6 +1742,66 @@ test('opens with the video loaded: the current preview, else the original, when 
   assert.equal(choice(tree, 'Original').props['aria-pressed'], true);
 }));
 
+test('a hidden area sits on the same part of the picture with Fit and with Fill framing', async () => withBlobs(async () => {
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
+  const hidden = [{ start: 3, end: 4, said: 'key', box: { x: 0.5, y: 0.5, w: 0.1, h: 0.2 }, style: 'cover' }];
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const boxOf = async framing => {
+    jobRows = [];
+    const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', framing, redactions: { bleeps: [], hidden } }, source_info: { duration: 12, width: 1920, height: 1080 } });
+    ui.draw(); await tick();
+    const found = nodes(ui.draw()).filter(n => n.props?.['data-cutroom-hidden']);
+    assert.equal(found.length, 1, `One hidden box on the player with ${framing}`);
+    return found[0].props.style;
+  };
+  // Fit: the 16:9 source is a strip across the 9:16 frame.
+  const fit = await boxOf('fit');
+  assert.equal(fit.left, '50%');
+  assert.equal(fit.width, '10%');
+  // Fill: the source is 3.16 frame widths wide and centred, so 10% of it is 31.6% of the frame.
+  const fill = await boxOf('fill');
+  assert.equal(fill.left, '50%');
+  assert.equal(fill.width, '31.6%');
+  assert.equal(fill.top, '50%');
+  assert.equal(fill.height, '20%');
+}));
+
+test('the speaker in a split card is not shrunk by the host max-width rule for images and video', async () => withBlobs(async () => {
+  // Hermes Desktop's base CSS sets img, video { max-width: 100% }; the zoomed speaker is wider than its card.
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
+  jobRows = [];
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline: null, panel: null, pictures: [] } },
+    source_info: { duration: 12, width: 960, height: 540 } });
+  ui.draw(); await tick();
+  const card = nodes(ui.draw()).find(n => n.props?.['data-cutroom-speaker']);
+  assert.ok(card, 'The speaker card is drawn');
+  const picture = nodes(card).find(n => n.type === 'img' || n.type === 'video');
+  assert.ok(parseFloat(picture.props.style.width) > 100, 'Zoomed wider than the card');
+  assert.equal(picture.props.style.maxWidth, 'none');
+  assert.equal(picture.props.style.maxHeight, 'none');
+}));
+
+test('the headline preview shrinks to stay clear of the Shorts buttons and Review warns when it gets small', async () => withBlobs(async () => {
+  posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 1 };
+  const large = async path => path.includes('/artifact-info/') ? { path: 'x', name: 'x.mp4', size: 100 * 1048576 } : selectedProject;
+  const open = async headline => {
+    jobRows = [];
+    const ui = await studio(large, { settings: { platform: 'youtube_shorts', aspect: 'portrait', brand: {}, layout: { layout: 'split', speaker: 'wide', background: 'paper', divider: 1170, hold: 'whole', headline, panel: { kind: 'card', type: 'title', text: 'Hi' }, pictures: [] } },
+      source_info: { duration: 12, width: 1920, height: 1080 } });
+    ui.draw(); await tick();
+    const node = nodes(ui.draw()).find(n => n.props?.['data-cutroom-headline']);
+    return { ui, size: parseFloat(node.props.style.fontSize) / 100 * 1920 };
+  };
+  // Shorts: centred and clear of the right 18 % leaves 2 * (885.6 - 540) - 8 = 683 units.
+  const long = await open({ l1: 'CLIMATE CHANGE IS REALLY NOT', l2: 'THAT HARD', boxed: [1] });
+  assert.ok(Math.abs(long.size - 683 / (28 * 0.66)) < 0.6, `size ${long.size}`);
+  assert.match(text(await long.ui.step('Review')), /Shorten the headline/);
+  const short = await open({ l1: 'NOT THAT', l2: 'HARD', boxed: [0] });
+  assert.equal(Math.round(short.size), 84);
+  assert.doesNotMatch(text(await short.ui.step('Review')), /Shorten the headline/);
+}));
+
 test('a large video shows its poster frame and one Load button with its size', async () => withBlobs(async () => {
   jobRows = [];
   posterData = { mime: 'image/jpeg', data_url: 'data:image/jpeg;base64,AAAA', time: 3.6 };
@@ -1676,7 +2111,14 @@ test('uses only public SDK/React imports and no renderer or polling bypasses', a
   assert.ok(captionDefault, 'The caption default is declared once');
   const rendered = (await readFile(new URL('../cutroom/captions.py', import.meta.url), 'utf8')).match(/^DEFAULT_HIGHLIGHT = "(#[0-9A-Fa-f]{6})"/m);
   assert.equal(captionDefault[1], rendered[1], 'Preview and render use the same default highlight');
-  assert.doesNotMatch(source.replace(captionDefault[0], ''), /#[0-9a-fA-F]{3,8}\b|rgb\(/);
+  // Layout colours are burned into the video too: one declaration, equal to the renderer's palette.
+  const paletteLine = source.match(/^const LAYOUT_PALETTE = Object\.freeze\((\{.*\})\);$/m);
+  assert.ok(paletteLine, 'The layout palette is declared once');
+  const renderer = await readFile(new URL('../cutroom/layouts.py', import.meta.url), 'utf8');
+  const block = renderer.match(/^PALETTE = \{([\s\S]*?)^\}/m)[1];
+  const expected = Object.fromEntries([...block.matchAll(/"(\w+)": "(#[0-9A-F]{6,8})"/g)].map(m => [m[1], m[2]]));
+  assert.deepEqual(JSON.parse(paletteLine[1]), expected, 'Preview and render use the same layout palette');
+  assert.doesNotMatch(source.replace(captionDefault[0], '').replace(paletteLine[0], ''), /#[0-9a-fA-F]{3,8}\b|rgb\(/);
   assert.doesNotMatch(source, /'progress'/, 'Themed progress bars only');
   assert.match(source, /prefers-reduced-motion/);
   assert.match(source, /focus-visible/);
@@ -2191,6 +2633,17 @@ test('with Face track the original player keeps the speaker in a tall frame', as
     selectedProject.settings = { platform: 'youtube_shorts', framing: 'center_crop' };
     assert.equal(video().props.style.objectPosition || '50% 50%', '50% 50%', 'Center crop stays centred');
   } finally { URL.createObjectURL = create; URL.revokeObjectURL = revoke; }
+});
+
+test('Review warns about detected tracking loss only for the current preview', async () => {
+  const preview = currentPreview();
+  preview.jobs[0].result = { redactions: { lost: [{ start: 3, end: 4 }] } };
+  jobRows = preview.jobs;
+  const ui = await studio(async () => selectedProject, preview.project);
+  await ui.step('Review');
+  assert.match(text(ui.draw()), /Tracking lost the target in 1 range.*0:03–0:04/);
+  jobRows = [{ ...preview.jobs[0], revision: 6 }];
+  assert.doesNotMatch(text(ui.draw()), /Tracking lost the target/);
 });
 
 test('a caption problem says what is wrong, where, and how to fix it', async () => {

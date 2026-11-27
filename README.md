@@ -7,7 +7,7 @@
 
 <p align="center">A local-first video editing studio for Hermes Agent.</p>
 
-Cutroom turns a local recording into a reviewable edit: word-timed transcript cuts and filler review, silence removal, face/gaze/mouth review, person segmentation for graphics behind the subject, three source-quoted hook options with a storyboard, a preview render, a human-approved final export, a cover and automated quality checks. Media and models stay on your machine, and source files are never overwritten.
+Cutroom turns a local recording into a reviewable edit: word-timed transcript cuts and filler review, silence removal, explainer layouts for vertical videos, bleeped words and hidden parts of the picture, face/gaze/mouth review, person segmentation for graphics behind the subject, three source-quoted hook options with a storyboard, a preview render, a human-approved final export, a cover and automated quality checks. Media and models stay on your machine, and source files are never overwritten.
 
 It ships three surfaces:
 
@@ -31,9 +31,17 @@ Start from a file on your computer, or record one with OBS and edit it straight 
 
 <img src="docs/screenshots/style.png" alt="YouTube Shorts with face-tracked framing and pop-in captions" width="900">
 
-**Review, then approve.** Cutroom renders a preview and checks it: frame, timing, loudness, captions, safe zone and framing. A problem says what is wrong, where, and how to fix it. Only a person can approve, and any later change needs a new approval.
+**Explainer layouts for Shorts, Reels and TikTok.** Split explainer puts a headline at the top, a card or picture in the middle and you in a rounded frame below. Pick a headline from your own words, then a card (title, number, quote, bar chart, app row, terminal, sound wave) or a local picture or screen recording. Select words in Edit to change the picture while you talk about it. The player shows the layout before anything is rendered.
 
-<img src="docs/screenshots/review.png" alt="Preview with automatic checks and the approval box" width="900">
+<img src="docs/screenshots/layout.png" alt="Split explainer with a headline, a number card and the speaker below" width="900">
+
+**Bleep words, hide parts of the picture.** Select words, then Bleep or Mute; bleeped words also leave the captions and subtitle files. Hide area draws a solid box, blur or pixelate on the frame you are looking at, for the time of the selected words. Turn on Follow movement and the box follows what it covers; when tracking is unsure, the whole picture is covered for that time and Review says where. A strip in More tools shows every bleep, hidden area and picture in time, and you drag them to whole words.
+
+<img src="docs/screenshots/hide.png" alt="A logo hidden with a solid box, a bleeped word and the time strip" width="900">
+
+**Review, then approve.** Cutroom renders a preview and checks it: frame, timing, loudness, captions, safe zone and framing, and for layouts the headline and where your face sits. A problem says what is wrong, where, and how to fix it. Long previews start playing on their first pieces. Only a person can approve, and any later change needs a new approval.
+
+<img src="docs/screenshots/review.png" alt="Rendered split-explainer preview with layout checks and the approval box" width="900">
 
 **Export and deliver.** The final is made from exactly the approved version. Download the files, make a local delivery package, or send them to a Google Drive folder.
 
@@ -130,6 +138,19 @@ hermes plugins validate /absolute/path/hermes-cutroom --install-deps
 ```
 
 For local development, link this directory as `<active-HERMES_HOME>/plugins/cutroom`, then explicitly enable `cutroom` using `hermes plugins enable cutroom`. Installing/enabling modifies the active profile; this checkout does not do that automatically.
+
+Hermes Desktop keeps the Studio pane of a newly found package off until you turn it on. If Cutroom is missing from the sidebar after enabling it from the terminal, open Capabilities → Plugins and switch Cutroom on there (that switch turns on both the chat tools and the Studio pane).
+
+### Updating the plugin
+
+`hermes plugins install --force` replaces the whole plugin directory, including the `.venv` that holds the optional speech and vision packages. After an update, set it up again from the plugin directory (`<active-HERMES_HOME>/plugins/cutroom`):
+
+```bash
+uv venv --python 3.12
+uv pip install --python .venv/Scripts/python.exe -e ".[speech,vision]"
+```
+
+Use `.venv/bin/python` on Linux/macOS. Without it, transcription, face analysis and Follow movement for hidden areas stop with a message naming the missing package; plain cuts, captions and exports keep working. `cutroom doctor` lists which optional packages the plugin's Python can load.
 
 By default chat gets three tools:
 

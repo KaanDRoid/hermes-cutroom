@@ -416,6 +416,51 @@ def post_file(platform, check, *, cover_line, extra_lines=()):
     return "\n".join(lines) + "\n"
 
 
+_ORIGIN_LABELS = {"own": "Your own picture", "stock": "Stock picture", "ai": "Made with AI"}
+
+
+def _source_time(seconds):
+    return f"{int(seconds // 60)}:{seconds % 60:04.1f}"
+
+
+def panel_sources(layout):
+    """Each picture or video file shown in the top panel, with where it comes from; and whether cards are drawn."""
+    if not layout or layout.get("layout", "full") == "full":
+        return [], False
+    shown = ([(None, layout["panel"])] if layout.get("panel") else []) + [((entry["start"], entry["end"]), entry["item"]) for entry in layout.get("pictures", [])]
+    entries, cards = [], False
+    for when, item in shown:
+        if item["kind"] == "card":
+            cards = True
+            continue
+        origin = item.get("origin") or {"kind": "unknown", "credit": "", "url": "", "license": ""}
+        entries.append({"name": item["name"], "sha256": item["sha256"], "media": item["media"], "shown": "whole video" if when is None else [when[0], when[1]], "origin": dict(origin)})
+    return entries, cards
+
+
+def sources_file(entries, cards):
+    lines = ["Where the pictures in this video come from", "Times are in the original recording.", ""]
+    for entry in entries:
+        shown = "the whole video" if entry["shown"] == "whole video" else f"{_source_time(entry['shown'][0])}–{_source_time(entry['shown'][1])}"
+        origin = entry["origin"]
+        if origin["kind"] == "unknown":
+            about = "Not said where it comes from. Check that you may use it before posting."
+        else:
+            about = " · ".join(part for part in (_ORIGIN_LABELS[origin["kind"]], origin["credit"], origin["license"], origin["url"]) if part)
+        lines += [f"{entry['name']} ({entry['media']}, shown {shown})", f"  {about}"]
+        if origin["kind"] == "ai":
+            lines.append("  Some platforms ask you to label realistic AI-made pictures when you upload.")
+        lines.append("")
+    if cards:
+        lines.append("Cards are drawn by Cutroom from your own text.")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def credit_line(entries):
+    credits = list(dict.fromkeys(e["origin"]["credit"] for e in entries if e["origin"]["kind"] in ("stock", "ai") and e["origin"]["credit"]))
+    return f"Credits you may add: {'; '.join(credits)}" if credits else None
+
+
 def readme_file(label, files, project_name, linked=False):
     lines = [
         f"Cutroom delivery package for {label}",

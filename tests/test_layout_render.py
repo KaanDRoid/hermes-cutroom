@@ -1,0 +1,363 @@
+"""Preview/Final renders draw the split explainer layout (pixel checks on real FFmpeg output)."""
+
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from cutroom import layouts
+from cutroom import postproduction as pp
+
+BLUE = (32, 96, 192)
+
+
+def ffmpeg(*args):
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *args], check=True, timeout=120)
+
+
+def frame(path, at, width=1080, height=1920):
+    data = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", str(at), "-i", str(path), "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        check=True, capture_output=True, timeout=60,
+    ).stdout
+    assert len(data) == width * height * 3, len(data)
+    return lambda x, y: tuple(data[(y * width + x) * 3:(y * width + x) * 3 + 3])
+
+
+def near(colour, expected, slack=18):
+    return all(abs(a - b) <= slack for a, b in zip(colour, expected))
+
+
+def hex_rgb(value):
+    return tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+class SplitRenderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="layout-render-")
+        cls.root = Path(cls.temp.name)
+        cls.source = cls.root / "talk.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=3",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cls.source),
+        )
+        cls.picture = cls.root / "diagram.png"
+        ffmpeg("-f", "lavfi", "-i", "color=c=0xE02020:size=400x300", "-frames:v", "1", str(cls.picture))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def render(self, layout, segments, name):
+        output = self.root / name
+        result = pp.export_video(
+            self.source,
+            segments,
+            output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300, "layout": layouts.normalize_layout(layout, duration=3)},
+        )
+        return output, result
+
+    def test_split_frame_has_paper_card_speaker_and_rounded_corners(self):
+        output, result = self.render(
+            {
+                "layout": "split",
+                "headline": {"l1": "CLIMATE CHANGE IS", "l2": "NOT COMPLICATED", "boxed": [1]},
+                "panel": {"kind": "card", "type": "title", "text": "Hello"},
+                "pictures": [{"start": 2.0, "end": 2.5, "item": {"kind": "card", "type": "number", "text": "15", "detail": "minutes"}}],
+            },
+            [{"start": 0, "end": 1.0}, {"start": 1.5, "end": 3.0}],
+            "split.mp4",
+        )
+        self.assertEqual((result["width"], result["height"]), (1080, 1920))
+        self.assertIn("layout", result["effects"])
+        self.assertEqual(result["layout"]["layout"], "split")
+        geo = layouts.geometry({"layout": "split"})
+        panel, speaker = geo["panel"], geo["speaker"]
+        pixel = frame(output, 0.5)
+        paper = hex_rgb(layouts.PALETTE["paper_paper"])
+        self.assertTrue(near(pixel(20, 20), paper), pixel(20, 20))
+        self.assertTrue(near(pixel(panel["x"] + 30, panel["y"] + 30), (255, 255, 255)), pixel(panel["x"] + 30, panel["y"] + 30))
+        self.assertTrue(near(pixel(540, speaker["y"] + speaker["h"] // 2), BLUE, 24), pixel(540, speaker["y"] + speaker["h"] // 2))
+        self.assertTrue(near(pixel(speaker["x"] + 2, speaker["y"] + 2), paper), "Speaker card corners are rounded")
+        ink = hex_rgb(layouts.PALETTE["paper_ink"])
+        self.assertTrue(any(near(pixel(x, y), ink, 40) for y in range(300, 420, 3) for x in range(100, 980, 3)), "Headline line 1 is drawn")
+        box = hex_rgb(layouts.PALETTE["box"])
+        self.assertTrue(any(near(pixel(x, y), box, 30) for y in range(380, 520, 3) for x in range(100, 980, 3)), "A headline word sits in the yellow box")
+        # The boxed word must end above the top panel, not run into it.
+        self.assertFalse(any(near(pixel(x, y), box, 40) for y in range(panel["y"] - 10, panel["y"] + 12, 2) for x in range(100, 980, 3)), "Headline box clears the panel")
+        # Source 2.0-2.5 s is program 1.5-2.0 s after the cut: the number card replaces the title.
+        later = frame(output, 1.75)
+        centre = (540, panel["y"] + panel["h"] // 2 - 40)
+        self.assertTrue(any(near(later(x, y), box, 30) for y in range(centre[1] - 120, centre[1] + 40, 4) for x in range(300, 780, 4)), "Timed number card shows")
+        self.assertFalse(any(near(pixel(x, y), box, 30) for y in range(centre[1] - 120, centre[1] + 40, 4) for x in range(300, 780, 4)), "Not before its words")
+
+    def test_a_long_headline_stays_clear_of_the_shorts_buttons(self):
+        output, _ = self.render(
+            {"layout": "split", "headline": {"l1": "CLIMATE CHANGE IS REALLY NOT", "l2": "THAT COMPLICATED AT ALL", "boxed": [1]}, "panel": {"kind": "card", "type": "title", "text": "Hi"}},
+            [{"start": 0, "end": 1.0}],
+            "long-headline.mp4",
+        )
+        pixel = frame(output, 0.5)
+        ink, box = hex_rgb(layouts.PALETTE["paper_ink"]), hex_rgb(layouts.PALETTE["box"])
+        right = round((1 - 0.18) * 1080)  # YouTube Shorts keeps the right 18 % for its buttons.
+        drawn = [(x, y) for y in range(290, 515, 2) for x in range(60, 1075, 2) if near(pixel(x, y), ink, 40) or near(pixel(x, y), box, 30)]
+        self.assertTrue(drawn, "The headline is drawn")
+        self.assertLess(max(x for x, _ in drawn), right, "No headline pixel inside the button column")
+        self.assertGreater(min(x for x, _ in drawn), 54)
+        # Still centred on the frame, like the panel below it.
+        self.assertLess(abs((max(x for x, _ in drawn) + min(x for x, _ in drawn)) / 2 - 540), 12)
+
+    def test_a_sound_wave_card_follows_the_voice_after_cuts(self):
+        # Silent first second, a tone in the second. After the cut, program 0.8 s is source 1.2 s (tone),
+        # while source 0.8 s itself is silent: a wave drawn from the uncut sound would be flat there.
+        source = self.root / "half-silent.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2,volume=enable='lt(t,1)':volume=0",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "wave.mp4"
+        result = pp.export_video(source, [{"start": 0.0, "end": 0.6}, {"start": 1.0, "end": 2.0}], output, settings={
+            "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+            "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": "Episode 12"}}, duration=2)})
+        self.assertEqual(result["layout"]["waves"], 1)
+        panel = layouts.geometry({"layout": "split"})["panel"]
+        ink = hex_rgb(layouts.PALETTE["paper_ink"])
+        top, bottom = panel["y"] + round(panel["h"] * 0.3), panel["y"] + panel["h"] - 40
+
+        def wave_rows(at):
+            pixel = frame(output, at)
+            # Under the playhead in the middle: the moment being heard (the window also shows the seconds around it).
+            return sum(any(near(pixel(x, y), ink, 50) for x in range(500, 535, 3)) for y in range(top, bottom, 2))
+
+        loud, quiet = wave_rows(0.8), wave_rows(0.3)
+        self.assertGreater(loud, 25, "The wave is tall while the voice plays")
+        self.assertLess(quiet, 6, "Flat during silence")
+        pixel = frame(output, 0.8)
+        self.assertTrue(near(pixel(panel["x"] + 30, panel["y"] + panel["h"] // 2), hex_rgb(layouts.PALETTE["card"])), "The card background shows")
+
+    def test_a_sound_wave_card_shows_the_voice_not_the_music(self):
+        from cutroom import audio
+
+        source = self.root / "half-silent-music.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2,volume=enable='lt(t,1)':volume=0",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        music = self.root / "loud-bed.wav"
+        ffmpeg("-f", "lavfi", "-i", "sine=frequency=3000:sample_rate=48000:duration=3", str(music))
+        output = self.root / "wave-music.mp4"
+        pp.export_video(source, [{"start": 0.0, "end": 2.0}], output, settings={
+            "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+            "audio": {"music": audio.normalize_music({"path": str(music), "volume_db": 0, "duck": False})},
+            "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": ""}}, duration=2)})
+        panel = layouts.geometry({"layout": "split"})["panel"]
+        ink = hex_rgb(layouts.PALETTE["paper_ink"])
+        top, bottom = panel["y"] + round(panel["h"] * 0.3), panel["y"] + panel["h"] - 40
+
+        def wave_rows(at):
+            pixel = frame(output, at)
+            # Under the playhead in the middle: the moment being heard (the window also shows the seconds around it).
+            return sum(any(near(pixel(x, y), ink, 50) for x in range(500, 535, 3)) for y in range(top, bottom, 2))
+
+        self.assertLess(wave_rows(0.4), 6, "Music alone does not move the wave")
+        self.assertGreater(wave_rows(1.5), 25)
+        mixed = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-ss", "0.2", "-t", "0.5", "-i", str(output), "-af", "volumedetect", "-f", "null", "-"],
+                               capture_output=True, text=True, timeout=60).stderr
+        mean = float(mixed.split("mean_volume:")[1].split("dB")[0])
+        self.assertGreater(mean, -40, "The music is still in the sound while the voice is silent")
+
+    def test_a_sound_wave_card_needs_sound(self):
+        silent = self.root / "no-audio.mp4"
+        ffmpeg("-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(silent))
+        with self.assertRaisesRegex(ValueError, "no sound"):
+            pp.export_video(silent, [{"start": 0, "end": 1}], self.root / "nope.mp4", settings={
+                "platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 120,
+                "layout": layouts.normalize_layout({"layout": "split", "panel": {"kind": "card", "type": "wave", "text": ""}}, duration=1)})
+
+    def test_a_local_picture_fills_the_top_panel(self):
+        output, _ = self.render({"layout": "split", "background": "dark", "panel": {"kind": "file", "path": str(self.picture)}}, [{"start": 0, "end": 2}], "picture.mp4")
+        geo = layouts.geometry({"layout": "split"})["panel"]
+        pixel = frame(output, 1.0)
+        self.assertTrue(near(pixel(540, geo["y"] + geo["h"] // 2), (224, 32, 32), 30), pixel(540, geo["y"] + geo["h"] // 2))
+        self.assertTrue(near(pixel(20, 20), hex_rgb(layouts.PALETTE["dark_paper"])), pixel(20, 20))
+
+    def test_picture_over_you_puts_the_card_on_the_full_frame_speaker(self):
+        output, result = self.render({"layout": "over", "panel": {"kind": "card", "type": "quote", "text": "Short"}}, [{"start": 0, "end": 2}], "over.mp4")
+        panel = layouts.geometry({"layout": "over"})["panel"]
+        pixel = frame(output, 1.0)
+        self.assertTrue(near(pixel(panel["x"] + 30, panel["y"] + 30), (255, 255, 255)), pixel(panel["x"] + 30, panel["y"] + 30))
+        for point in ((20, 20), (540, 1700), (1060, 1900)):
+            self.assertTrue(near(pixel(*point), BLUE, 24), (point, pixel(*point)))
+        self.assertEqual(result["layout"]["layout"], "over")
+
+    def test_a_panel_file_changed_after_it_was_chosen_is_refused(self):
+        picture = self.root / "changing.png"
+        ffmpeg("-f", "lavfi", "-i", "color=c=0x20E020:size=200x100", "-frames:v", "1", str(picture))
+        layout = layouts.normalize_layout({"layout": "split", "panel": {"kind": "file", "path": str(picture)}}, duration=3)
+        ffmpeg("-f", "lavfi", "-i", "color=c=0x2020E0:size=200x100", "-frames:v", "1", str(picture))
+        with self.assertRaisesRegex(ValueError, "changed"):
+            pp.export_video(self.source, [{"start": 0, "end": 1}], self.root / "changed.mp4",
+                            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "layout": layout})
+
+    def test_speaker_crop_keeps_the_face_inside_without_empty_edges(self):
+        crop = layouts.speaker_crop(1920, 1080, 1032, 726, face=(0.632, 0.33))
+        self.assertLessEqual(crop["x"] + crop["w"], 1920)
+        self.assertLessEqual(crop["y"] + crop["h"], 1080)
+        self.assertGreaterEqual(min(crop["x"], crop["y"]), 0)
+        self.assertAlmostEqual(crop["w"] / crop["h"], 1032 / 726, delta=0.02)
+        self.assertTrue(crop["x"] < 0.632 * 1920 < crop["x"] + crop["w"])
+        self.assertEqual(layouts.program_times([(0, 1), (1.5, 3)], 2.0, 2.5), [(1.5, 2.0)])
+        self.assertEqual(layouts.program_times([(0, 1), (1.5, 3)], 0.5, 2.0), [(0.5, 1.0), (1.0, 1.5)])
+
+
+class StudioPreviewTests(unittest.TestCase):
+    """Studio job path: settings.layout -> preview job worker -> rendered file."""
+
+    def test_a_preview_job_draws_the_saved_layout(self):
+        import time
+
+        from cutroom.studio import _CHILD_PROCESSES, Studio
+
+        temporary = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="layout-job-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        source, picture = root / "talk.mp4", root / "diagram.png"
+        ffmpeg("-f", "lavfi", "-i", "color=c=0x2060C0:size=640x360:rate=30:duration=3", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+               "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source))
+        ffmpeg("-f", "lavfi", "-i", "color=c=0xE02020:size=400x300", "-frames:v", "1", str(picture))
+        studio = Studio(root / "workspace")
+        project = studio.create(source)
+        project = studio.update(project["id"], {"settings": {"platform": "youtube_shorts", "layout": {"layout": "split", "panel": {"kind": "file", "path": str(picture)}}}}, project["revision"])
+        job = studio.submit(project["id"], "preview", {})
+        deadline = time.monotonic() + 300
+        while studio.job(job["id"])["status"] not in {"completed", "failed", "cancelled"}:
+            self.assertLess(time.monotonic(), deadline, "Preview job did not finish")
+            time.sleep(0.1)
+        process = _CHILD_PROCESSES.pop(job["id"], None)
+        if process is not None:
+            process.wait(timeout=60)
+        finished = studio.job(job["id"])
+        self.assertEqual(finished["status"], "completed", finished.get("error"))
+        output = studio.get(project["id"])["artifacts"]["preview"]
+        geo = layouts.geometry({"layout": "split"})["panel"]
+        pixel = frame(output, 1.0)
+        self.assertTrue(near(pixel(540, geo["y"] + geo["h"] // 2), (224, 32, 32), 30), pixel(540, geo["y"] + geo["h"] // 2))
+        self.assertTrue(near(pixel(20, 20), hex_rgb(layouts.PALETTE["paper_paper"])), pixel(20, 20))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+@unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+class SplitPacingTests(unittest.TestCase):
+    """Punch-ins and transitions work on the speaker card; the top panel stays as it is."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="layout-pacing-")
+        cls.root = Path(cls.temp.name)
+        cls.source = cls.root / "square.mp4"
+        # Black with a white square in the middle: its size on screen shows the zoom.
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=3,drawbox=x=280:y=140:w=80:h=80:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(cls.source),
+        )
+        cls.layout = layouts.normalize_layout(
+            {"layout": "split", "speaker": "wide", "background": "paper", "divider": 1170, "hold": "whole",
+             "panel": {"kind": "card", "type": "title", "text": "Basics"}}, duration=3)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def render(self, name, pacing):
+        output = self.root / name
+        result = pp.export_video(
+            self.source, [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 3.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300,
+                      "normalize_audio": False, "layout": self.layout, "pacing": pacing},
+        )
+        return output, result
+
+    def white(self, pixel, box):
+        return sum(1 for y in range(box["y"] + 4, box["y"] + box["h"] - 4, 4)
+                   for x in range(box["x"] + 4, box["x"] + box["w"] - 4, 4) if min(pixel(x, y)) > 200)
+
+    def test_punch_in_zooms_the_speaker_card_and_leaves_the_panel(self):
+        output, result = self.render("punch.mp4", {"punch_in": "alternate", "punch_in_zoom": 1.3, "max_upscale": 4.0})
+        self.assertEqual(result["pacing"]["cuts"], [30])
+        geo = layouts.geometry(self.layout)
+        first, second = frame(output, 0.5), frame(output, 1.5)
+        ratio = self.white(second, geo["speaker"]) / self.white(first, geo["speaker"])
+        self.assertAlmostEqual(ratio, 1.3 ** 2, delta=0.25)
+        panel = geo["panel"]
+        for x, y in ((panel["x"] + 30, panel["y"] + 30), (panel["x"] + panel["w"] // 2, panel["y"] + 40)):
+            self.assertTrue(near(first(x, y), second(x, y), 6), "The panel does not zoom")
+
+    def test_crossfade_keeps_length_and_fades_only_the_speaker(self):
+        output, result = self.render("cross.mp4", {"transition": "crossfade", "transition_duration": 0.3})
+        info = pp._probe(output)
+        self.assertAlmostEqual(info["duration"], 2.0, delta=0.05)
+        geo = layouts.geometry(self.layout)
+        panel = geo["panel"]
+        before, during = frame(output, 0.2), frame(output, 1.0)
+        self.assertTrue(near(before(panel["x"] + 30, panel["y"] + 30), during(panel["x"] + 30, panel["y"] + 30), 6))
+
+    def test_punch_in_zooms_toward_the_face_the_card_frames(self):
+        # The square sits right of centre where the card's face point is; zooming on the frame's
+        # centre would slide it sideways, zooming on the face keeps it in place.
+        source = self.root / "right.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=3,drawbox=x=440:y=120:w=60:h=60:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "face-punch.mp4"
+        pp.export_video(
+            source, [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 3.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300, "normalize_audio": False,
+                      "layout": self.layout, "layout_face": [0.73, 0.42], "pacing": {"punch_in": "alternate", "punch_in_zoom": 1.3, "max_upscale": 4.0}},
+        )
+        box = layouts.geometry(self.layout)["speaker"]
+
+        def centre(pixel):
+            points = [(x, y) for y in range(box["y"] + 4, box["y"] + box["h"] - 4, 3)
+                      for x in range(box["x"] + 4, box["x"] + box["w"] - 4, 3) if min(pixel(x, y)) > 200]
+            return sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points), len(points)
+
+        x0, y0, n0 = centre(frame(output, 0.5))
+        x1, y1, n1 = centre(frame(output, 1.5))
+        self.assertAlmostEqual(n1 / n0, 1.3 ** 2, delta=0.3, msg="Zoomed, and the square is not cut off")
+        self.assertLess(abs(x1 - x0), 25, (x0, x1))
+        self.assertLess(abs(y1 - y0), 25, (y0, y1))
+
+    def test_push_in_slowly_grows_the_speaker_card_and_leaves_the_panel(self):
+        # Push-ins only run on stretches of at least four seconds.
+        source = self.root / "long.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=5,drawbox=x=280:y=140:w=80:h=80:color=white:t=fill",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=5",
+            "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        )
+        output = self.root / "push.mp4"
+        pp.export_video(
+            source, [{"start": 0.0, "end": 5.0}], output,
+            settings={"platform": "youtube_shorts", "preset": "preview", "aspect": "portrait", "timeout": 300, "normalize_audio": False,
+                      "layout": self.layout, "pacing": {"push_in": True, "push_in_zoom": 1.15, "max_upscale": 4.0}},
+        )
+        geo = layouts.geometry(self.layout)
+        early, late = frame(output, 0.05), frame(output, 4.9)
+        ratio = self.white(late, geo["speaker"]) / self.white(early, geo["speaker"])
+        self.assertGreater(ratio, 1.1, "The square grows during the range")
+        panel = geo["panel"]
+        self.assertTrue(near(early(panel["x"] + 30, panel["y"] + 30), late(panel["x"] + 30, panel["y"] + 30), 6))

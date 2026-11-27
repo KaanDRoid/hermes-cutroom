@@ -1,0 +1,209 @@
+"""Follow a hidden area's contents from frame to frame (template matching).
+
+Frames come from FFmpeg with the same input handling as the render: the same timeline (the
+container's earliest stream starts at 0) and the same automatic rotation, so a box drawn on the
+picture as shown lands on the same pixels the render covers.
+
+The box keeps its size. It is learned on the frame it was drawn on and followed forwards and
+backwards from there. A frame counts as followed only when the same picture has just moved: it
+matches the last followed frame almost exactly, at the same size (a 10 % smaller or larger copy
+matches clearly worse), and no other place in the picture matches about as well. Once a look-alike has been seen, the
+rest of the range is not trusted either: a cut could swap the two without any visible jump.
+Anything else (it grew,
+shrank, changed shape, was covered, cut away, left, or has a look-alike) leaves the box where it
+last was and reports the time as lost. A face that talks and turns a little still counts as moved:
+it is compared with the frame before, not with the drawn one. The render then covers the whole picture
+for that time, so a tracking miss hides too much rather than too little.
+"""
+
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from . import media
+
+ANALYSIS_WIDTH = 480  # Frames are searched at this width at most; positions are fractions.
+CONTINUITY = 0.9  # Least match to the last followed frame: only a move, not a change of shape.
+SAME_SIZE = 0.1  # The same-size match must beat 10 % smaller and larger copies by this much.
+AMBIGUOUS = 0.12  # A second place this close to the best means look-alikes: not trusted.
+PLAIN = 4.0  # Below this grey-level spread a box holds nothing to follow.
+SEARCH = 1.0  # Search this many box sizes around the last position.
+MAX_SECONDS = 30.0  # Longest stretch one box follows (see redactions.normalize).
+MAX_BYTES = 320 * 1024 * 1024  # Decoded analysis frames held for one box.
+TIMEOUT = 300
+_PTS = re.compile(r"pts_time:\s*(-?[0-9.]+(?:e-?[0-9]+)?)")
+
+
+def _dependencies():
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as error:  # pragma: no cover - depends on the install
+        raise ValueError(
+            f"Following a hidden area needs the vision extra, which is not installed for {sys.executable}. "
+            "Install 'hermes-cutroom[vision]' there. If you just updated the plugin: "
+            "'hermes plugins install --force' removes the plugin's .venv; "
+            "see 'Updating the plugin' in the README to set it up again."
+        ) from error
+    return cv2, np
+
+
+def _shown_size(path):
+    """(width, height, frames per second) of the first video stream as the render sees it."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height,avg_frame_rate,r_frame_rate:stream_side_data=rotation", "-of", "json", str(path)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, env=media.child_env(python=False), check=True,
+    )
+    streams = json.loads(out.stdout).get("streams") or []
+    if not streams:
+        raise ValueError("The source has no picture to follow")
+    stream = streams[0]
+    width, height = int(stream["width"]), int(stream["height"])
+    turns = [abs(float(item.get("rotation", 0))) % 180 for item in stream.get("side_data_list", []) if "rotation" in item]
+    if turns and abs(turns[0] - 90) < 1:
+        width, height = height, width
+    rate = 0.0
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            top, bottom = (float(part) for part in str(stream.get(key, "0/0")).split("/"))
+            rate = top / bottom if bottom else 0.0
+        except ValueError:
+            rate = 0.0
+        if rate > 0:
+            break
+    return width, height, rate or 30.0
+
+
+def _frames(path, start, end):
+    """Grey analysis frames over [start, end] on the render timeline, with their times."""
+    width, height, rate = _shown_size(path)
+    gw = max(16, min(ANALYSIS_WIDTH, width) // 2 * 2)
+    gh = max(16, round(height * gw / width / 2) * 2)
+    if (end - start + 1) * rate * gw * gh > MAX_BYTES:
+        raise ValueError("This hidden area is too long or the video's frame rate too high to follow; split the range")
+    seek = max(0.0, start - 2.0)
+    with tempfile.TemporaryDirectory(dir=os.environ.get("TMPDIR"), prefix="cutroom-follow-") as folder:
+        log = Path(folder) / "frames.txt"
+        with open(log, "wb") as errors:
+            # -copyts -start_at_zero keeps the render's timeline after seeking; trim cuts exactly.
+            run = subprocess.run(
+                ["ffmpeg", "-nostdin", "-hide_banner", "-v", "info", "-protocol_whitelist", "file",
+                 "-copyts", "-start_at_zero", "-ss", f"{seek:.3f}", "-i", str(path), "-map", "0:v:0", "-an", "-sn", "-dn",
+                 "-vf", f"trim=start={start:.6f}:end={end + 1e-3:.6f},scale={gw}:{gh}:flags=area,format=gray,showinfo",
+                 "-fps_mode", "passthrough", "-f", "rawvideo", "-"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errors, timeout=TIMEOUT,
+                env=media.child_env(python=False), check=False,
+            )
+        text = log.read_text(encoding="utf-8", errors="replace")
+    if run.returncode != 0:
+        raise ValueError("The source video could not be read for following a hidden area")
+    times = [float(match.group(1)) for line in text.splitlines() if "Parsed_showinfo" in line for match in [_PTS.search(line)] if match]
+    size = gw * gh
+    if len(run.stdout) != size * len(times):
+        raise ValueError("The frames and their times do not line up; the hidden area cannot be followed")
+    if any(not math.isfinite(t) for t in times) or any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError("The source's frame times are not in order; the hidden area cannot be followed")
+    return times, run.stdout, (gw, gh), rate
+
+
+def _match(cv2, np, frame, position, size, latest):
+    """(match to the last followed frame, best other place anywhere in the picture, position).
+
+    The position is searched for near the last one, but look-alikes are looked for in the whole
+    picture: after a cut the target can be far away while a twin lands where it was.
+    """
+    w, h = size
+    gh, gw = frame.shape
+    reach = round(max(w, h) * SEARCH)
+    x0, y0 = max(0, position[0] - reach), max(0, position[1] - reach)
+    x1, y1 = min(gw, position[0] + w + reach), min(gh, position[1] + h + reach)
+    near = np.nan_to_num(cv2.matchTemplate(frame[y0:y1, x0:x1], latest, cv2.TM_CCOEFF_NORMED), nan=-1.0, posinf=-1.0, neginf=-1.0)
+    _, best, _, (bx, by) = cv2.minMaxLoc(near)
+    fx, fy = x0 + bx, y0 + by
+    # Look-alikes half outside the picture count too: the edges are repeated outwards.
+    pw, ph = w // 2, h // 2
+    padded = cv2.copyMakeBorder(frame, ph, ph, pw, pw, cv2.BORDER_REPLICATE)
+    others = np.nan_to_num(cv2.matchTemplate(padded, latest, cv2.TM_CCOEFF_NORMED), nan=-1.0, posinf=-1.0, neginf=-1.0)
+    px, py = fx + pw, fy + ph
+    others[max(0, py - h // 2) : py + h // 2 + 1, max(0, px - w // 2) : px + w // 2 + 1] = -1.0
+    second = float(others.max()) if others.size else -1.0
+    return float(best), second, (fx, fy)
+
+
+def _same_size(cv2, np, frame, found, size, latest):
+    """True when the picture at ``found`` matches ``latest`` best at its own size."""
+    w, h = size
+    gh, gw = frame.shape
+    cx, cy = found[0] + w // 2, found[1] + h // 2
+    results = {}
+    for scale in (0.9, 1.0, 1.1):
+        sw, sh = max(4, round(w * scale)), max(4, round(h * scale))
+        x0, y0 = cx - sw // 2 - 6, cy - sh // 2 - 6
+        x1, y1 = cx + sw // 2 + 7, cy + sh // 2 + 7
+        if x0 < 0 or y0 < 0 or x1 > gw or y1 > gh:
+            return False  # Too close to the edge to tell: not trusted.
+        pattern = cv2.resize(latest, (sw, sh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+        result = cv2.matchTemplate(frame[y0:y1, x0:x1], pattern, cv2.TM_CCOEFF_NORMED)
+        results[scale] = float(np.nan_to_num(result, nan=-1.0, posinf=-1.0, neginf=-1.0).max())
+    return results[1.0] - max(results[0.9], results[1.1]) >= SAME_SIZE
+
+
+def follow_box(source, box, start, end, at=None):
+    """Box positions over [start, end] in source seconds (the render's timeline).
+
+    ``at`` is when the box was drawn (default ``start``). Returns {"times", "x", "y", "lost"}: x and
+    y are fractions of the picture as shown, one sample per frame; ``lost`` lists [start, end]
+    stretches where the box could not be trusted.
+    """
+    cv2, np = _dependencies()
+    if not (0 <= start < end) or end - start > MAX_SECONDS + 1e-6:
+        raise ValueError(f"A followed hidden area lasts at most {MAX_SECONDS:g} seconds")
+    times, data, (gw, gh), rate = _frames(media._local_path(source), start, end)
+    if not times:
+        raise ValueError("No frames were found for the hidden area's time")
+    frames = np.frombuffer(data, dtype=np.uint8).reshape(len(times), gh, gw)
+    at = start if at is None else min(max(at, start), end)
+    seed = min(range(len(times)), key=lambda i: abs(times[i] - at))
+    w = max(4, min(gw, round(box["w"] * gw)))
+    h = max(4, min(gh, round(box["h"] * gh)))
+    x = min(gw - w, max(0, round(box["x"] * gw)))
+    y = min(gh - h, max(0, round(box["y"] * gh)))
+    template = frames[seed][y : y + h, x : x + w].copy()
+    positions = [(x, y)] * len(times)
+    trusted = [False] * len(times)
+    if float(template.std()) >= PLAIN:
+        trusted[seed] = True
+        for step in (1, -1):
+            position, latest = (x, y), template
+            index = seed + step
+            twins = False
+            while 0 <= index < len(times):
+                score, second, found = _match(cv2, np, frames[index], position, (w, h), latest)
+                # Once a look-alike has been seen, a cut could swap the two unnoticed: trust stops for good.
+                twins = twins or (score >= CONTINUITY and second >= score - AMBIGUOUS)
+                if (not twins and score >= CONTINUITY
+                        and _same_size(cv2, np, frames[index], found, (w, h), latest)):
+                    position = found
+                    latest = frames[index][position[1] : position[1] + h, position[0] : position[0] + w].copy()
+                    trusted[index] = True
+                positions[index] = position
+                index += step
+    lost, run = [], None
+    for index, good in enumerate(trusted):
+        if not good and run is None:
+            run = index
+        if good and run is not None:
+            lost.append([round(start if run == 0 else times[run], 3), round(times[index], 3)])
+            run = None
+    if run is not None:
+        lost.append([round(start if run == 0 else times[run], 3), round(end, 3)])
+    elif end - times[-1] > 2.5 / rate:
+        # The picture stopped before the range did (or reading stopped early): cover the rest.
+        lost.append([round(times[-1], 3), round(end, 3)])
+    return {"times": times, "x": [p[0] / gw for p in positions], "y": [p[1] / gh for p in positions], "lost": lost}

@@ -528,6 +528,36 @@ def _string(description):
 
 def definitions():
     """Return the Hermes tool definitions without touching Studio."""
+    layout_item = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["kind"],
+        "description": "card: drawn by Cutroom (title, number, quote, bars as 'A: 30, B: 55', "
+        "apps as comma-separated names, terminal as comma-separated lines, wave as a moving "
+        "picture of the voice with an optional title, for audio-only talks); file: a local "
+        "picture or video at an absolute path",
+        "properties": {
+            "kind": {"type": "string", "enum": ["card", "file"]},
+            "type": {"type": "string", "enum": ["title", "number", "quote", "bars", "apps", "terminal", "wave"]},
+            "text": {"type": "string", "maxLength": 400},
+            "detail": {"type": "string", "maxLength": 120},
+            "path": {"type": "string", "maxLength": 4096},
+            "origin": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["kind"],
+                "description": "Files only: where the picture comes from, as the person says "
+                "(never guess). own, stock (with credit, link and license) or ai (credit: the tool). "
+                "It is listed in the export package's sources.txt.",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["own", "stock", "ai"]},
+                    "credit": {"type": "string", "maxLength": 200},
+                    "url": {"type": "string", "maxLength": 500},
+                    "license": {"type": "string", "maxLength": 100},
+                },
+            },
+        },
+    }
     changes = {
         "type": "object",
         "additionalProperties": False,
@@ -659,6 +689,108 @@ def definitions():
                         "description": "One-word vertical position in the safe "
                         "area (0 top, 1 bottom); null restores the default 0.8, below "
                         "a talking head's face",
+                    },
+                    "redactions": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "Bleep or mute words and hide parts of the picture, in "
+                        "source seconds. Bleeped words are left out of burned captions "
+                        "and subtitle files. Offer this when the person names something "
+                        "to remove (a name, a swear word, an email or key on screen) and "
+                        "confirm the ranges first. A hidden box stays fixed unless follow is true. "
+                        "Following needs the vision extra. Watch the rendered preview for misses. "
+                        "cover is the safer choice "
+                        "for secrets; blur and pixelate can sometimes be undone. null "
+                        "removes all of them.",
+                        "properties": {
+                            "bleeps": {
+                                "type": "array",
+                                "maxItems": 200,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "mode": {"type": "string", "enum": ["bleep", "mute"]},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "ids": {"type": "array", "maxItems": 50, "items": {"type": "integer", "minimum": 0},
+                                                "description": "Transcript word ids covered by this bleep"},
+                                    },
+                                },
+                            },
+                            "hidden": {
+                                "type": "array",
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end", "box"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "style": {"type": "string", "enum": ["cover", "blur", "pixelate"]},
+                                        "follow": {"type": "boolean", "description": "Follow the contents of the box while rendering (at most 30 seconds, 10 boxes)"},
+                                        "at": {"type": "number", "minimum": 0, "description": "Source second of the frame the box was drawn on; following starts there"},
+                                        "box": {
+                                            "type": "object",
+                                            "additionalProperties": False,
+                                            "required": ["x", "y", "w", "h"],
+                                            "description": "Fractions of the source picture, 0 to 1, from the top-left corner",
+                                            "properties": {key: {"type": "number", "minimum": 0, "maximum": 1} for key in ("x", "y", "w", "h")},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    "layout": {
+                        "type": ["object", "null"],
+                        "additionalProperties": False,
+                        "description": "9:16 explainer layout (Shorts, Reels, TikTok). "
+                        "split: headline at the top, a panel with a card or a local "
+                        "picture/video, the speaker in a card below; over: a card on top "
+                        "of the speaker; full: the plain frame. Ask the person before "
+                        "changing it. Panel files are local absolute paths the person "
+                        "named; never search the web or fetch pictures. Times are source "
+                        "seconds of the words the picture belongs to. null removes it.",
+                        "properties": {
+                            "layout": {"type": "string", "enum": ["full", "split", "over"]},
+                            "background": {"type": "string", "enum": ["paper", "grid", "kraft", "dark"]},
+                            "speaker": {"type": "string", "enum": ["small", "wide", "full"]},
+                            "divider": {"type": "integer", "minimum": 1060, "maximum": 1420,
+                                        "description": "Top of the speaker card in 1920-pixel frame units, default 1170"},
+                            "hold": {"type": "string", "enum": ["whole", "opening"],
+                                     "description": "Headline for the whole video or the first 3 s"},
+                            "headline": {
+                                "type": ["object", "null"],
+                                "additionalProperties": False,
+                                "description": "Two short lines in capitals from the person's own words; boxed are word indexes of line 2 drawn in the yellow box",
+                                "properties": {
+                                    "l1": {"type": "string", "maxLength": 60},
+                                    "l2": {"type": "string", "maxLength": 60},
+                                    "boxed": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 0}},
+                                },
+                            },
+                            "panel": {**layout_item, "type": ["object", "null"]},
+                            "pictures": {
+                                "type": "array",
+                                "maxItems": 50,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["start", "end", "item"],
+                                    "properties": {
+                                        "start": {"type": "number", "minimum": 0},
+                                        "end": {"type": "number", "minimum": 0},
+                                        "said": {"type": "string", "maxLength": 300},
+                                        "item": layout_item,
+                                    },
+                                },
+                            },
+                        },
                     },
                 },
             },

@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+Explainer layouts for vertical videos.
+
+### Split explainer
+- New Layout section in Style: Full frame, Split explainer and Picture over you
+  (9:16 platforms). A headline at the top, a panel in the middle and the
+  speaker in a rounded card below, on paper, grid, kraft or dark backgrounds.
+- The panel shows a drawn card (title, number, quote, bar chart, app row,
+  terminal) or a local picture or screen recording. Select words in Edit and
+  choose Picture to change the panel while you say them.
+- Preview and Final draw the layout; captions move between the panel and the
+  speaker and stay inside the platform's safe zone. The player shows the same
+  layout before rendering.
+- Layouts are saved on the project, can be undone and can be set from chat.
+- Headline capitals follow the video's language (Turkish i becomes İ).
+- Each panel picture can say where it comes from (yours, a stock site or AI,
+  with credit, link and license); the export package lists them in
+  sources.txt and suggests the credits for the post text.
+- Sound wave card for the top panel: the voice after cuts and bleeps, drawn
+  in the render; useful for audio-only talks and podcasts.
+- Headlines shrink to stay clear of the platform's side buttons; Review asks
+  for a shorter headline when that makes it hard to read.
+- Punch-ins, push-ins and transitions work with the split layouts: the
+  speaker card zooms toward the face and fades between cuts while the panel
+  and headline stay still.
+
+### Bleep and hide
+- Select words in Edit, then Bleep (a 1 kHz tone) or Mute from the ⋯ menu;
+  "everywhere" bleeps every time a word is said. Bleeped words are left out
+  of burned captions and SRT/VTT files.
+- Hide area: draw a box on the Original player for the selected words' time;
+  a solid box, blur or pixelate. Turn on Follow movement for a box to track
+  its contents when rendering (requires the vision extra). If tracking detects
+  a loss, that part of the source picture is covered and Review lists the time.
+  Always watch the rendered preview; tracking can miss movement.
+- Follow movement trusts a frame only when the same picture has just moved at
+  the same size and nothing else in the picture looks alike. After a jump cut
+  or a change of size the source picture is covered until the same picture is
+  found again; once a look-alike appears, the rest of that range stays covered.
+- When the vision extra is missing, the message names the Python that lacks
+  it; the README explains how to set it up again after updating the plugin.
+- Both apply to Preview and Final, including with cuts, punch-ins, music and
+  the split layout, and can be set from chat.
+- A thin strip in More tools shows pictures, hidden areas and bleeps in time.
+  Drag a block to move it or an edge to change it; it keeps to whole words,
+  timed pictures never overlap, and a click jumps the player there. Arrow
+  keys move a focused block a word; Shift and arrows change its end.
+- Review says when a bleeped word is still said elsewhere in the video, with
+  the times, so a name bleeped once is not left in by mistake.
+
+### Studio
+- The player stays dark in Hermes's dark theme too, and captions in the
+  Studio player are drawn light on a dark outline in both themes, as they
+  are in the video. The safe-area shading follows.
+- Load video and player messages stay above the layout cards.
+- A project whose video file is gone says so on the player at once, instead
+  of a Load video button that never finishes.
+- The player checks a video file in full once when it starts loading, not again
+  for every 1 MiB piece; long originals start much sooner. Renders, exports
+  and downloads still check the whole file every time.
+- Previews and finals start playing in the Studio on their first pieces while
+  the rest streams in (a thin line shows how much has arrived), and the seek
+  bar knows the length at once. The player reads a fragmented copy made
+  without re-encoding; the files you review and export are unchanged.
+  Previews get a keyframe every two seconds so the first piece is small.
+
 ## 0.2.0 — unreleased
 
 Creator formats, a redesigned Studio and faster renders.

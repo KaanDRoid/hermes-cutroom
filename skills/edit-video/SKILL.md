@@ -46,6 +46,26 @@ Keep answers short: one or two sentences per step, plain words, no JSON.
      `max_pause` shortens silences between kept words, so the video gets
      shorter. `transition` can be `cut`, `crossfade` or `dip`; `push_in: true`
      adds a slow zoom on ranges of 4 s or more.
+   - Split explainer (`settings.layout`, 9:16 only) puts a headline at the
+     top, a panel in the middle and the speaker in a card below. Offer it for
+     explainers and tutorials and ask before turning it on. The panel holds a
+     drawn card (`title`, `number`, `quote`, `bars`, `apps`, `terminal`) or a
+     local picture/video the person named by absolute path; never search the
+     web for pictures. `pictures` change the panel while the person says
+     chosen words (source seconds of those words). Write the headline from the
+     person's own words, two short lines in capitals (about 18 letters each;
+     longer lines shrink to stay clear of the app's buttons). Punch-ins and
+     transitions affect the speaker, not the panel or headline.
+   - Bleeps and hidden areas (`settings.redactions`): when the person names a
+     word to bleep or mute, or something on screen to hide (an email, a key,
+     a name), find the times in the transcript, say them back and ask before
+     saving. Hidden boxes are fractions of the source picture. They stay fixed
+     unless `follow: true` is set; tracking runs at render time and needs the
+     vision extra. Suggest `cover` for anything secret and ask the person to
+     watch the entire rendered range, even if Review reports no lost tracks.
+     Never put a bleeped word in the headline or a card.
+   - Pictures: ask where a picture comes from (their own, a stock site or AI)
+     and save it as `origin`; never guess a credit or a license.
 5. **Preview.** Submit `preview`, poll as above, then submit `qa` for it.
 6. **Show it.** Put the preview on its own line as `MEDIA:<path>`, using
    `media.path` from the completed job exactly as returned. When the job has

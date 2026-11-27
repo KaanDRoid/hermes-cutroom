@@ -1,10 +1,12 @@
 """HTTP contract tests; no model or media runtime is required."""
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 try:
     from fastapi import FastAPI
@@ -50,7 +52,12 @@ class FakeStudio:
         self.job_records[job_id]["status"] = "cancelled"
         return self.job_records[job_id]
 
-    def artifact(self, project_id, kind):
+    def artifact(self, project_id, kind, playing=False):
+        self.calls.append(("artifact", kind, playing))
+        return Path(self.get(project_id)["artifacts"][kind])
+
+    def stream_copy(self, project_id, kind):
+        self.calls.append(("stream_copy", kind))
         return Path(self.get(project_id)["artifacts"][kind])
 
     def review(self, project_id):
@@ -256,6 +263,10 @@ class DashboardTests(unittest.TestCase):
                 (data["offset"], data["next_offset"], data["total"]), (2, 6, 10)
             )
             self.assertEqual(data["mime"], "video/mp4")
+            # Only chunks after the first may skip re-reading the whole file.
+            self.client.get("/projects/p1/media/preview?offset=0&length=4")
+            reads = [call for call in self.studio.calls if call[0] == "artifact"]
+            self.assertEqual(reads[-2:], [("artifact", "preview", True), ("artifact", "preview", False)])
             self.assertEqual(
                 self.client.get(
                     "/projects/p1/media/preview?length=2000000"
@@ -278,7 +289,34 @@ class DashboardTests(unittest.TestCase):
                 "nosniff",
             )
 
+    def test_download_rejects_a_same_size_rewrite_during_a_chunk_read(self):
+        from contextlib import contextmanager
+
+        self.studio.create("input.mp4")
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "captions.srt"
+            path.write_bytes(b"old captions")
+            before = path.stat()
+            self.studio.projects["p1"]["artifacts"]["captions_srt"] = str(path)
+            original_open = Path.open
+
+            @contextmanager
+            def rewriting_open(candidate, *args, **kwargs):
+                with original_open(candidate, *args, **kwargs) as handle:
+                    yield handle
+                if candidate == path and args == ("rb",):
+                    with original_open(path, "wb") as handle:
+                        handle.write(b"new captions")
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+
+            with patch.object(Path, "open", rewriting_open):
+                response = self.client.get("/projects/p1/artifact-data/captions_srt?length=4")
+            self.assertEqual(path.read_bytes(), b"new captions")
+            self.assertEqual(response.status_code, 409, response.text)
+
     def test_artifact_info_returns_only_a_facade_resolved_persisted_file(self):
+        import base64
+
         self.studio.create("input.mp4")
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "captions.srt"
@@ -292,6 +330,30 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(metadata["mime"], "text/plain")
             self.assertEqual(metadata["size"], path.stat().st_size)
             self.assertIsInstance(metadata["version"], str)
+            self.assertNotIn("stream", metadata, "Only videos say how they can be played")
+            video = Path(temporary) / "preview.mp4"
+            video.write_bytes(bytes.fromhex("0000001066747970") + b"isom" + bytes(4) + bytes.fromhex("000000086d6f6f66"))
+            self.studio.projects["p1"]["artifacts"]["preview"] = str(video)
+            stream = self.client.get("/projects/p1/artifact-info/preview").json()["stream"]
+            self.assertEqual(stream, {"fragmented": True, "codecs": None, "duration": None}, "No length when the file cannot be read")
+            chunk = self.client.get("/projects/p1/media/preview?offset=0&length=8&stream=true").json()
+            self.assertEqual(base64.b64decode(chunk["data"]), video.read_bytes()[:8])
+            self.assertIn(("stream_copy", "preview"), self.studio.calls, "Streaming reads the fragmented copy")
+            self.assertEqual(self.client.get("/projects/p1/media/source?stream=true").status_code, 422)
+            # The cache refreshes the copy's time on every use; that must not look like a new file.
+            touched = iter(range(1, 100))
+            plain = self.studio.stream_copy
+
+            def refreshing(project_id, kind):
+                copy = plain(project_id, kind)
+                os.utime(copy, ns=(next(touched) * 10**9, next(touched) * 10**9))
+                return copy
+
+            with patch.object(self.studio, "stream_copy", refreshing):
+                first = self.client.get("/projects/p1/media/preview?offset=0&length=8&stream=true").json()
+                second = self.client.get(f"/projects/p1/media/preview?offset=8&length=8&stream=true&version={first['version']}")
+            self.assertEqual(second.status_code, 200, second.text)
+            self.assertEqual(second.json()["version"], first["version"])
             self.assertEqual(
                 self.client.get("/projects/p1/artifact-info/secret").status_code, 422
             )

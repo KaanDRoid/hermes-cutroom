@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -365,13 +366,13 @@ MEDIA_TYPES = {
 }
 
 
-def artifact_path(studio, project_id, kind):
+def artifact_path(studio, project_id, kind, playing=False):
     canonical = {
         "qa": "quality",
         "captions": "captions_srt",
         "subtitles": "captions_vtt",
     }.get(kind, kind)
-    path = Path(invoke(studio.artifact, project_id, canonical))
+    path = Path(invoke(studio.artifact, project_id, canonical, playing=playing))
     if not path.is_file():
         raise HTTPException(404, "Artifact not found")
     mime = MEDIA_TYPES.get(path.suffix.lower())
@@ -405,6 +406,16 @@ def project_poster(
     return invoke(studio.poster, project_id, at)
 
 
+@router.get("/projects/{project_id}/layout-still")
+def layout_still(
+    project_id: ProjectId,
+    sha256: Annotated[str, Query(pattern=r"^[a-f0-9]{64}$")],
+    studio=Depends(get_studio),
+):
+    """A small JPEG (data URL) of a picture or video already saved in the layout."""
+    return invoke(studio.layout_still, project_id, sha256)
+
+
 @router.post("/projects/{project_id}/chapters/suggest")
 def suggest_chapters(project_id: ProjectId, studio=Depends(get_studio)):
     """Chapter suggestions from the transcript, in program time; nothing is saved."""
@@ -429,13 +440,29 @@ def artifact_info(
     """Persisted, facade-validated paths for the SDK's captured file-save action."""
     path, mime = artifact_path(studio, project_id, kind)
     stat = path.stat()
-    return {
+    info = {
         "path": str(path),
         "name": path.name,
         "mime": mime,
         "size": stat.st_size,
         "version": f"{stat.st_size:x}-{stat.st_mtime_ns:x}",
     }
+    if mime == "video/mp4" and kind in ("preview", "final"):
+        # Renders stream to the player as a fragmented copy, from the first pieces on.
+        media = _module("media")
+        try:
+            copy = Path(invoke(studio.stream_copy, project_id, kind))
+            stream = media.stream_info(copy)
+        except (HTTPException, OSError, ValueError, subprocess.SubprocessError):
+            stream = {"fragmented": False, "codecs": None}
+        if stream["fragmented"]:
+            # Fragments do not carry the length; the seek bar needs it at once.
+            try:
+                stream["duration"] = float(media.probe(path)["duration"])
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+                stream["duration"] = None
+        info["stream"] = stream
+    return info
 
 
 @router.get("/projects/{project_id}/media/{kind}")
@@ -445,16 +472,19 @@ def media_chunk(
     offset: Annotated[int, Query(ge=0)] = 0,
     length: Annotated[int, Query(ge=1, le=1_048_576)] = 1_048_576,
     version: Annotated[str | None, Query(max_length=128)] = None,
+    stream: bool = False,
     studio=Depends(get_studio),
 ):
     """JSON transport for ctx.rest, which does not expose binary responses.
+
+    ``stream`` reads the render's fragmented copy (see ``artifact-info``) for MediaSource playback.
 
     Native grants never enter media URLs. The renderer builds and revokes a
     local Blob URL from bounded, authenticated chunks: files up to 64 MiB load
     when a project opens, larger ones after a click (256 MiB at most).
     """
     return artifact_chunk(
-        studio, project_id, kind, offset, length, version, media_only=True
+        studio, project_id, kind, offset, length, version, media_only=True, stream=stream
     )
 
 
@@ -472,13 +502,21 @@ def artifact_data(
 
 
 def artifact_chunk(
-    studio, project_id, kind, offset, length, version, *, media_only=False
+    studio, project_id, kind, offset, length, version, *, media_only=False, stream=False
 ):
-    path, mime = artifact_path(studio, project_id, kind)
+    if stream:
+        if kind not in ("preview", "final"):
+            raise HTTPException(422, "Only renders can stream")
+        path, mime = Path(invoke(studio.stream_copy, project_id, kind)), "video/mp4"
+    else:
+        # The player's chunks: after the first, the file is re-read only if it visibly changed.
+        path, mime = artifact_path(studio, project_id, kind, playing=media_only and offset > 0)
     if media_only and not mime.startswith(("video/", "image/")):
         raise HTTPException(422, "Artifact is not playable media")
     stat = path.stat()
-    current = f"{stat.st_size:x}-{stat.st_mtime_ns:x}"
+    # A streaming copy is named after the render's SHA-256 and its cache refreshes the file's
+    # time on every use, so its name, not its time, says whether it is the same file.
+    current = f"{stat.st_size:x}-{path.stem if stream else format(stat.st_mtime_ns, 'x')}"
     if version is not None and version != current:
         raise HTTPException(409, "Media changed while loading; reload the player")
     if stat.st_size > 268_435_456:
@@ -487,11 +525,11 @@ def artifact_chunk(
         )
     if offset >= stat.st_size:
         raise HTTPException(416, "Media offset is outside the file")
-    with path.open("rb") as stream:
-        stream.seek(offset)
-        chunk = stream.read(length)
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read(length)
     after = path.stat()
-    if (after.st_size, after.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+    if after.st_size != stat.st_size or (not stream and after.st_mtime_ns != stat.st_mtime_ns):
         raise HTTPException(409, "Media changed while loading; reload the player")
     return {
         "filename": path.name,

@@ -45,8 +45,25 @@ _FONT_PATHS = {
 }
 
 
-def _font_path(family):
-    return next((Path(p) for p in _FONT_PATHS[family] if Path(p).is_file()), None)
+# Bold faces for the layout headline and cards; libass does not embolden a
+# font loaded from fontsdir, so the real bold file is needed.
+_BOLD_FONT_PATHS = {
+    "Arial": (
+        "C:/Windows/Fonts/arialbd.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+        "/Library/Fonts/Arial Bold.ttf",
+    ),
+    "DejaVu Sans": ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",),
+    "Liberation Sans": (
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ),
+}
+
+
+def _font_path(family, bold=False):
+    paths = (_BOLD_FONT_PATHS if bold else _FONT_PATHS)[family]
+    return next((Path(p) for p in paths if Path(p).is_file()), None)
 
 
 def default_brand():
@@ -308,6 +325,9 @@ def _settings(settings):
         "pacing_analysis",
         "pacing_report",
         "pacing_words",
+        "layout",
+        "layout_face",
+        "redactions",
     }
     if settings is None:
         settings = {}
@@ -398,6 +418,27 @@ def _settings(settings):
         reframe.validate_analysis({"faces": analysis["faces"], "scene_cuts": []})
     if result.get("pacing_report") is not None:
         pacing.validate_report(result["pacing_report"])
+    layout = result.get("layout")
+    if layout is not None:
+        from . import layouts
+
+        if not isinstance(layout, dict) or set(layout) != set(layouts.normalize_layout({}, duration=0)):
+            raise ValueError("layout must be normalized by cutroom.layouts")
+        if layout["layout"] == "full":
+            result["layout"] = None
+        elif result["aspect"] != "portrait" and _platform_entry(result) is None:
+            raise ValueError("Split explainer and Picture over you need a 9:16 frame")
+    if result.get("redactions") is not None:
+        from . import redactions
+
+        # Times are checked against the real source in export_video.
+        result["redactions"] = redactions.normalize(result["redactions"], duration=math.inf)
+    face = result.get("layout_face")
+    if face is not None:
+        if not isinstance(face, list) or len(face) != 2:
+            raise ValueError("layout_face is [x, y] in source fractions")
+        for value in face:
+            _number(value, 0, 1)
     words = result.get("pacing_words")
     if words is not None:
         if not isinstance(words, list) or len(words) > pacing.MAX_WORDS:
@@ -577,6 +618,16 @@ def platform_layout(settings, width, height, *, title=None, captions=False):
     )
 
 
+def _drawn_layout(settings, width, height, *, captions=False):
+    """platform_layout with the caption band a split layout really uses."""
+    layout = platform_layout(settings, width, height, captions=captions)
+    if settings.get("layout") is not None and layout is not None:
+        from . import layouts
+
+        layout = layouts.caption_layout(layout, settings["layout"], width / layouts.FRAME[0])
+    return layout
+
+
 def platform_caption_cues(captions, layout, *, measure=None):
     """Split cues so every burned event fits the two-line caption band.
 
@@ -687,6 +738,9 @@ def _font(directory, family):
     if path is None:
         raise ValueError("Requested local font is unavailable: " + family)
     shutil.copyfile(path, directory / "font.ttf")
+    bold = _font_path(family, bold=True)
+    if bold is not None:
+        shutil.copyfile(bold, directory / "font-bold.ttf")
 
 
 def _draw_text(
@@ -1232,7 +1286,7 @@ def _pacing_planner(info, ranges, rate, settings, frames=None):
     choice = settings["pacing"]
     faces = (settings.get("pacing_analysis") or {}).get("faces") or []
 
-    def build(mode, width, height, framing_report, cuts_only=False):
+    def build(mode, width, height, framing_report, cuts_only=False, anchor=None):
         common = dict(
             counts=counts,
             firsts=firsts,
@@ -1289,6 +1343,10 @@ def _pacing_planner(info, ranges, rate, settings, frames=None):
                 **common,
             )
             points = pacing.face_points(faces, scaffold["ranges"], float(fps), grid)
+            if not points and anchor is not None:
+                # No face samples: zoom toward the point the caller frames (a layout's speaker card).
+                # `anchor` is in picture fractions; the plan works in the (turned) source grid.
+                points = [[item["start_frame"], anchor[0] * grid[0], anchor[1] * grid[1]] for item in scaffold["ranges"]]
             report = pacing.plan(
                 choice,
                 window=tuple(grid),
@@ -1475,9 +1533,26 @@ def export_video(
         audio_graph.append(
             "".join(audio_labels) + f"concat=n={len(ranges)}:v=0:a=1[audio]"
         )
+    redaction = None
+    if settings.get("redactions") is not None:
+        from . import redactions
+
+        redaction = redactions.normalize(settings["redactions"], duration=info["duration"] + 1)
+    bleep = redactions.audio_filter(redaction, int(audio_stream.get("channels") or 2)) if redaction else None
+    if bleep and info["has_audio"]:
+        # Every read of the source sound gets the bleeped copy (render, mix and loudness).
+        graph[:] = redactions.redirect(graph, "[0:a:0]", bleep, "abl")
+        audio_graph[:] = redactions.redirect(audio_graph, "[0:a:0]", bleep, "abl")
     captions = _captions(captions, duration)
     width, height = _dimensions(info, settings)
     layout = platform_layout(settings, width, height, captions=bool(captions))
+    layout_settings = settings.get("layout")
+    if layout_settings is not None:
+        from . import layouts
+
+        if abs(width * 16 - height * 9) > 16:
+            raise ValueError("Split explainer and Picture over you need a 9:16 frame")
+        layout = layouts.caption_layout(layout, layout_settings, width / layouts.FRAME[0])
     from cutroom import captions as animated_captions
 
     measure = animated_captions.Measurer(_font_path(settings["brand"]["font"]))
@@ -1509,6 +1584,8 @@ def export_video(
         # Reframing changes only the picture, never the trim/concat audio timeline.
         framing_report = None
         mode = settings.get("framing", "fit")
+        if layout_settings is not None:
+            mode, filters = "layout", []
         if mode == "blur_fill":
             cw, ch = _content_size(info["display_aspect_ratio"], width, height)
             background_w = (
@@ -1554,7 +1631,16 @@ def export_video(
                 ]
         pacing_report = None
         if pacing_plan is not None:
-            pacing_report = pacing_plan(mode, width, height, framing_report)
+            # A layout crops its speaker card from the whole source picture, so pacing zooms and
+            # fades that picture: punch-ins and transitions show in the card, the panel stays put.
+            if mode == "layout":
+                source_video = _source_video(info)
+                pacing_report = pacing_plan(
+                    "fit", source_video["width"], source_video["height"], None,
+                    anchor=tuple(settings.get("layout_face") or (0.5, 0.4)),
+                )
+            else:
+                pacing_report = pacing_plan(mode, width, height, framing_report)
             if paced:
                 cropped = framing_report is not None
                 lines, pieces = pacing.build_graph(
@@ -1577,8 +1663,27 @@ def export_video(
                 if cropped:
                     framing_report["expression_pieces"] = pieces
         brand = settings["brand"]
-        if settings["title"] or settings["lower_third"] or captions:
+        if settings["title"] or settings["lower_third"] or captions or layout_settings is not None:
             _font(directory, brand["font"])
+        layout_plan = None
+        if layout_settings is not None:
+            layout_plan = layouts.build(
+                layout_settings,
+                width=width,
+                height=height,
+                ranges=ranges,
+                program=program,
+                font=brand["font"],
+                font_path=_font_path(brand["font"], bold=True) or _font_path(brand["font"]),
+                source_size=(_source_video(info)["width"], _source_video(info)["height"]),
+                face=tuple(settings["layout_face"]) if settings.get("layout_face") else None,
+                zone=platforms.profile(settings.get("platform", "custom"))["safe_zone"],
+            )
+            if layout_plan["waves"] and not info["has_audio"]:
+                raise ValueError("A sound wave card needs a video with sound; this one has no sound")
+            (directory / "layout.ass").write_text(layout_plan["script"], encoding="utf-8-sig")
+            filters.append("ass=filename=layout.ass:fontsdir=.")
+            effects.append("layout")
         if settings["title"] and layout is not None:
             filters.append(
                 _platform_title(
@@ -1776,8 +1881,31 @@ def export_video(
             )
             if framing_report is not None:
                 framing_report["output_frames"] = output_frames
+        layout_inputs = []
+        wave = None
+        if layout_plan is not None and layout_plan["waves"]:
+            # The wave shows the voice as it is heard: after cuts and bleeps, before music.
+            wave = {**layouts.wave_strip(layout_plan, program), "path": "wave.png"}
+            (directory / "wave.txt").write_text(";\n".join(audio_graph + [layouts.wave_filter(layout_plan, wave)]), encoding="utf-8")
+            _render_graph(
+                ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-n", "-protocol_whitelist", "file", "-i", str(source),
+                 "-/filter_complex", "wave.txt", "-map", "[pic]", "-frames:v", "1", "wave.png"],
+                cwd=directory,
+                timeout=settings["timeout"],
+            )
+        if layout_plan is not None:
+            lines, layout_inputs = layouts.graph(
+                layout_plan,
+                width=width,
+                height=height,
+                rate=(timed_rate if timed is not None and timed_rate else rate) or "30/1",
+                program=program,
+                first_input=2 if mix_path else 1,
+                wave=wave,
+            )
+            graph.extend(lines)
         graph.append(
-            ("[framed]" if mode == "blur_fill" else "[joined]")
+            ("[framed]" if mode == "blur_fill" else "[laid]" if mode == "layout" else "[joined]")
             + ",".join(filters)
             + "[video]"
         )
@@ -1794,6 +1922,7 @@ def export_video(
             "-i",
             str(source),
             *(["-protocol_whitelist", "file", "-i", str(mix_path)] if mix_path else []),
+            *layout_inputs,
             "-filter_complex_threads",
             "2",
             "-/filter_complex",
@@ -1831,8 +1960,32 @@ def export_video(
         if rate and rate == video_stream.get("avg_frame_rate") and rate != "0/0":
             # Constant-rate sources: keep the final frame's duration in the container.
             args += ["-fps_mode", "cfr", "-r", rate]
+        if settings["preset"] == "preview":
+            # A keyframe every two seconds: the player's streaming copy (media.streaming_copy)
+            # can then start on a small first piece. The preview itself stays a plain MP4.
+            args += ["-force_key_frames", "expr:gte(t,n_forced*2)"]
         if output.suffix.lower() in (".mp4", ".mov"):
             args += ["-movflags", "+faststart"]
+        follow_paths = {}
+        if redaction:
+            from . import tracking
+
+            for index, item in enumerate(redaction["hidden"]):
+                if item.get("follow"):
+                    follow_paths[index] = tracking.follow_box(source, item["box"], item["start"], item["end"], at=item.get("at"))
+        chain = (
+            # The graph reads [0:v:0] turned upright, as the box was drawn: use that size.
+            redactions.video_chain(
+                redaction,
+                *((int(video_stream["height"]), int(video_stream["width"])) if _quarter_turn(video_stream)
+                  else (int(video_stream["width"]), int(video_stream["height"]))),
+                float(Fraction(rate)) if rate and rate != "0/0" else 30.0, paths=follow_paths,
+            )
+            if redaction
+            else None
+        )
+        if chain:
+            graph[:] = redactions.redirect(graph, "[0:v:0]", chain, "vhd")
         delivered_peak, ceiling = None, None
         normalized = has_audio and (settings["normalize_audio"] or bool(mix_path))
         for attempt in range(DELIVERY_PEAK_ATTEMPTS):
@@ -1879,7 +2032,27 @@ def export_video(
             }
         )
     source_video = _source_video(info)
-    content, factor = reframe.content_upscale(source_video, width, height, mode)
+    if redaction:
+        extra["redactions"] = {
+            "bleeps": sum(b["mode"] == "bleep" for b in redaction["bleeps"]),
+            "mutes": sum(b["mode"] == "mute" for b in redaction["bleeps"]),
+            "hidden": len(redaction["hidden"]),
+        }
+        if follow_paths:
+            # Source seconds where a followed box could not be trusted; the whole picture is covered there.
+            extra["redactions"]["followed"] = len(follow_paths)
+            extra["redactions"]["lost"] = [
+                {"index": index, "start": start, "end": end}
+                for index, path in sorted(follow_paths.items())
+                for start, end in path["lost"]
+            ]
+    if layout_plan is not None:
+        crop, box = layout_plan["speaker"]["crop"], layout_plan["speaker"]["box"]
+        factor = max(box["w"] / crop["w"], box["h"] / crop["h"])
+        content = [box["w"], box["h"]]
+        extra["layout"] = {**layout_plan["report"], "speaker_crop": crop, "speaker_box": box, "speaker_upscale_factor": factor}
+    else:
+        content, factor = reframe.content_upscale(source_video, width, height, mode)
     if framing_report is not None:
         if factor > 1.0001:
             framing_report["warnings"].append(
@@ -1899,7 +2072,9 @@ def export_video(
         "output": str(output),
         "preset": settings["preset"],
         "aspect": settings["aspect"],
-        "fit": "pad"
+        "fit": "layout"
+        if mode == "layout"
+        else "pad"
         if mode == "fit"
         else "blur_fill"
         if mode == "blur_fill"
@@ -2574,7 +2749,7 @@ def quality_report(
     layout = None
     try:
         if entry is not None:
-            layout = platform_layout(
+            layout = _drawn_layout(
                 settings, info["width"], info["height"], captions=bool(captions)
             )
         # Frame-aligned renders can end up to half a frame before the edited
@@ -2642,7 +2817,7 @@ def quality_report(
     )
     if entry is not None:
         try:
-            layout = platform_layout(
+            layout = _drawn_layout(
                 settings, info["width"], info["height"], captions=bool(captions)
             )
             findings = safe_zone_findings(
